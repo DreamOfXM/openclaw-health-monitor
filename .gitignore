@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/*.log
+change-logs/*.json
+
+# Metrics
+metrics/*.json
+
+# Local config / secrets
+config.local.conf
+config/webhook.local.txt
+alerts.json
+versions.json
+data/*.db
+snapshots/
+
+# Models
+models/*.gguf
+models/*.tar.gz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
