@@ -18,7 +18,7 @@ from flask import Flask, jsonify, render_template_string, request
 
 from typing import Optional
 
-from monitor_config import load_config as load_shared_config, save_local_config_value, sanitize_config_for_ui
+from monitor_config import SECRET_KEYS, load_config as load_shared_config, save_local_config_value, sanitize_config_for_ui
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
 
@@ -106,6 +106,71 @@ def list_snapshots(limit: int = 20) -> list[dict]:
                 pass
         snapshots.append(item)
     return snapshots
+
+
+def stringify_config_value(key: str, value) -> str:
+    """Render a config value for history without exposing secrets."""
+    if key in SECRET_KEYS:
+        return "已配置" if value else "未配置"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value in (None, ""):
+        return "(empty)"
+    return str(value)
+
+
+def persist_versions(versions: dict) -> None:
+    """Persist version metadata to sqlite and legacy json."""
+    STORE.save_versions(versions)
+    versions_file = BASE_DIR / "versions.json"
+    with open(versions_file, "w") as handle:
+        json.dump(versions, handle, indent=2, ensure_ascii=False)
+
+
+def append_version_history(bucket: str, entry: dict, limit: int = 50) -> None:
+    """Append a versioned history entry to the local metadata store."""
+    versions = load_versions()
+    versions.setdefault("history", [])
+    versions.setdefault("config_history", [])
+    versions.setdefault("restart_history", [])
+    versions.setdefault(bucket, [])
+    versions[bucket].append(entry)
+    versions[bucket] = versions[bucket][-limit:]
+    persist_versions(versions)
+
+
+def apply_config_change(key: str, value: str) -> tuple[bool, dict]:
+    """Save a config change and return a structured history record."""
+    before_config = load_config()
+    before_value = before_config.get(key)
+    snapshot_dir = SNAPSHOTS.create_snapshot("before-config-change")
+    if not save_local_config_value(BASE_DIR, key, value):
+        return False, {}
+
+    after_config = load_config()
+    after_value = after_config.get(key)
+    current_version = get_version()
+    details = {
+        "key": key,
+        "before": stringify_config_value(key, before_value),
+        "after": stringify_config_value(key, after_value),
+        "changed": before_value != after_value,
+        "gateway_version": current_version,
+        "snapshot": snapshot_dir.name if snapshot_dir else "",
+        "restart_required": True,
+    }
+    append_version_history(
+        "config_history",
+        {
+            "time": datetime.now().isoformat(),
+            "key": key,
+            "before": details["before"],
+            "after": details["after"],
+            "gateway_version": current_version,
+            "snapshot": details["snapshot"],
+        },
+    )
+    return True, details
 
 
 def backup_change_logs():
@@ -532,11 +597,12 @@ def save_config(key: str, value: str) -> bool:
 
 def load_versions() -> dict:
     """加载版本历史"""
-    versions_file = BASE_DIR / "versions.json"
-    if versions_file.exists():
-        with open(versions_file) as f:
-            return json.load(f)
-    return {"current": None, "history": []}
+    versions = STORE.load_versions(BASE_DIR / "versions.json")
+    versions.setdefault("current", None)
+    versions.setdefault("history", [])
+    versions.setdefault("config_history", [])
+    versions.setdefault("restart_history", [])
+    return versions
 
 
 # ========== API 端点 ==========
@@ -670,7 +736,7 @@ def index():
             <h1>🛡️ OpenClaw 健康监控中心</h1>
             <div class="actions">
                 <button class="btn" onclick="location.reload()">🔄 刷新</button>
-                <button class="btn btn-primary" onclick="restartGateway()">🔁 重启 Gateway</button>
+                <button class="btn btn-primary" onclick="restartGateway('manual_restart', 'dashboard_button', event)">🔁 重启 Gateway</button>
                 <button class="btn" style="background:#dc2626" onclick="emergencyRecover()">🚨 急救</button>
             </div>
         </header>
@@ -797,10 +863,10 @@ def index():
                 <button class="btn" onclick="loadChanges()">🔄 刷新</button>
             </div>
             <table>
-                <thead><tr><th>日期</th><th>时间</th><th>类型</th><th>详情</th></tr></thead>
-                <tbody id="change-logs"></tbody>
-            </table>
-        </div>
+                    <thead><tr><th>日期</th><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>
+                    <tbody id="change-logs"></tbody>
+                </table>
+            </div>
     </div>
 
     <div id="tab-snapshots" class="tab-content">
@@ -897,7 +963,7 @@ def index():
                             <div class="diagnose-title">${d.title}</div>
                             <div class="diagnose-msg">${d.message}</div>
                         </div>
-                        ${d.action ? `<button class="diagnose-action" onclick="restartGateway()">${d.action}</button>` : ''}
+                        ${d.action ? `<button class="diagnose-action" onclick="restartGateway('diagnostic_action', 'dashboard_diagnosis', event)">${d.action}</button>` : ''}
                     </div>
                 `).join('');
                 
@@ -926,7 +992,9 @@ def index():
                 document.getElementById('auto-update-toggle').checked = autoUpdate;
                 document.getElementById('auto-update-status').textContent = autoUpdate ? '已开启' : '已关闭';
                 document.getElementById('current-version').textContent = data.version.current || 'unknown';
-                document.getElementById('version-history').textContent = data.version.history ? data.version.history.length + ' 个历史版本' : '无';
+                const versionCount = data.version.history ? data.version.history.length : 0;
+                const configChangeCount = data.version.config_history ? data.version.config_history.length : 0;
+                document.getElementById('version-history').textContent = `代码版本: ${versionCount} | 配置变更: ${configChangeCount}`;
                 
                 const dingtalkWebhook = data.config.DINGTALK_WEBHOOK;
                 const feishuWebhook = data.config.FEISHU_WEBHOOK;
@@ -960,22 +1028,31 @@ def index():
             }
         }
         
-        async function restartGateway() {
-            const btn = event.target;
-            btn.disabled = true;
-            btn.textContent = '重启中...';
+        async function restartGateway(reason = 'manual_restart', requestedBy = 'dashboard', evt = null) {
+            const btn = evt ? evt.target : null;
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '重启中...';
+            }
             try {
-                const res = await fetch('/api/restart', {method: 'POST'});
+                const res = await fetch('/api/restart', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({reason, requested_by: requestedBy})
+                });
                 const data = await res.json();
-                // 3秒后自动刷新数据
                 setTimeout(() => {
                     loadData();
-                    btn.disabled = false;
-                    btn.textContent = '🔁 重启 Gateway';
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = '🔁 重启 Gateway';
+                    }
                 }, 3000);
             } catch(e) {
-                btn.disabled = false;
-                btn.textContent = '🔁 重启 Gateway';
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '🔁 重启 Gateway';
+                }
                 alert('重启请求失败');
             }
         }
@@ -1003,6 +1080,8 @@ def index():
                 if (!data.success) {
                     alert(data.message);
                     checkbox.checked = !value;
+                } else if (confirm('配置已更新。是否现在重启 Gateway 使变更生效？')) {
+                    restartGateway('config_change:AUTO_UPDATE', 'config_toggle');
                 }
             } catch(e) {
                 alert('配置保存失败');
@@ -1022,7 +1101,12 @@ def index():
                 });
                 const data = await res.json();
                 alert(data.message);
-                if (data.success) loadData();
+                if (data.success) {
+                    loadData();
+                    if (confirm('配置已更新。是否现在重启 Gateway 使变更生效？')) {
+                        restartGateway('config_change:' + key, 'config_prompt');
+                    }
+                }
             } catch(e) {
                 alert('配置保存失败');
             }
@@ -1059,12 +1143,32 @@ def index():
                     return;
                 }
                 tbody.innerHTML = data.changes.reverse().map(c => {
-                    const typeIcon = {'restart': '🔁', 'config': '⚙️', 'recover': '🚨', 'update': '🔄', 'version': '📋'}[c.type] || '📝';
-                    return `<tr><td>${c.date || ''}</td><td>${c.time}</td><td>${typeIcon} ${c.type}</td><td>${c.message}</td></tr>`;
+                    const typeIcon = {'restart': '🔁', 'config': '⚙️', 'recover': '🚨', 'update': '🔄', 'version': '📋', 'snapshot': '📦'}[c.type] || '📝';
+                    return `<tr><td>${c.date || ''}</td><td>${c.time}</td><td>${typeIcon} ${c.type}</td><td>${c.message}</td><td>${formatChangeDetails(c)}</td></tr>`;
                 }).join('');
             } catch(e) {
                 console.error(e);
             }
+        }
+
+        function formatChangeDetails(change) {
+            const details = change.details || {};
+            if (change.type === 'config') {
+                return `配置项: ${details.key || '-'} | 旧值: ${details.before || '-'} | 新值: ${details.after || '-'} | 版本: ${details.gateway_version || '-'} | 快照: ${details.snapshot || '-'}`;
+            }
+            if (change.type === 'restart') {
+                return `原因: ${details.reason || '未记录'} | 来源: ${details.requested_by || '-'} | 版本: ${details.gateway_version || '-'} | PID: ${details.old_pid || '-'} -> ${details.new_pid || '-'}`;
+            }
+            if (change.type === 'recover') {
+                return `快照: ${details.snapshot || '-'} | 原因: ${details.reason || '恢复操作'} | 版本: ${details.gateway_version || '-'}`;
+            }
+            if (change.type === 'version') {
+                return `提交: ${details.commit || details.to || '-'} | 来源: ${details.from || '-'}`;
+            }
+            if (change.type === 'snapshot') {
+                return `快照: ${details.snapshot || '-'} | 标签: ${details.label || '-'}`;
+            }
+            return JSON.stringify(details);
         }
 
         async function loadSnapshots() {
@@ -1152,7 +1256,12 @@ def api_status():
         "gateway_healthy": gateway_healthy,
         "sessions": sessions,
         "errors": errors,
-        "version": {"current": version, "history": version_history.get("history", [])},
+        "version": {
+            "current": version,
+            "history": version_history.get("history", []),
+            "config_history": version_history.get("config_history", []),
+            "restart_history": version_history.get("restart_history", []),
+        },
         "config": safe_config,
         "diagnoses": diagnoses,
         "top_processes": top_processes
@@ -1167,6 +1276,10 @@ def api_status():
 def api_restart():
     """重启 Gateway"""
     try:
+        payload = request.get_json(silent=True) or {}
+        reason = str(payload.get("reason", "manual_restart")).strip() or "manual_restart"
+        requested_by = str(payload.get("requested_by", "dashboard")).strip() or "dashboard"
+        gateway_version = get_version()
         old_pid = get_listener_pid()
         if old_pid is not None:
             subprocess.run(f"kill {old_pid}", shell=True, check=False)
@@ -1187,8 +1300,25 @@ def api_restart():
         old_pid_str = str(old_pid) if old_pid is not None else None
         
         if new_pid and new_pid != old_pid_str:
-            record_change("restart", f"Gateway 重启成功 (PID: {old_pid_str} → {new_pid})",
-                         {"old_pid": old_pid_str, "new_pid": new_pid})
+            details = {
+                "old_pid": old_pid_str,
+                "new_pid": new_pid,
+                "reason": reason,
+                "requested_by": requested_by,
+                "gateway_version": gateway_version,
+            }
+            record_change("restart", f"Gateway 重启成功 (PID: {old_pid_str} → {new_pid})", details)
+            append_version_history(
+                "restart_history",
+                {
+                    "time": datetime.now().isoformat(),
+                    "reason": reason,
+                    "requested_by": requested_by,
+                    "gateway_version": gateway_version,
+                    "old_pid": old_pid_str,
+                    "new_pid": new_pid,
+                },
+            )
             return jsonify({
                 "success": True, 
                 "message": f"Gateway 已重启\n旧PID: {old_pid_str or '无'}\n新PID: {new_pid}",
@@ -1236,7 +1366,12 @@ def api_emergency_recover():
                 start_new_session=True,
             )
 
-        record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
+        details = {
+            "snapshot": snapshot_dir.name,
+            "reason": "emergency_recover",
+            "gateway_version": get_version(),
+        }
+        record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", details)
         return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -1265,7 +1400,7 @@ def api_snapshot_create():
         snapshot_dir = SNAPSHOTS.create_snapshot(label)
         if snapshot_dir is None:
             return jsonify({"success": False, "message": "没有可快照的配置文件"})
-        record_change("snapshot", f"手动创建配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
+        record_change("snapshot", f"手动创建配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name, "label": label})
         return jsonify({"success": True, "message": f"已创建配置快照: {snapshot_dir.name}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -1300,7 +1435,12 @@ def api_snapshot_restore():
                 start_new_session=True,
             )
 
-        record_change("recover", f"恢复指定配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
+        details = {
+            "snapshot": snapshot_dir.name,
+            "reason": "manual_snapshot_restore",
+            "gateway_version": get_version(),
+        }
+        record_change("recover", f"恢复指定配置快照并重启: {snapshot_dir.name}", details)
         return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -1317,8 +1457,14 @@ def api_config():
         if not key:
             return jsonify({"success": False, "message": "缺少配置键"})
         
-        if save_config(key, str(value)):
-            return jsonify({"success": True, "message": "配置已更新"})
+        ok, details = apply_config_change(key, str(value))
+        if ok:
+            record_change(
+                "config",
+                f"配置已更新: {key}",
+                details,
+            )
+            return jsonify({"success": True, "message": "配置已更新，重启后生效", "details": details})
         else:
             return jsonify({"success": False, "message": "保存配置失败"})
     except Exception as e:
