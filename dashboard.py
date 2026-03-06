@@ -29,6 +29,7 @@ CONFIG_FILE = BASE_DIR / "config.conf"
 LOCAL_CONFIG_FILE = BASE_DIR / "config.local.conf"
 STORE = MonitorStateStore(BASE_DIR)
 SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
+GUARDIAN_PID_FILE = BASE_DIR / "logs" / "guardian.pid"
 
 
 def get_change_log_path() -> Path:
@@ -299,6 +300,55 @@ def get_process_info(name: str) -> Optional[dict]:
     return None
 
 
+def get_process_info_by_pid(pid: int) -> Optional[dict]:
+    """通过 PID 获取进程信息，避免模糊 grep 带来的误判。"""
+    try:
+        result = subprocess.run(
+            f"ps -p {pid} -o pid=,%cpu=,%mem=,command=",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        line = result.stdout.strip()
+        if not line:
+            return None
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            return None
+        return {
+            "pid": int(parts[0]),
+            "cpu": float(parts[1]),
+            "mem": float(parts[2]),
+            "cmd": parts[3][:100],
+        }
+    except Exception:
+        return None
+
+
+def load_pid_file(pid_file: Path) -> Optional[int]:
+    """读取 PID 文件并确认目标进程仍然存活。"""
+    try:
+        raw = pid_file.read_text().strip()
+        if not raw:
+            return None
+        pid = int(raw)
+        os.kill(pid, 0)
+        return pid
+    except Exception:
+        return None
+
+
+def get_guardian_process_info() -> Optional[dict]:
+    """优先通过 guardian.pid 获取状态，找不到再回退到精确命令匹配。"""
+    pid = load_pid_file(GUARDIAN_PID_FILE)
+    if pid is not None:
+        info = get_process_info_by_pid(pid)
+        if info and "guardian.py" in info.get("cmd", ""):
+            return info
+    return get_process_info(r"[g]uardian\.py")
+
+
 def get_listener_pid(port: int = 18789) -> Optional[int]:
     """返回监听指定端口的 PID。"""
     try:
@@ -450,7 +500,7 @@ def analyze_sessions(minutes: int = 5) -> dict:
                     if msg_start > 0:
                         msg = line[msg_start+2:].strip()[:50]
                 
-                # 格式3: 飞书发送的消息 "叶子: 内容"
+                # 格式3: 飞书发送的消息 "助手名: 内容"
                 elif "feishu[default]:" in line.lower() and ": " in line:
                     idx = line.lower().find("feishu[default]:")
                     if idx >= 0:
@@ -1442,7 +1492,7 @@ def api_status():
     """获取状态 API"""
     metrics = get_system_metrics()
     gateway_process = get_process_info("openclaw.*gateway")
-    guardian_process = get_process_info("guardian")
+    guardian_process = get_guardian_process_info()
     gateway_healthy = check_gateway_health()
     sessions = analyze_sessions(5)
     errors = get_error_logs(20)
