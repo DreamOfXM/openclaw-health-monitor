@@ -138,6 +138,7 @@ REPO_DIR="\${OPENCLAW_MONITOR_DIR:-\$HOME/openclaw-health-monitor}"
 RUNTIME="\$REPO_DIR/desktop_runtime.sh"
 NATIVE_BIN="\$APP_DIR/Contents/MacOS/${exec_name}-bin"
 WAIT_URL="http://127.0.0.1:8080/api/status"
+APP_CACHE_IDS=("com.pake.ef301f" "com.pake.e2f660")
 
 cleanup() {
     if [ -x "\$RUNTIME" ]; then
@@ -159,6 +160,10 @@ fi
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 export NO_PROXY=127.0.0.1,localhost
 export no_proxy=127.0.0.1,localhost
+
+for app_id in "\${APP_CACHE_IDS[@]}"; do
+    rm -rf "\$HOME/Library/Caches/\$app_id/WebKit" "\$HOME/Library/Caches/\$app_id/.cookies" "\$HOME/Library/WebKit/\$app_id" >/dev/null 2>&1 || true
+done
 
 for _ in {1..20}; do
     if env NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost curl --noproxy '*' -fsS "\$WAIT_URL" >/dev/null 2>&1; then
