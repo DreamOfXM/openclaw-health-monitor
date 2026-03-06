@@ -227,7 +227,7 @@
           <div class="badge">Desktop Prototype</div>
           <h1>OpenClaw Health Monitor</h1>
           <p class="lede">
-            这个桌面壳会优先检查本机 Dashboard 是否已经启动。检测到本地服务后，会自动跳转到监控中心。
+            这个桌面壳会在启动时自动拉起本机 Guardian 和 Dashboard，退出 App 时再回收本次由桌面壳启动的后台进程。
           </p>
           <div class="actions">
             <button class="primary" id="retryBtn">重新检测</button>
@@ -241,15 +241,15 @@
         <h2>首次启动</h2>
         <ol>
           <li>先在本机准备好 OpenClaw Health Monitor 仓库。</li>
-          <li>运行 `make start` 或 `./start.sh` 启动本地 Guardian 和 Dashboard。</li>
-          <li>桌面 App 会自动探测 `127.0.0.1:8080-8089`，找到后自动进入监控中心。</li>
+          <li>双击 App，桌面壳会尝试自动启动本地 Guardian 和 Dashboard。</li>
+          <li>桌面 App 会自动探测 `127.0.0.1:8080-8089`，找到后进入监控中心。</li>
         </ol>
       </section>
 
       <section class="command">
         <h2>常用命令</h2>
         <pre>cd ~/openclaw-health-monitor
-make start
+./desktop_runtime.sh status-json
 make status
 make verify</pre>
         <div class="status-card" style="margin-top: 18px;">

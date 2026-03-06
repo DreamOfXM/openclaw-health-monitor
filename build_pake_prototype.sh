@@ -119,6 +119,69 @@ create_fallback_dmg() {
     echo "Created fallback dmg: $dmg_path"
 }
 
+install_desktop_wrapper() {
+    local app_bundle="$1"
+    local plist="$app_bundle/Contents/Info.plist"
+    if [ ! -f "$plist" ]; then
+        return 1
+    fi
+    local exec_name
+    exec_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null || true)"
+    if [ -z "$exec_name" ]; then
+        return 1
+    fi
+    local macos_dir="$app_bundle/Contents/MacOS"
+    local original_exec="$macos_dir/$exec_name"
+    local wrapped_exec="$macos_dir/${exec_name}-bin"
+    if [ ! -f "$original_exec" ]; then
+        return 1
+    fi
+    if [ ! -f "$wrapped_exec" ]; then
+        mv "$original_exec" "$wrapped_exec"
+    fi
+    cat > "$original_exec" <<EOF
+#!/bin/bash
+set -euo pipefail
+
+APP_DIR="\$(cd "\$(dirname "\$0")/../.." && pwd)"
+REPO_DIR="\${OPENCLAW_MONITOR_DIR:-\$HOME/openclaw-health-monitor}"
+RUNTIME="\$REPO_DIR/desktop_runtime.sh"
+NATIVE_BIN="\$APP_DIR/Contents/MacOS/${exec_name}-bin"
+STARTED_GUARDIAN=0
+STARTED_DASHBOARD=0
+
+cleanup() {
+    if [ "\$STARTED_DASHBOARD" = "1" ] && [ -x "\$RUNTIME" ]; then
+        "\$RUNTIME" stop dashboard >/dev/null 2>&1 || true
+    fi
+    if [ "\$STARTED_GUARDIAN" = "1" ] && [ -x "\$RUNTIME" ]; then
+        "\$RUNTIME" stop guardian >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+if [ ! -x "\$RUNTIME" ]; then
+    osascript -e 'display alert "OpenClaw Health Monitor" message "Missing ~/openclaw-health-monitor/desktop_runtime.sh. Install the monitor repository first." as critical'
+    exit 1
+fi
+
+if ! "\$RUNTIME" is-running guardian >/dev/null 2>&1; then
+    "\$RUNTIME" start guardian >/dev/null
+    STARTED_GUARDIAN=1
+fi
+
+if ! "\$RUNTIME" is-running dashboard >/dev/null 2>&1; then
+    "\$RUNTIME" start dashboard >/dev/null
+    STARTED_DASHBOARD=1
+fi
+
+"\$NATIVE_BIN" "\$@"
+exit \$?
+EOF
+    chmod +x "$original_exec"
+    echo "Installed desktop lifecycle wrapper into: $app_bundle"
+}
+
 echo "Building Pake prototype from local onboarding page"
 echo "App name: $APP_NAME"
 echo "Icon path: $ICON_PATH"
@@ -143,11 +206,15 @@ build_status=0
 "${BASE_CMD[@]}" ${PAKE_ARGS:-} || build_status=$?
 
 if copy_latest_artifacts; then
-    if [ ! -f "$OUTPUT_DIR/${APP_NAME}.dmg" ]; then
-        create_fallback_dmg || true
-    fi
     if [ -f "$OUTPUT_DIR/${APP_NAME}.dmg" ]; then
         sync_app_from_output_dmg || true
+    fi
+    if [ -d "$OUTPUT_DIR/${APP_NAME}.app" ]; then
+        install_desktop_wrapper "$OUTPUT_DIR/${APP_NAME}.app" || true
+        rm -f "$OUTPUT_DIR/${APP_NAME}.dmg"
+        create_fallback_dmg || true
+    elif [ ! -f "$OUTPUT_DIR/${APP_NAME}.dmg" ]; then
+        create_fallback_dmg || true
     fi
     if [ "$build_status" -ne 0 ]; then
         echo "Pake build reported an error, but usable artifacts were copied to $OUTPUT_DIR." >&2

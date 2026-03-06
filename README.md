@@ -188,7 +188,7 @@ cd ~/openclaw-health-monitor
 这个原型的边界是：
 
 - 把仓库内置的本地引导页包装成 macOS 桌面壳
-- App 启动后会轮询本地 `127.0.0.1:8080-8089` 并自动跳转到 Dashboard
+- App 启动后会优先尝试拉起本地 Guardian 和 Dashboard，再轮询 `127.0.0.1:8080-8089`
 - 不会把 Guardian、Gateway、Python 运行时一起打进 App
 - 机器上需要有 `pnpm` 和 Rust toolchain
 
@@ -221,9 +221,9 @@ dist/pake/
 
 桌面 App 运行时行为：
 
-- 如果本地 Dashboard 已运行，会自动进入监控中心
-- 如果本地 Dashboard 还没启动，会显示引导页和常用命令
-- 当 Dashboard 启动后，桌面 App 会自动跳转
+- 如果本地 Guardian 或 Dashboard 还没运行，桌面壳会尝试自动启动
+- 当本地 Dashboard 可用后，桌面 App 会自动跳转到监控中心
+- 退出桌面 App 时，会回收本次由桌面壳拉起的 Guardian / Dashboard 进程
 
 如果本机还没有 Rust，可以先安装：
 

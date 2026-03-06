@@ -3,6 +3,7 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 GUARDIAN_PID_FILE="$BASE_DIR/logs/guardian.pid"
+DASHBOARD_PID_FILE="$BASE_DIR/logs/dashboard.pid"
 
 find_pid() {
     local pattern="$1"
@@ -31,7 +32,16 @@ if [ -z "$guardian_pid" ]; then
     guardian_pid="$(find_pid "$BASE_DIR/guardian.py")"
 fi
 
-dashboard_pid="$(find_pid "$BASE_DIR/dashboard.py")"
+dashboard_pid=""
+if [ -f "$DASHBOARD_PID_FILE" ]; then
+    dashboard_pid="$(cat "$DASHBOARD_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$dashboard_pid" ] && ! kill -0 "$dashboard_pid" 2>/dev/null; then
+        dashboard_pid=""
+    fi
+fi
+if [ -z "$dashboard_pid" ]; then
+    dashboard_pid="$(find_pid "$BASE_DIR/dashboard.py")"
+fi
 gateway_pid="$(pgrep -f "openclaw.*gateway" 2>/dev/null | head -n 1 || true)"
 dashboard_url="$(discover_dashboard_url || true)"
 

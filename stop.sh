@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$BASE_DIR/logs"
 GUARDIAN_PID_FILE="$LOG_DIR/guardian.pid"
+DASHBOARD_PID_FILE="$LOG_DIR/dashboard.pid"
 
 stop_pid() {
     local pid="$1"
@@ -48,10 +49,17 @@ if [ "$guardian_stopped" -eq 0 ]; then
     fi
 fi
 
-dashboard_pid="$(find_first_pid "$BASE_DIR/dashboard.py")"
+dashboard_pid=""
+if [ -f "$DASHBOARD_PID_FILE" ]; then
+    dashboard_pid="$(cat "$DASHBOARD_PID_FILE" 2>/dev/null || true)"
+fi
+if [ -z "$dashboard_pid" ]; then
+    dashboard_pid="$(find_first_pid "$BASE_DIR/dashboard.py")"
+fi
 if stop_pid "$dashboard_pid" "Dashboard"; then
     dashboard_stopped=1
 fi
+rm -f "$DASHBOARD_PID_FILE"
 
 if [ "$guardian_stopped" -eq 0 ]; then
     echo "Guardian not running."
