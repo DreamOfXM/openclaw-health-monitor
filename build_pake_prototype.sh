@@ -8,7 +8,7 @@ ICON_PATH="${ICON_PATH:-$BASE_DIR/assets/icons/openclaw_lobster_armor.png}"
 WINDOW_WIDTH="${WINDOW_WIDTH:-1480}"
 WINDOW_HEIGHT="${WINDOW_HEIGHT:-960}"
 HIDE_TITLE_BAR="${HIDE_TITLE_BAR:-1}"
-LOCAL_ENTRY="${LOCAL_ENTRY:-$BASE_DIR/assets/pake/index.html}"
+ENTRY_URL="${ENTRY_URL:-http://127.0.0.1:8080}"
 STARTED_DASHBOARD=0
 STARTED_DASHBOARD_PID=""
 
@@ -34,14 +34,6 @@ discover_dashboard_url() {
     return 1
 }
 
-ensure_local_assets() {
-    if [ ! -f "$LOCAL_ENTRY" ]; then
-        echo "Local onboarding page not found: $LOCAL_ENTRY" >&2
-        return 1
-    fi
-    return 0
-}
-
 if ! command -v pnpm >/dev/null 2>&1; then
     echo "pnpm not found. Install pnpm first." >&2
     exit 1
@@ -51,8 +43,6 @@ if [ ! -f "$ICON_PATH" ]; then
     echo "Icon not found: $ICON_PATH" >&2
     exit 1
 fi
-
-ensure_local_assets
 
 if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
     echo "Rust toolchain not found." >&2
@@ -147,6 +137,7 @@ APP_DIR="\$(cd "\$(dirname "\$0")/../.." && pwd)"
 REPO_DIR="\${OPENCLAW_MONITOR_DIR:-\$HOME/openclaw-health-monitor}"
 RUNTIME="\$REPO_DIR/desktop_runtime.sh"
 NATIVE_BIN="\$APP_DIR/Contents/MacOS/${exec_name}-bin"
+WAIT_URL="http://127.0.0.1:8080/api/status"
 
 cleanup() {
     if [ -x "\$RUNTIME" ]; then
@@ -165,6 +156,18 @@ if ! "\$RUNTIME" start all >/tmp/openclaw-health-monitor-app-start.log 2>&1; the
     exit 1
 fi
 
+for _ in {1..20}; do
+    if env NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost curl --noproxy '*' -fsS "\$WAIT_URL" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+if ! env NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost curl --noproxy '*' -fsS "\$WAIT_URL" >/dev/null 2>&1; then
+    osascript -e 'display alert "OpenClaw Health Monitor" message "Local dashboard did not become reachable on http://127.0.0.1:8080." as critical'
+    exit 1
+fi
+
 "\$NATIVE_BIN" "\$@"
 exit \$?
 EOF
@@ -172,15 +175,15 @@ EOF
     echo "Installed desktop lifecycle wrapper into: $app_bundle"
 }
 
-echo "Building Pake prototype from local onboarding page"
+echo "Building desktop app for local dashboard URL"
 echo "App name: $APP_NAME"
 echo "Icon path: $ICON_PATH"
-echo "Local entry: $LOCAL_ENTRY"
+echo "Entry URL: $ENTRY_URL"
 echo "Window: ${WINDOW_WIDTH}x${WINDOW_HEIGHT}"
 echo "Output dir: $OUTPUT_DIR"
 echo
 echo "Command:"
-BASE_CMD=(pnpm dlx pake-cli "$LOCAL_ENTRY" --use-local-file --name "$APP_NAME" --icon "$ICON_PATH" --width "$WINDOW_WIDTH" --height "$WINDOW_HEIGHT")
+BASE_CMD=(pnpm dlx pake-cli "$ENTRY_URL" --name "$APP_NAME" --icon "$ICON_PATH" --width "$WINDOW_WIDTH" --height "$WINDOW_HEIGHT")
 if [ "$HIDE_TITLE_BAR" = "1" ]; then
     BASE_CMD+=(--hide-title-bar)
 fi
