@@ -156,6 +156,10 @@ if ! "\$RUNTIME" start all >/tmp/openclaw-health-monitor-app-start.log 2>&1; the
     exit 1
 fi
 
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+export NO_PROXY=127.0.0.1,localhost
+export no_proxy=127.0.0.1,localhost
+
 for _ in {1..20}; do
     if env NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost curl --noproxy '*' -fsS "\$WAIT_URL" >/dev/null 2>&1; then
         break
