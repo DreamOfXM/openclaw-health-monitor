@@ -160,7 +160,10 @@ if [ ! -x "\$RUNTIME" ]; then
     exit 1
 fi
 
-"\$RUNTIME" start all >/dev/null
+if ! "\$RUNTIME" start all >/tmp/openclaw-health-monitor-app-start.log 2>&1; then
+    osascript -e 'display alert "OpenClaw Health Monitor" message "Failed to start Gateway / Guardian / Dashboard. Check ~/openclaw-health-monitor/logs and /tmp/openclaw-health-monitor-app-start.log." as critical'
+    exit 1
+fi
 
 "\$NATIVE_BIN" "\$@"
 exit \$?

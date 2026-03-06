@@ -9,12 +9,62 @@ DASHBOARD_PID_FILE="$LOG_DIR/dashboard.pid"
 GATEWAY_PID_FILE="$LOG_DIR/gateway.pid"
 TRACKED_CONFIG="$BASE_DIR/config.conf"
 LOCAL_CONFIG="$BASE_DIR/config.local.conf"
+PYTHON_BIN=""
+OPENCLAW_BIN=""
 
 mkdir -p "$LOG_DIR"
 
 find_pid() {
     local pattern="$1"
     pgrep -f "$pattern" 2>/dev/null | head -n 1 || true
+}
+
+resolve_cmd_from_login_shell() {
+    local cmd_name="$1"
+    /bin/zsh -lc "command -v $cmd_name" 2>/dev/null | head -n 1 || true
+}
+
+resolve_python_bin() {
+    local candidate=""
+    if [ -x "$VENV_PYTHON" ] && "$VENV_PYTHON" -c "import flask, requests" >/dev/null 2>&1; then
+        echo "$VENV_PYTHON"
+        return 0
+    fi
+
+    candidate="$(resolve_cmd_from_login_shell python3)"
+    if [ -n "$candidate" ] && "$candidate" -c "import flask, requests" >/dev/null 2>&1; then
+        echo "$candidate"
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1 && python3 -c "import flask, requests" >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
+    return 1
+}
+
+resolve_openclaw_bin() {
+    local candidate=""
+    candidate="$(resolve_cmd_from_login_shell openclaw)"
+    if [ -n "$candidate" ]; then
+        echo "$candidate"
+        return 0
+    fi
+    if command -v openclaw >/dev/null 2>&1; then
+        command -v openclaw
+        return 0
+    fi
+    return 1
+}
+
+bootstrap_env() {
+    if [ -z "$PYTHON_BIN" ]; then
+        PYTHON_BIN="$(resolve_python_bin || true)"
+    fi
+    if [ -z "$OPENCLAW_BIN" ]; then
+        OPENCLAW_BIN="$(resolve_openclaw_bin || true)"
+    fi
 }
 
 read_pid_file() {
@@ -119,9 +169,14 @@ start_gateway() {
         echo "Gateway workspace not found: $workdir" >&2
         return 1
     fi
+    bootstrap_env
+    if [ -z "$OPENCLAW_BIN" ]; then
+        echo "openclaw command not found" >&2
+        return 1
+    fi
     (
         cd "$workdir"
-        openclaw gateway run >> "$LOG_DIR/gateway.log" 2>&1
+        "$OPENCLAW_BIN" gateway run >> "$LOG_DIR/gateway.log" 2>&1
     ) &
     pid=$!
     echo "$pid" > "$GATEWAY_PID_FILE"
@@ -140,11 +195,12 @@ start_guardian() {
         echo "$pid"
         return 0
     fi
-    if [ ! -x "$VENV_PYTHON" ]; then
-        echo "Virtualenv not found: $VENV_PYTHON" >&2
+    bootstrap_env
+    if [ -z "$PYTHON_BIN" ]; then
+        echo "Python with flask+requests not found" >&2
         return 1
     fi
-    "$VENV_PYTHON" "$BASE_DIR/guardian.py" >> "$LOG_DIR/guardian.log" 2>&1 &
+    "$PYTHON_BIN" "$BASE_DIR/guardian.py" >> "$LOG_DIR/guardian.log" 2>&1 &
     pid=$!
     echo "$pid" > "$GUARDIAN_PID_FILE"
     sleep 1
@@ -162,11 +218,12 @@ start_dashboard() {
         echo "$pid"
         return 0
     fi
-    if [ ! -x "$VENV_PYTHON" ]; then
-        echo "Virtualenv not found: $VENV_PYTHON" >&2
+    bootstrap_env
+    if [ -z "$PYTHON_BIN" ]; then
+        echo "Python with flask+requests not found" >&2
         return 1
     fi
-    "$VENV_PYTHON" "$BASE_DIR/dashboard.py" >> "$LOG_DIR/dashboard.stdout.log" 2>&1 &
+    "$PYTHON_BIN" "$BASE_DIR/dashboard.py" >> "$LOG_DIR/dashboard.stdout.log" 2>&1 &
     pid=$!
     echo "$pid" > "$DASHBOARD_PID_FILE"
     sleep 2
@@ -220,6 +277,7 @@ stop_gateway() {
 }
 
 start_all() {
+    bootstrap_env
     start_gateway >/dev/null
     start_guardian >/dev/null
     start_dashboard >/dev/null
