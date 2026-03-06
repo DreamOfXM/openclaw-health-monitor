@@ -253,7 +253,7 @@ cd ~/openclaw-health-monitor
 ./verify.sh
 ```
 
-`./verify.sh` 会自动探测 `8080-8089` 之间实际被 Dashboard 占用的端口。
+`./verify.sh` 默认检查 `http://127.0.0.1:8080/api/status`。
 
 当前测试覆盖了：
 

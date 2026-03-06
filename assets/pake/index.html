@@ -242,7 +242,7 @@
         <ol>
           <li>先在本机准备好 OpenClaw Health Monitor 仓库。</li>
           <li>双击 App，桌面壳会尝试自动启动本地 Guardian 和 Dashboard。</li>
-          <li>桌面 App 会自动探测 `127.0.0.1:8080-8089`，找到后进入监控中心。</li>
+          <li>桌面 App 启动后会直接打开 `http://127.0.0.1:8080`。</li>
         </ol>
       </section>
 
@@ -260,13 +260,12 @@ make verify</pre>
           <div class="status-help" id="statusHelp">
             如果服务还没启动，桌面 App 会停留在这个引导页，直到本地 Dashboard 可访问。
           </div>
-          <div class="status-url" id="statusUrl">候选地址: http://127.0.0.1:8080-8089</div>
+          <div class="status-url" id="statusUrl">目标地址: http://127.0.0.1:8080</div>
         </div>
       </section>
     </div>
 
     <script>
-      const ports = Array.from({ length: 10 }, (_, idx) => 8080 + idx);
       const statusDot = document.getElementById("statusDot");
       const statusText = document.getElementById("statusText");
       const statusHelp = document.getElementById("statusHelp");
@@ -275,59 +274,23 @@ make verify</pre>
       const openBtn = document.getElementById("openBtn");
 
       let activeUrl = "http://127.0.0.1:8080";
-      let checking = false;
+      let attempts = 0;
 
-      async function isHealthMonitor(baseUrl) {
-        const response = await fetch(`${baseUrl}/api/status`, { cache: "no-store" });
-        if (!response.ok) return false;
-        const data = await response.json();
-        return (
-          Object.prototype.hasOwnProperty.call(data, "gateway_healthy") &&
-          Object.prototype.hasOwnProperty.call(data, "incident_summary") &&
-          Object.prototype.hasOwnProperty.call(data, "memory_summary")
-        );
-      }
-
-      async function checkDashboard() {
-        if (checking) return;
-        checking = true;
+      function openDashboard() {
+        attempts += 1;
         statusDot.className = "dot";
-        statusText.textContent = "正在检查本地 Dashboard...";
-        statusHelp.textContent = "如果服务还没启动，桌面 App 会停留在这个引导页，直到本地 Dashboard 可访问。";
-
-        for (const port of ports) {
-          const baseUrl = `http://127.0.0.1:${port}`;
-          try {
-            const ok = await isHealthMonitor(baseUrl);
-            if (!ok) {
-              continue;
-            }
-            activeUrl = baseUrl;
-            statusDot.className = "dot ok";
-            statusText.textContent = "检测到本地 Dashboard，正在跳转...";
-            statusHelp.textContent = "如果没有自动跳转，可以点击“手动打开 Dashboard”。";
-            statusUrl.textContent = `已连接: ${baseUrl}`;
-            window.location.replace(baseUrl);
-            checking = false;
-            return;
-          } catch (_) {
-          }
-        }
-
-        statusDot.className = "dot err";
-        statusText.textContent = "还没有检测到本地 Dashboard";
-        statusHelp.textContent = "请先在本机执行 make start 或 ./start.sh，然后点击“重新检测”。";
-        statusUrl.textContent = "候选地址: http://127.0.0.1:8080-8089";
-        checking = false;
+        statusText.textContent = "正在打开本地 Dashboard...";
+        statusHelp.textContent = "如果本地服务已启动，页面会直接跳转到监控中心。";
+        statusUrl.textContent = `目标地址: ${activeUrl}`;
+        window.location.href = activeUrl;
       }
 
-      retryBtn.addEventListener("click", checkDashboard);
+      retryBtn.addEventListener("click", openDashboard);
       openBtn.addEventListener("click", () => {
         window.location.href = activeUrl;
       });
 
-      checkDashboard();
-      setInterval(checkDashboard, 5000);
+      setTimeout(openDashboard, 1200);
     </script>
   </body>
 </html>
