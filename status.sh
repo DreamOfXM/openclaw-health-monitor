@@ -2,13 +2,7 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
-GUARDIAN_PID_FILE="$BASE_DIR/logs/guardian.pid"
-DASHBOARD_PID_FILE="$BASE_DIR/logs/dashboard.pid"
-
-find_pid() {
-    local pattern="$1"
-    pgrep -f "$pattern" 2>/dev/null | head -n 1 || true
-}
+RUNTIME="$BASE_DIR/desktop_runtime.sh"
 
 discover_dashboard_url() {
     local port
@@ -21,36 +15,30 @@ discover_dashboard_url() {
     return 1
 }
 
-guardian_pid=""
-if [ -f "$GUARDIAN_PID_FILE" ]; then
-    guardian_pid="$(cat "$GUARDIAN_PID_FILE" 2>/dev/null || true)"
-    if [ -n "$guardian_pid" ] && ! kill -0 "$guardian_pid" 2>/dev/null; then
-        guardian_pid=""
-    fi
-fi
-if [ -z "$guardian_pid" ]; then
-    guardian_pid="$(find_pid "$BASE_DIR/guardian.py")"
-fi
-
-dashboard_pid=""
-if [ -f "$DASHBOARD_PID_FILE" ]; then
-    dashboard_pid="$(cat "$DASHBOARD_PID_FILE" 2>/dev/null || true)"
-    if [ -n "$dashboard_pid" ] && ! kill -0 "$dashboard_pid" 2>/dev/null; then
-        dashboard_pid=""
-    fi
-fi
-if [ -z "$dashboard_pid" ]; then
-    dashboard_pid="$(find_pid "$BASE_DIR/dashboard.py")"
-fi
-gateway_pid="$(pgrep -f "openclaw.*gateway" 2>/dev/null | head -n 1 || true)"
+json="$("$RUNTIME" status-json)"
+gateway_pid="$(python3 - <<'PY' "$json"
+import json, sys
+print((json.loads(sys.argv[1]).get("gateway") or "").strip())
+PY
+)"
+guardian_pid="$(python3 - <<'PY' "$json"
+import json, sys
+print((json.loads(sys.argv[1]).get("guardian") or "").strip())
+PY
+)"
+dashboard_pid="$(python3 - <<'PY' "$json"
+import json, sys
+print((json.loads(sys.argv[1]).get("dashboard") or "").strip())
+PY
+)"
 dashboard_url="$(discover_dashboard_url || true)"
 
 echo "OpenClaw Health Monitor status"
 echo "Project dir: $BASE_DIR"
 echo
+echo "Gateway  : ${gateway_pid:-not running}"
 echo "Guardian : ${guardian_pid:-not running}"
 echo "Dashboard: ${dashboard_pid:-not running}"
-echo "Gateway  : ${gateway_pid:-not running}"
 echo "URL      : ${dashboard_url:-not reachable}"
 echo
 

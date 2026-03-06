@@ -36,6 +36,7 @@ fi
 
 echo
 echo "Install complete."
-echo "Start guardian:  $VENV_DIR/bin/python $BASE_DIR/guardian.py"
-echo "Start dashboard: $VENV_DIR/bin/python $BASE_DIR/dashboard.py"
-echo "Dashboard URL:   http://127.0.0.1:8080"
+echo "Start stack:     ./start.sh"
+echo "Check status:    ./status.sh"
+echo "Stop stack:      ./stop.sh"
+echo "Dashboard URL:   http://127.0.0.1:8080 (or the first free port in 8080-8089)"

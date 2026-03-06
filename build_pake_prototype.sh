@@ -147,15 +147,10 @@ APP_DIR="\$(cd "\$(dirname "\$0")/../.." && pwd)"
 REPO_DIR="\${OPENCLAW_MONITOR_DIR:-\$HOME/openclaw-health-monitor}"
 RUNTIME="\$REPO_DIR/desktop_runtime.sh"
 NATIVE_BIN="\$APP_DIR/Contents/MacOS/${exec_name}-bin"
-STARTED_GUARDIAN=0
-STARTED_DASHBOARD=0
 
 cleanup() {
-    if [ "\$STARTED_DASHBOARD" = "1" ] && [ -x "\$RUNTIME" ]; then
-        "\$RUNTIME" stop dashboard >/dev/null 2>&1 || true
-    fi
-    if [ "\$STARTED_GUARDIAN" = "1" ] && [ -x "\$RUNTIME" ]; then
-        "\$RUNTIME" stop guardian >/dev/null 2>&1 || true
+    if [ -x "\$RUNTIME" ]; then
+        "\$RUNTIME" stop all >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT INT TERM
@@ -165,15 +160,7 @@ if [ ! -x "\$RUNTIME" ]; then
     exit 1
 fi
 
-if ! "\$RUNTIME" is-running guardian >/dev/null 2>&1; then
-    "\$RUNTIME" start guardian >/dev/null
-    STARTED_GUARDIAN=1
-fi
-
-if ! "\$RUNTIME" is-running dashboard >/dev/null 2>&1; then
-    "\$RUNTIME" start dashboard >/dev/null
-    STARTED_DASHBOARD=1
-fi
+"\$RUNTIME" start all >/dev/null
 
 "\$NATIVE_BIN" "\$@"
 exit \$?

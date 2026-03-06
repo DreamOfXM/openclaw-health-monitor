@@ -4,265 +4,132 @@
 
 ## 中文
 
-OpenClaw Health Monitor 是一个面向 OpenClaw Gateway 的本地守护与观测工具。
-它的目标不是替代 OpenClaw 本身，而是提供一层更稳定、更容易操作的“用户守卫”能力：
+OpenClaw Health Monitor 是一个面向 OpenClaw Gateway 的本地监控与恢复工具。
+它会在本机拉起一整套最小运行面：
 
-- 持续监控 Gateway 是否真的可用，而不是只看端口是否占用
-- 提供 Web 仪表盘，集中查看进程、错误、会话、版本和告警
-- 提供受控的自动恢复能力
-- 为未来扩展本地诊断、更多告警渠道、策略化恢复打下基础
+- `Gateway`：OpenClaw 对外提供能力的核心服务
+- `Guardian`：后台守护进程，负责健康检查、异常识别、告警和受控恢复
+- `Dashboard`：本地 Web 页面，用来查看状态、日志、问题定位和手动操作
 
-当前版本不会自动重启已有运行中的服务，代码修改后仍需显式切换。
+目标很直接：
+
+- 小白用户可以下载安装后直接启动和停止整套服务
+- 技术用户可以看到完整的运行链路、状态数据和恢复机制
 
 License: MIT. See `LICENSE`.
 
-## 目标定位
+## 快速开始
 
-这个项目适合：
+### 方式一：脚本安装
 
-- 个人用户或小团队在本机长期运行 OpenClaw
-- 希望有“傻瓜式”安装和简单 Web 界面
-- 希望在故障时自动发现问题、自动重启、记录变更
-- 后续希望接入更高级的问题定位能力
+前置条件：
 
-这个项目当前不做：
+- macOS
+- 已安装并可运行 `openclaw`
+- Python 3.9+
 
-- 不依赖复杂外部数据库
-- 不默认执行破坏性恢复操作
+安装并启动：
 
-## 当前架构
+```bash
+cd ~/openclaw-health-monitor
+./install.sh
+./start.sh
+```
+
+这会尝试启动整套本地运行面：
+
+- Gateway
+- Guardian
+- Dashboard
+
+启动后会自动打开 Dashboard。
+
+常用命令：
+
+```bash
+cd ~/openclaw-health-monitor
+./start.sh
+./status.sh
+./verify.sh
+./stop.sh
+```
+
+### 方式二：桌面 App
+
+仓库提供 macOS 桌面 App 发布产物：
+
+- `.dmg`
+- `.app.zip`
+
+桌面 App 的行为和脚本入口保持一致：
+
+- 打开 App：自动拉起 Gateway、Guardian、Dashboard
+- 退出 App：停止 Gateway、Guardian、Dashboard
+
+当前桌面 App 依赖本机已经准备好 `~/openclaw-health-monitor` 仓库和运行环境。
+
+## 给小白用户的理解方式
+
+可以把这个项目理解成一个本地控制台：
+
+- `Gateway` 负责真正干活
+- `Guardian` 负责盯着 Gateway，发现异常就记录和恢复
+- `Dashboard` 负责把状态和问题展示出来
+
+日常只需要记住四个命令：
+
+```bash
+./install.sh
+./start.sh
+./status.sh
+./stop.sh
+```
+
+## 架构说明
 
 ### 核心组件
 
 - `guardian.py`
-  负责守护、健康检查、告警、自动恢复、版本标记。
+  后台守护进程。负责健康检查、异常识别、自动恢复、通知和变更记录。
 
 - `dashboard.py`
-  提供本地 Web UI，暴露状态、变更、配置、重启和受控恢复入口。
+  本地 Web UI。负责展示 Gateway / Guardian / Dashboard 状态、最近异常、内存归因、配置快照和操作入口。
+
+- `desktop_runtime.sh`
+  本地总控脚本。负责统一启动、停止、查询：
+  - Gateway
+  - Guardian
+  - Dashboard
 
 - `monitor_config.py`
-  共享配置加载层。支持：
-  - `config.conf`：可公开的默认配置
-  - `config.local.conf`：本地私有覆盖
+  配置加载层。支持：
+  - `config.conf`
+  - `config.local.conf`
   - 环境变量覆盖
 
 - `state_store.py`
-  基于 SQLite 的本地状态库，用于统一保存：
+  基于 SQLite 的本地状态库，用于保存：
   - alerts
   - versions
   - change events
   - health samples
 
-### 架构分层
+### 运行模型
 
-1. Control plane
-   `dashboard.py` + `guardian.py`
+1. `./start.sh`
+   调用 `desktop_runtime.sh start all`
 
-2. Integration plane
-   Gateway health probe、进程管理、通知发送
+2. `desktop_runtime.sh`
+   依次拉起 Gateway、Guardian、Dashboard，并记录 PID 文件
 
-3. State plane
-   SQLite 状态库 + 兼容旧 JSON 文件
+3. `Guardian`
+   持续检查 Gateway 是否正常、扫描运行时异常、记录变更并发送通知
 
-4. Future extension plane
-   后续可扩展更多诊断、分析与恢复能力
+4. `Dashboard`
+   提供本地问题定位面板、最近异常、内存归因和快照操作
 
-## 当前状态存储
-
-当前采用的是：
-
-- 保留旧 JSON 兼容
-- 新增 SQLite 作为统一状态底座
-
-## 安装
-
-### 前置条件
-
-- macOS
-- 已安装并可运行 `openclaw`
-- Python 3.9+
-- 当前用户有权限运行本地 OpenClaw gateway
-
-### 快速开始
-
-```bash
-cd ~/openclaw-health-monitor
-./install.sh
-./start.sh
-```
-
-停止本地监控组件：
-
-```bash
-cd ~/openclaw-health-monitor
-./stop.sh
-```
-
-查看当前本地监控状态：
-
-```bash
-cd ~/openclaw-health-monitor
-./status.sh
-```
-
-如需统一通过标准入口执行，可以直接使用：
-
-```bash
-cd ~/openclaw-health-monitor
-make preflight
-make start
-make status
-make verify
-make stop
-make test
-make pake
-make release
-```
-
-本地原型打包默认尽量少依赖手工配置：
-
-- `build_pake_prototype.sh` 会自动使用内置引导页和默认打包参数
-- 默认使用仓库内置图标和窗口参数
-- 默认把产物整理到 `dist/pake/`
-- `package_release.sh` 会自动按版本号整理到 `release/`
-
-如需构建一个 Pake 桌面壳原型，可以运行：
-
-```bash
-cd ~/openclaw-health-monitor
-./build_pake_prototype.sh
-```
-
-如需直接整理出适合 GitHub Release 上传的文件：
-
-```bash
-cd ~/openclaw-health-monitor
-./package_release.sh
-```
-
-如需分开启动：
-
-```bash
-cd ~/openclaw-health-monitor
-./.venv/bin/python guardian.py
-./.venv/bin/python dashboard.py
-```
-
-访问：
-
-```text
-http://127.0.0.1:8080
-```
-
-### 一键启动
-
-```bash
-cd ~/openclaw-health-monitor
-./install.sh
-./start.sh
-```
-
-### 安装脚本会做什么
-
-- 检查 `python3`
-- 检查 `openclaw` 是否在 PATH 中
-- 创建本地虚拟环境 `.venv`
-- 安装 `requirements.txt`
-- 初始化 `logs/`、`change-logs/`、`data/`
-- 生成 git 忽略的 `config.local.conf`
-
-### Dashboard 能做什么
-
-- 查看 Gateway 健康、错误、会话、版本与资源使用
-- 查看最近变更日志
-- 查看、创建、恢复配置快照
-
-## Pake 原型包装
-
-当前仓库已经提供一版方案 1 的原型入口：
-
-- `build_pake_prototype.sh`
-- `make pake`
-- 默认图标：`assets/icons/openclaw_lobster_armor.png`
-
-这个原型的边界是：
-
-- 把仓库内置的本地引导页包装成 macOS 桌面壳
-- App 启动后会优先尝试拉起本地 Guardian 和 Dashboard，再轮询 `127.0.0.1:8080-8089`
-- 不会把 Guardian、Gateway、Python 运行时一起打进 App
-- 机器上需要有 `pnpm` 和 Rust toolchain
-
-默认视觉参数：
-
-- 自定义“穿铠甲的龙虾”图标
-- 窗口尺寸 `1480 x 960`
-- macOS 默认隐藏标题栏
-
-推荐构建流程：
-
-```bash
-cd ~/openclaw-health-monitor
-./build_pake_prototype.sh
-```
-
-脚本会用本地引导页执行：
-
-```bash
-pnpm dlx pake-cli "./assets/pake/index.html" --use-local-file --name "OpenClaw Health Monitor"
-```
-
-构建完成后，脚本会尝试把产物复制到：
-
-```text
-dist/pake/
-```
-
-如果 Pake 自带的 `.dmg` 打包失败，但 `.app` 已经成功生成，脚本会继续尝试用 `hdiutil` 生成一个普通 `.dmg`，并把可用产物保留在 `dist/pake/`。
-
-桌面 App 运行时行为：
-
-- 如果本地 Guardian 或 Dashboard 还没运行，桌面壳会尝试自动启动
-- 当本地 Dashboard 可用后，桌面 App 会自动跳转到监控中心
-- 退出桌面 App 时，会回收本次由桌面壳拉起的 Guardian / Dashboard 进程
-
-如果本机还没有 Rust，可以先安装：
-
-```bash
-brew install rust
-```
-
-如需覆盖默认参数，可使用环境变量：
-
-```bash
-APP_NAME="OpenClaw Monitor" \
-DASHBOARD_URL="http://127.0.0.1:8081" \
-ICON_PATH="./assets/icons/openclaw_lobster_armor.png" \
-WINDOW_WIDTH=1440 \
-WINDOW_HEIGHT=900 \
-HIDE_TITLE_BAR=0 \
-PAKE_ARGS="--fullscreen" \
-./build_pake_prototype.sh
-```
-
-构建完成后，如需整理成发布文件名，可以运行：
-
-```bash
-cd ~/openclaw-health-monitor
-./package_release.sh
-```
-
-默认会输出到：
-
-```text
-release/
-```
-
-文件名示例：
-
-```text
-openclaw-health-monitor-0.1.0-macos-arm64.dmg
-openclaw-health-monitor-0.1.0-macos-arm64.app.zip
-```
+5. `./stop.sh`
+   调用 `desktop_runtime.sh stop all`，停止整套本地运行面
 
 ## GitHub Actions
 
@@ -277,7 +144,7 @@ openclaw-health-monitor-0.1.0-macos-arm64.app.zip
 - 安装 `pnpm`
 - 安装 Rust toolchain
 - 运行测试
-- 构建 Pake 桌面原型
+- 构建桌面 App
 - 整理 `.dmg` 和 `.app.zip`
 - 上传为 workflow artifacts
 
@@ -305,7 +172,7 @@ make release
 
 ### 1. 基础启动验证
 
-确认两个组件都能正常启动：
+确认三部分都能正常启动：
 
 ```bash
 cd ~/openclaw-health-monitor
@@ -316,9 +183,9 @@ cd ~/openclaw-health-monitor
 其中：
 
 - `./preflight.sh` 只做切换前检查，不会启动或重启服务
-- `./start.sh` 才会真正启动 Guardian 和 Dashboard
+- `./start.sh` 会真正启动 Gateway、Guardian 和 Dashboard
 - `./status.sh` 会汇总 Guardian、Dashboard、Gateway 和 Dashboard API 状态
-- `./stop.sh` 只停止 Guardian 和 Dashboard，不会停止 Gateway
+- `./stop.sh` 会停止 Gateway、Guardian 和 Dashboard
 
 打开：
 
@@ -659,7 +526,7 @@ make pake
 make release
 ```
 
-To build the Pake wrapper prototype:
+To build the desktop app bundle:
 
 ```bash
 cd ~/openclaw-health-monitor
