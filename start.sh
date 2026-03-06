@@ -14,7 +14,7 @@ echo "Starting OpenClaw Health Monitor..."
 
 dashboard_url=""
 for port in $(seq 8080 8089); do
-    if curl -fsS "http://127.0.0.1:${port}/api/status" >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:${port}/api/status" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "gateway_healthy" in d and "incident_summary" in d and "memory_summary" in d' >/dev/null 2>&1; then
         dashboard_url="http://127.0.0.1:${port}"
         break
     fi

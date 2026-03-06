@@ -277,6 +277,17 @@ make verify</pre>
       let activeUrl = "http://127.0.0.1:8080";
       let checking = false;
 
+      async function isHealthMonitor(baseUrl) {
+        const response = await fetch(`${baseUrl}/api/status`, { cache: "no-store" });
+        if (!response.ok) return false;
+        const data = await response.json();
+        return (
+          Object.prototype.hasOwnProperty.call(data, "gateway_healthy") &&
+          Object.prototype.hasOwnProperty.call(data, "incident_summary") &&
+          Object.prototype.hasOwnProperty.call(data, "memory_summary")
+        );
+      }
+
       async function checkDashboard() {
         if (checking) return;
         checking = true;
@@ -287,7 +298,10 @@ make verify</pre>
         for (const port of ports) {
           const baseUrl = `http://127.0.0.1:${port}`;
           try {
-            await fetch(`${baseUrl}/api/status`, { mode: "no-cors", cache: "no-store" });
+            const ok = await isHealthMonitor(baseUrl);
+            if (!ok) {
+              continue;
+            }
             activeUrl = baseUrl;
             statusDot.className = "dot ok";
             statusText.textContent = "检测到本地 Dashboard，正在跳转...";
