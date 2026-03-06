@@ -18,7 +18,7 @@ from flask import Flask, jsonify, render_template_string, request
 
 from typing import Optional
 
-from monitor_config import SECRET_KEYS, load_config as load_shared_config, save_local_config_value, sanitize_config_for_ui
+from monitor_config import load_config as load_shared_config, save_local_config_value, sanitize_config_for_ui
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
 
@@ -84,6 +84,159 @@ def get_recent_changes(days: int = 7) -> list:
     return all_changes[-100:]  # 最近100条
 
 
+def get_recent_anomalies(limit: int = 8, days: int = 7) -> list:
+    """Return recent anomaly and pipeline-related events for quick triage."""
+    changes = get_recent_changes(days)
+    anomalies = [item for item in reversed(changes) if item.get("type") in {"anomaly", "pipeline"}]
+    return anomalies[:limit]
+
+
+def build_incident_summary(events: list[dict]) -> dict:
+    """Build an operator-friendly summary from recent events."""
+    summary = {
+        "headline": "最近未发现明显异常",
+        "status": "ok",
+        "focus": "继续观察即可",
+        "action": "暂无需要立即处理的动作",
+        "last_stage": "-",
+        "last_question": "-",
+    }
+    if not events:
+        return summary
+
+    latest = events[0]
+    latest_details = latest.get("details", {}) or {}
+    summary["last_stage"] = latest_details.get("marker", "-")
+    summary["last_question"] = latest_details.get("question", "-")
+
+    anomaly = next((item for item in events if item.get("type") == "anomaly"), None)
+    pipeline = next((item for item in events if item.get("type") == "pipeline"), None)
+    if pipeline:
+        summary["last_stage"] = (pipeline.get("details", {}) or {}).get("marker", summary["last_stage"])
+
+    if not anomaly:
+        summary["headline"] = "最近有阶段进度，未见异常告警"
+        summary["status"] = "watch"
+        summary["focus"] = f"最后进度阶段: {summary['last_stage']}"
+        summary["action"] = "如果长时间停留在同一阶段，再检查 Gateway 日志"
+        return summary
+
+    details = anomaly.get("details", {}) or {}
+    question = details.get("question") or "未知问题"
+    duration = details.get("duration")
+    marker = details.get("marker")
+    message = anomaly.get("message", "检测到任务异常")
+    summary["last_question"] = question
+
+    if "没有可见回复" in message:
+        summary["headline"] = "检测到任务完成但用户没有收到回复"
+        summary["status"] = "error"
+        summary["focus"] = f"问题: {question}"
+        summary["action"] = "优先检查网关回包链路和 replies/queuedFinal 日志"
+    elif "阶段长时间无进展" in message:
+        summary["headline"] = "检测到任务卡在某个阶段"
+        summary["status"] = "error"
+        summary["focus"] = f"阶段: {marker or '-'} | 问题: {question}"
+        summary["action"] = "优先检查该阶段前后的 PIPELINE_PROGRESS 和子代理执行日志"
+    elif "长时间无最终结果" in message:
+        summary["headline"] = "检测到任务长时间没有最终结果"
+        summary["status"] = "error"
+        summary["focus"] = f"问题: {question}"
+        summary["action"] = "优先检查 dispatching/dispatch complete 是否成对出现"
+    elif "WebSocket 异常关闭" in message:
+        summary["headline"] = "检测到 Gateway WebSocket 异常关闭"
+        summary["status"] = "error"
+        summary["focus"] = "网关链路异常中断"
+        summary["action"] = "优先检查 Gateway 进程状态和最近错误日志"
+    else:
+        summary["headline"] = message
+        summary["status"] = "watch"
+        summary["focus"] = f"问题: {question}"
+        summary["action"] = "建议先查看最近异常详情和运行日志"
+
+    if duration is not None:
+        summary["focus"] += f" | 耗时: {duration}秒"
+    if marker and summary["last_stage"] == "-":
+        summary["last_stage"] = marker
+    return summary
+
+
+def format_change_details(change: dict) -> str:
+    """Render compact change details for the dashboard."""
+    details = change.get("details", {}) or {}
+    change_type = change.get("type")
+    if change_type == "pipeline":
+        return f"阶段: {details.get('marker', '-')} | 时间: {details.get('timestamp', '-')}"
+    if change_type == "anomaly":
+        question = details.get("question", "-")
+        duration = details.get("duration", "-")
+        marker = details.get("marker")
+        marker_text = f" | 阶段: {marker}" if marker else ""
+        return f"问题: {question} | 耗时: {duration}秒{marker_text} | 时间: {details.get('timestamp', '-')}"
+    if change_type == "restart":
+        return f"PID: {details.get('old_pid', '-')} -> {details.get('new_pid', '-')}"
+    if change_type == "recover":
+        return f"快照: {details.get('snapshot', '-')}"
+    if change_type == "snapshot":
+        return f"快照: {details.get('snapshot', '-')}"
+    if change_type == "version":
+        if details.get("from") and details.get("to"):
+            return f"{details.get('from')} -> {details.get('to')}"
+        return details.get("commit", "-")
+    return json.dumps(details, ensure_ascii=False) if details else "-"
+
+
+def parse_mem_value_to_gb(raw: str) -> float:
+    """Convert macOS memory strings like 2735M/32G/512K to GB."""
+    raw = (raw or "").strip()
+    if not raw:
+        return 0.0
+    match = re.match(r"([\d.]+)\s*([KMGT])", raw, re.IGNORECASE)
+    if not match:
+        return 0.0
+    value = float(match.group(1))
+    unit = match.group(2).upper()
+    factors = {
+        "K": 1 / (1024 * 1024),
+        "M": 1 / 1024,
+        "G": 1,
+        "T": 1024,
+    }
+    return round(value * factors.get(unit, 0), 2)
+
+
+def summarize_memory_usage(metrics: dict, top_processes: list[dict]) -> dict:
+    """Build a memory attribution summary for operators."""
+    mem_used = float(metrics.get("mem_used", 0) or 0)
+    mem_total = float(metrics.get("mem_total", 0) or 0)
+    wired = float(metrics.get("mem_wired", 0) or 0)
+    compressed = float(metrics.get("mem_compressed", 0) or 0)
+    top_process_sum = round(sum(float(p.get("mem_mb", 0) or 0) for p in top_processes) / 1024, 2)
+    unattributed = round(max(mem_used - top_process_sum, 0), 2)
+    system_other = round(max(unattributed - wired - compressed, 0), 2)
+    process_coverage = round((top_process_sum / mem_used * 100), 1) if mem_used > 0 else 0.0
+
+    items = [
+        {"name": "Top 15 进程", "value_gb": top_process_sum, "kind": "process", "note": f"覆盖已用内存 {process_coverage}%"},
+    ]
+    if wired > 0:
+        items.append({"name": "Kernel / Wired", "value_gb": wired, "kind": "system", "note": "内核与驱动占用"})
+    if compressed > 0:
+        items.append({"name": "Compressed", "value_gb": compressed, "kind": "system", "note": "压缩内存"})
+    if system_other > 0:
+        items.append({"name": "Other System", "value_gb": system_other, "kind": "system", "note": "缓存、共享内存等未归属项"})
+
+    return {
+        "top15_gb": top_process_sum,
+        "unattributed_gb": unattributed,
+        "process_coverage_percent": process_coverage,
+        "items": items,
+        "summary": f"{top_process_sum:.1f}G 进程 + {unattributed:.1f}G 系统/缓存 = {mem_used:.1f}G",
+        "note": "系统项包含内核、压缩内存和无法直接归属到单进程的缓存/共享内存。",
+        "total_gb": mem_total,
+    }
+
+
 def list_snapshots(limit: int = 20) -> list[dict]:
     """列出最近的配置快照。"""
     snapshots = []
@@ -106,71 +259,6 @@ def list_snapshots(limit: int = 20) -> list[dict]:
                 pass
         snapshots.append(item)
     return snapshots
-
-
-def stringify_config_value(key: str, value) -> str:
-    """Render a config value for history without exposing secrets."""
-    if key in SECRET_KEYS:
-        return "已配置" if value else "未配置"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value in (None, ""):
-        return "(empty)"
-    return str(value)
-
-
-def persist_versions(versions: dict) -> None:
-    """Persist version metadata to sqlite and legacy json."""
-    STORE.save_versions(versions)
-    versions_file = BASE_DIR / "versions.json"
-    with open(versions_file, "w") as handle:
-        json.dump(versions, handle, indent=2, ensure_ascii=False)
-
-
-def append_version_history(bucket: str, entry: dict, limit: int = 50) -> None:
-    """Append a versioned history entry to the local metadata store."""
-    versions = load_versions()
-    versions.setdefault("history", [])
-    versions.setdefault("config_history", [])
-    versions.setdefault("restart_history", [])
-    versions.setdefault(bucket, [])
-    versions[bucket].append(entry)
-    versions[bucket] = versions[bucket][-limit:]
-    persist_versions(versions)
-
-
-def apply_config_change(key: str, value: str) -> tuple[bool, dict]:
-    """Save a config change and return a structured history record."""
-    before_config = load_config()
-    before_value = before_config.get(key)
-    snapshot_dir = SNAPSHOTS.create_snapshot("before-config-change")
-    if not save_local_config_value(BASE_DIR, key, value):
-        return False, {}
-
-    after_config = load_config()
-    after_value = after_config.get(key)
-    current_version = get_version()
-    details = {
-        "key": key,
-        "before": stringify_config_value(key, before_value),
-        "after": stringify_config_value(key, after_value),
-        "changed": before_value != after_value,
-        "gateway_version": current_version,
-        "snapshot": snapshot_dir.name if snapshot_dir else "",
-        "restart_required": True,
-    }
-    append_version_history(
-        "config_history",
-        {
-            "time": datetime.now().isoformat(),
-            "key": key,
-            "before": details["before"],
-            "after": details["after"],
-            "gateway_version": current_version,
-            "snapshot": details["snapshot"],
-        },
-    )
-    return True, details
 
 
 def backup_change_logs():
@@ -280,6 +368,8 @@ def get_system_metrics() -> dict:
     cpu = 0.0
     mem_used = 0
     mem_total = 32
+    mem_wired = 0.0
+    mem_compressed = 0.0
     
     try:
         result = subprocess.run("top -l 1 -n 0", shell=True, capture_output=True, text=True, timeout=5)
@@ -296,24 +386,33 @@ def get_system_metrics() -> dict:
                     pass
             if "PhysMem" in line:
                 try:
-                    used_match = re.search(r'(\d+)G\s*used', line)
-                    unused_match = re.search(r'(\d+)G\s*unused', line)
-                    wired_match = re.search(r'(\d+)G\s*wired', line)
+                    used_match = re.search(r'([\d.]+[KMGT])\s*used', line)
+                    unused_match = re.search(r'([\d.]+[KMGT])\s*unused', line)
+                    wired_match = re.search(r'([\d.]+[KMGT])\s*wired', line)
+                    compressor_match = re.search(r'([\d.]+[KMGT])\s*compressor', line)
                     
                     if used_match:
-                        mem_used = int(used_match.group(1))
+                        mem_used = round(parse_mem_value_to_gb(used_match.group(1)), 2)
                     if wired_match:
-                        mem_used = int(wired_match.group(1))  # wired算已用
-                    if unused_match:
-                        mem_total = mem_used + int(unused_match.group(1))
-                    else:
-                        mem_total = 32  # 默认32G
+                        mem_wired = round(parse_mem_value_to_gb(wired_match.group(1)), 2)
+                    if compressor_match:
+                        mem_compressed = round(parse_mem_value_to_gb(compressor_match.group(1)), 2)
+                    if wired_match:
+                        mem_used = max(mem_used, mem_wired)
+                    if unused_match and mem_used:
+                        mem_total = round(mem_used + parse_mem_value_to_gb(unused_match.group(1)), 2)
                 except:
                     pass
     except:
         pass
     
-    return {"cpu": round(cpu, 1), "mem_used": mem_used, "mem_total": mem_total}
+    return {
+        "cpu": round(cpu, 1),
+        "mem_used": mem_used,
+        "mem_total": mem_total,
+        "mem_wired": mem_wired,
+        "mem_compressed": mem_compressed,
+    }
 
 
 def analyze_sessions(minutes: int = 5) -> dict:
@@ -597,12 +696,11 @@ def save_config(key: str, value: str) -> bool:
 
 def load_versions() -> dict:
     """加载版本历史"""
-    versions = STORE.load_versions(BASE_DIR / "versions.json")
-    versions.setdefault("current", None)
-    versions.setdefault("history", [])
-    versions.setdefault("config_history", [])
-    versions.setdefault("restart_history", [])
-    return versions
+    versions_file = BASE_DIR / "versions.json"
+    if versions_file.exists():
+        with open(versions_file) as f:
+            return json.load(f)
+    return {"current": None, "history": []}
 
 
 # ========== API 端点 ==========
@@ -651,6 +749,44 @@ def index():
         table { width: 100%; border-collapse: collapse; font-size: 14px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
         th { color: #888; font-weight: normal; }
+        .event-list { display: grid; gap: 10px; }
+        .event-item {
+            padding: 12px 14px; border-radius: 10px; background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .event-item.anomaly { border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.08); }
+        .event-item.pipeline { border-color: rgba(96,165,250,0.35); background: rgba(96,165,250,0.08); }
+        .event-meta { font-size: 12px; color: #9ca3af; margin-bottom: 6px; }
+        .event-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+        .event-details { font-size: 12px; color: #d1d5db; line-height: 1.5; }
+        .incident-grid { display: grid; grid-template-columns: 1.1fr 0.9fr 0.9fr; gap: 14px; }
+        .incident-card {
+            padding: 16px; border-radius: 12px; background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .incident-card.error { border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.1); }
+        .incident-card.watch { border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.08); }
+        .incident-label { font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
+        .incident-main { font-size: 18px; font-weight: 700; line-height: 1.4; }
+        .incident-sub { font-size: 13px; color: #d1d5db; margin-top: 8px; line-height: 1.5; }
+        .memory-summary {
+            display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 16px; margin-bottom: 14px;
+        }
+        .memory-box {
+            padding: 14px 16px; border-radius: 12px; background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .memory-box-title { font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
+        .memory-box-main { font-size: 18px; font-weight: 700; line-height: 1.4; }
+        .memory-box-sub { font-size: 12px; color: #d1d5db; margin-top: 8px; line-height: 1.5; }
+        .memory-items { display: grid; gap: 8px; }
+        .memory-item {
+            display: flex; justify-content: space-between; gap: 12px; align-items: center;
+            padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04);
+        }
+        .memory-item-name { font-size: 13px; font-weight: 600; }
+        .memory-item-note { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+        .memory-item-value { font-size: 13px; color: #f3f4f6; white-space: nowrap; }
         
         .diagnose-item { 
             display: flex; align-items: center; gap: 15px; padding: 15px; 
@@ -736,7 +872,7 @@ def index():
             <h1>🛡️ OpenClaw 健康监控中心</h1>
             <div class="actions">
                 <button class="btn" onclick="location.reload()">🔄 刷新</button>
-                <button class="btn btn-primary" onclick="restartGateway('manual_restart', 'dashboard_button', event)">🔁 重启 Gateway</button>
+                <button class="btn btn-primary" onclick="restartGateway()">🔁 重启 Gateway</button>
                 <button class="btn" style="background:#dc2626" onclick="emergencyRecover()">🚨 急救</button>
             </div>
         </header>
@@ -787,9 +923,21 @@ def index():
                 <div id="diagnoses"></div>
             </div>
         </div>
+
+        <div class="section">
+            <h2>🎯 问题定位</h2>
+            <div id="incident-summary" class="incident-grid"></div>
+        </div>
+
+        <div class="section">
+            <h2>🚨 最近异常 / 进度</h2>
+            <div id="recent-events" class="event-list"></div>
+        </div>
         
         <div class="section">
-            <h2>💻 内存占用排行 (Top 15)</h2>
+            <h2>💻 内存归因：进程 Top 15 + 系统项</h2>
+            <div id="memory-attribution" class="memory-summary"></div>
+            <div id="memory-items" class="memory-items"></div>
             <table>
                 <thead><tr><th>PID</th><th>用户</th><th>CPU %</th><th>内存</th><th>进程</th></tr></thead>
                 <tbody id="top-processes"></tbody>
@@ -863,10 +1011,10 @@ def index():
                 <button class="btn" onclick="loadChanges()">🔄 刷新</button>
             </div>
             <table>
-                    <thead><tr><th>日期</th><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>
-                    <tbody id="change-logs"></tbody>
-                </table>
-            </div>
+                <thead><tr><th>日期</th><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>
+                <tbody id="change-logs"></tbody>
+            </table>
+        </div>
     </div>
 
     <div id="tab-snapshots" class="tab-content">
@@ -906,7 +1054,8 @@ def index():
                 // 内存
                 document.getElementById('mem').textContent = data.metrics.mem_used + 'G';
                 const memPercent = (data.metrics.mem_used / data.metrics.mem_total * 100).toFixed(0);
-                document.getElementById('mem-sub').textContent = memPercent + '%';
+                const memSummary = data.memory_summary || {};
+                document.getElementById('mem-sub').textContent = `${memPercent}% | Top15覆盖 ${memSummary.process_coverage_percent || 0}%`;
                 const memBar = document.getElementById('mem-bar');
                 memBar.style.width = memPercent + '%';
                 memBar.className = 'progress-bar ' + (memPercent > 85 ? 'error' : memPercent > 70 ? 'warning' : 'good');
@@ -944,6 +1093,34 @@ def index():
                 });
                 
                 // 内存占用排行
+                const memoryAttrEl = document.getElementById('memory-attribution');
+                const memoryItemsEl = document.getElementById('memory-items');
+                if (data.memory_summary) {
+                    memoryAttrEl.innerHTML = `
+                        <div class="memory-box">
+                            <div class="memory-box-title">总览口径</div>
+                            <div class="memory-box-main">${data.memory_summary.summary}</div>
+                            <div class="memory-box-sub">${data.memory_summary.note}</div>
+                        </div>
+                        <div class="memory-box">
+                            <div class="memory-box-title">对账结果</div>
+                            <div class="memory-box-main">Top 15: ${data.memory_summary.top15_gb.toFixed(1)}G</div>
+                            <div class="memory-box-sub">未归属到单进程: ${data.memory_summary.unattributed_gb.toFixed(1)}G</div>
+                        </div>
+                    `;
+                    memoryItemsEl.innerHTML = (data.memory_summary.items || []).map(item => `
+                        <div class="memory-item">
+                            <div>
+                                <div class="memory-item-name">${item.name}</div>
+                                <div class="memory-item-note">${item.note || ''}</div>
+                            </div>
+                            <div class="memory-item-value">${item.value_gb.toFixed(1)}G</div>
+                        </div>
+                    `).join('');
+                } else {
+                    memoryAttrEl.innerHTML = '';
+                    memoryItemsEl.innerHTML = '';
+                }
                 const procEl = document.getElementById('top-processes');
                 procEl.innerHTML = data.top_processes && data.top_processes.length ? '' : '<tr><td colspan="5" style="text-align:center;color:#666">暂无数据</td></tr>';
                 if (data.top_processes) {
@@ -963,9 +1140,49 @@ def index():
                             <div class="diagnose-title">${d.title}</div>
                             <div class="diagnose-msg">${d.message}</div>
                         </div>
-                        ${d.action ? `<button class="diagnose-action" onclick="restartGateway('diagnostic_action', 'dashboard_diagnosis', event)">${d.action}</button>` : ''}
+                        ${d.action ? `<button class="diagnose-action" onclick="restartGateway()">${d.action}</button>` : ''}
                     </div>
                 `).join('');
+
+                // 问题定位摘要
+                const incidentEl = document.getElementById('incident-summary');
+                const incident = data.incident_summary || {};
+                incidentEl.innerHTML = `
+                    <div class="incident-card ${incident.status || 'ok'}">
+                        <div class="incident-label">当前关注点</div>
+                        <div class="incident-main">${incident.headline || '最近未发现明显异常'}</div>
+                        <div class="incident-sub">${incident.focus || '-'}</div>
+                    </div>
+                    <div class="incident-card">
+                        <div class="incident-label">最后阶段</div>
+                        <div class="incident-main">${incident.last_stage || '-'}</div>
+                        <div class="incident-sub">用于快速判断当前卡在哪个环节。</div>
+                    </div>
+                    <div class="incident-card">
+                        <div class="incident-label">建议动作</div>
+                        <div class="incident-main">${incident.action || '继续观察即可'}</div>
+                        <div class="incident-sub">最近问题: ${incident.last_question || '-'}</div>
+                    </div>
+                `;
+
+                // 最近异常 / 进度
+                const eventsEl = document.getElementById('recent-events');
+                if (!data.recent_events || data.recent_events.length === 0) {
+                    eventsEl.innerHTML = '<div class="event-item"><div class="event-title">暂无最近异常</div><div class="event-details">Guardian 已启动，但最近没有记录到异常或阶段事件。</div></div>';
+                } else {
+                    eventsEl.innerHTML = data.recent_events.map(item => {
+                        const details = formatChangeDetails(item);
+                        const typeLabel = item.type === 'anomaly' ? '异常' : '进度';
+                        const stamp = `${item.date || ''} ${item.time || ''}`.trim();
+                        return `
+                            <div class="event-item ${item.type}">
+                                <div class="event-meta">${typeLabel} · ${stamp || '-'}</div>
+                                <div class="event-title">${item.message}</div>
+                                <div class="event-details">${details}</div>
+                            </div>
+                        `;
+                    }).join('');
+                }
                 
                 // 错误日志
                 const errEl = document.getElementById('error-logs');
@@ -992,9 +1209,7 @@ def index():
                 document.getElementById('auto-update-toggle').checked = autoUpdate;
                 document.getElementById('auto-update-status').textContent = autoUpdate ? '已开启' : '已关闭';
                 document.getElementById('current-version').textContent = data.version.current || 'unknown';
-                const versionCount = data.version.history ? data.version.history.length : 0;
-                const configChangeCount = data.version.config_history ? data.version.config_history.length : 0;
-                document.getElementById('version-history').textContent = `代码版本: ${versionCount} | 配置变更: ${configChangeCount}`;
+                document.getElementById('version-history').textContent = data.version.history ? data.version.history.length + ' 个历史版本' : '无';
                 
                 const dingtalkWebhook = data.config.DINGTALK_WEBHOOK;
                 const feishuWebhook = data.config.FEISHU_WEBHOOK;
@@ -1028,31 +1243,22 @@ def index():
             }
         }
         
-        async function restartGateway(reason = 'manual_restart', requestedBy = 'dashboard', evt = null) {
-            const btn = evt ? evt.target : null;
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '重启中...';
-            }
+        async function restartGateway() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '重启中...';
             try {
-                const res = await fetch('/api/restart', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({reason, requested_by: requestedBy})
-                });
+                const res = await fetch('/api/restart', {method: 'POST'});
                 const data = await res.json();
+                // 3秒后自动刷新数据
                 setTimeout(() => {
                     loadData();
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.textContent = '🔁 重启 Gateway';
-                    }
-                }, 3000);
-            } catch(e) {
-                if (btn) {
                     btn.disabled = false;
                     btn.textContent = '🔁 重启 Gateway';
-                }
+                }, 3000);
+            } catch(e) {
+                btn.disabled = false;
+                btn.textContent = '🔁 重启 Gateway';
                 alert('重启请求失败');
             }
         }
@@ -1080,8 +1286,6 @@ def index():
                 if (!data.success) {
                     alert(data.message);
                     checkbox.checked = !value;
-                } else if (confirm('配置已更新。是否现在重启 Gateway 使变更生效？')) {
-                    restartGateway('config_change:AUTO_UPDATE', 'config_toggle');
                 }
             } catch(e) {
                 alert('配置保存失败');
@@ -1101,12 +1305,7 @@ def index():
                 });
                 const data = await res.json();
                 alert(data.message);
-                if (data.success) {
-                    loadData();
-                    if (confirm('配置已更新。是否现在重启 Gateway 使变更生效？')) {
-                        restartGateway('config_change:' + key, 'config_prompt');
-                    }
-                }
+                if (data.success) loadData();
             } catch(e) {
                 alert('配置保存失败');
             }
@@ -1139,11 +1338,11 @@ def index():
                 console.log('Data:', data);
                 const tbody = document.getElementById('change-logs');
                 if (!data.changes || data.changes.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#666">暂无日志</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#666">暂无日志</td></tr>';
                     return;
                 }
                 tbody.innerHTML = data.changes.reverse().map(c => {
-                    const typeIcon = {'restart': '🔁', 'config': '⚙️', 'recover': '🚨', 'update': '🔄', 'version': '📋', 'snapshot': '📦'}[c.type] || '📝';
+                    const typeIcon = {'restart': '🔁', 'config': '⚙️', 'recover': '🚨', 'update': '🔄', 'version': '📋', 'pipeline': '⏳', 'snapshot': '📦', 'anomaly': '🚨'}[c.type] || '📝';
                     return `<tr><td>${c.date || ''}</td><td>${c.time}</td><td>${typeIcon} ${c.type}</td><td>${c.message}</td><td>${formatChangeDetails(c)}</td></tr>`;
                 }).join('');
             } catch(e) {
@@ -1153,20 +1352,25 @@ def index():
 
         function formatChangeDetails(change) {
             const details = change.details || {};
-            if (change.type === 'config') {
-                return `配置项: ${details.key || '-'} | 旧值: ${details.before || '-'} | 新值: ${details.after || '-'} | 版本: ${details.gateway_version || '-'} | 快照: ${details.snapshot || '-'}`;
+            if (change.type === 'pipeline') {
+                return `阶段: ${details.marker || '-'} | 时间: ${details.timestamp || '-'}`;
+            }
+            if (change.type === 'anomaly') {
+                const marker = details.marker ? ` | 阶段: ${details.marker}` : '';
+                return `问题: ${details.question || '-'} | 耗时: ${details.duration || '-'}秒${marker} | 时间: ${details.timestamp || '-'}`;
             }
             if (change.type === 'restart') {
-                return `原因: ${details.reason || '未记录'} | 来源: ${details.requested_by || '-'} | 版本: ${details.gateway_version || '-'} | PID: ${details.old_pid || '-'} -> ${details.new_pid || '-'}`;
+                return `PID: ${details.old_pid || '-'} -> ${details.new_pid || '-'}`;
             }
             if (change.type === 'recover') {
-                return `快照: ${details.snapshot || '-'} | 原因: ${details.reason || '恢复操作'} | 版本: ${details.gateway_version || '-'}`;
+                return `快照: ${details.snapshot || '-'} `;
             }
             if (change.type === 'version') {
-                return `提交: ${details.commit || details.to || '-'} | 来源: ${details.from || '-'}`;
+                if (details.from && details.to) return `${details.from} -> ${details.to}`;
+                return details.commit || '-';
             }
             if (change.type === 'snapshot') {
-                return `快照: ${details.snapshot || '-'} | 标签: ${details.label || '-'}`;
+                return `快照: ${details.snapshot || '-'} `;
             }
             return JSON.stringify(details);
         }
@@ -1248,6 +1452,9 @@ def api_status():
     version_history = load_versions()
     diagnoses = get_diagnoses(metrics, sessions, [gateway_process, guardian_process])
     top_processes = get_top_processes(15)
+    recent_events = get_recent_anomalies(limit=8, days=7)
+    incident_summary = build_incident_summary(recent_events)
+    memory_summary = summarize_memory_usage(metrics, top_processes)
     
     data = {
         "metrics": metrics,
@@ -1256,15 +1463,13 @@ def api_status():
         "gateway_healthy": gateway_healthy,
         "sessions": sessions,
         "errors": errors,
-        "version": {
-            "current": version,
-            "history": version_history.get("history", []),
-            "config_history": version_history.get("config_history", []),
-            "restart_history": version_history.get("restart_history", []),
-        },
+        "version": {"current": version, "history": version_history.get("history", [])},
         "config": safe_config,
         "diagnoses": diagnoses,
-        "top_processes": top_processes
+        "top_processes": top_processes,
+        "recent_events": recent_events,
+        "incident_summary": incident_summary,
+        "memory_summary": memory_summary,
     }
     return app.response_class(
         response=json.dumps(data, ensure_ascii=False),
@@ -1276,10 +1481,6 @@ def api_status():
 def api_restart():
     """重启 Gateway"""
     try:
-        payload = request.get_json(silent=True) or {}
-        reason = str(payload.get("reason", "manual_restart")).strip() or "manual_restart"
-        requested_by = str(payload.get("requested_by", "dashboard")).strip() or "dashboard"
-        gateway_version = get_version()
         old_pid = get_listener_pid()
         if old_pid is not None:
             subprocess.run(f"kill {old_pid}", shell=True, check=False)
@@ -1300,25 +1501,8 @@ def api_restart():
         old_pid_str = str(old_pid) if old_pid is not None else None
         
         if new_pid and new_pid != old_pid_str:
-            details = {
-                "old_pid": old_pid_str,
-                "new_pid": new_pid,
-                "reason": reason,
-                "requested_by": requested_by,
-                "gateway_version": gateway_version,
-            }
-            record_change("restart", f"Gateway 重启成功 (PID: {old_pid_str} → {new_pid})", details)
-            append_version_history(
-                "restart_history",
-                {
-                    "time": datetime.now().isoformat(),
-                    "reason": reason,
-                    "requested_by": requested_by,
-                    "gateway_version": gateway_version,
-                    "old_pid": old_pid_str,
-                    "new_pid": new_pid,
-                },
-            )
+            record_change("restart", f"Gateway 重启成功 (PID: {old_pid_str} → {new_pid})",
+                         {"old_pid": old_pid_str, "new_pid": new_pid})
             return jsonify({
                 "success": True, 
                 "message": f"Gateway 已重启\n旧PID: {old_pid_str or '无'}\n新PID: {new_pid}",
@@ -1366,12 +1550,7 @@ def api_emergency_recover():
                 start_new_session=True,
             )
 
-        details = {
-            "snapshot": snapshot_dir.name,
-            "reason": "emergency_recover",
-            "gateway_version": get_version(),
-        }
-        record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", details)
+        record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
         return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -1400,7 +1579,7 @@ def api_snapshot_create():
         snapshot_dir = SNAPSHOTS.create_snapshot(label)
         if snapshot_dir is None:
             return jsonify({"success": False, "message": "没有可快照的配置文件"})
-        record_change("snapshot", f"手动创建配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name, "label": label})
+        record_change("snapshot", f"手动创建配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
         return jsonify({"success": True, "message": f"已创建配置快照: {snapshot_dir.name}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -1435,12 +1614,7 @@ def api_snapshot_restore():
                 start_new_session=True,
             )
 
-        details = {
-            "snapshot": snapshot_dir.name,
-            "reason": "manual_snapshot_restore",
-            "gateway_version": get_version(),
-        }
-        record_change("recover", f"恢复指定配置快照并重启: {snapshot_dir.name}", details)
+        record_change("recover", f"恢复指定配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
         return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -1457,14 +1631,8 @@ def api_config():
         if not key:
             return jsonify({"success": False, "message": "缺少配置键"})
         
-        ok, details = apply_config_change(key, str(value))
-        if ok:
-            record_change(
-                "config",
-                f"配置已更新: {key}",
-                details,
-            )
-            return jsonify({"success": True, "message": "配置已更新，重启后生效", "details": details})
+        if save_config(key, str(value)):
+            return jsonify({"success": True, "message": "配置已更新"})
         else:
             return jsonify({"success": False, "message": "保存配置失败"})
     except Exception as e:

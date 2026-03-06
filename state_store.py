@@ -107,6 +107,13 @@ class MonitorStateStore:
     def save_versions(self, versions: dict[str, Any]) -> None:
         self._save_kv("runtime", "versions", versions)
 
+    def load_runtime_value(self, key: str, default: Any = None) -> Any:
+        state = self._load_kv("runtime", key)
+        return default if state is None else state
+
+    def save_runtime_value(self, key: str, value: Any) -> None:
+        self._save_kv("runtime", key, value)
+
     def record_change(self, change_type: str, message: str, details: dict[str, Any] | None = None) -> None:
         details = details or {}
         now = time.localtime()

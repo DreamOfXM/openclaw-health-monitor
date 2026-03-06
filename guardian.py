@@ -15,7 +15,7 @@ import threading
 import requests
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 
 from monitor_config import DEFAULT_CONFIG, load_config as load_shared_config
 from snapshot_manager import SnapshotManager
@@ -32,6 +32,7 @@ LOG_FILE = BASE_DIR / "logs" / "guardian.log"
 OPENCLAW_HOME = Path.home() / ".openclaw"
 OPENCLAW_CODE = Path.home() / "openclaw-workspace" / "openclaw"
 GATEWAY_LOG = OPENCLAW_HOME / "logs" / "gateway.log"
+TMP_OPENCLAW_LOG_DIR = Path("/tmp/openclaw")
 
 CONFIG = {}
 ALERTS = {}
@@ -221,6 +222,319 @@ def analyze_slow_sessions() -> List[Dict]:
         log(f"分析慢会话失败: {e}")
     
     return sessions[-10:]  # 返回最近10个
+
+
+def resolve_runtime_gateway_log() -> Path:
+    """Return the most recent runtime log file."""
+    candidates = sorted(TMP_OPENCLAW_LOG_DIR.glob("openclaw-*.log"), key=lambda p: p.stat().st_mtime)
+    if candidates:
+        return candidates[-1]
+    return GATEWAY_LOG
+
+
+def scan_pipeline_progress_events() -> None:
+    """Scan runtime logs for pipeline progress markers and persist them once."""
+    runtime_log = resolve_runtime_gateway_log()
+    if not runtime_log.exists():
+        return
+
+    cursor = STORE.load_runtime_value("pipeline_progress_cursor", {})
+    last_signature = cursor.get("last_signature", "")
+
+    try:
+        with open(runtime_log) as handle:
+            lines = handle.readlines()[-2000:]
+    except Exception as exc:
+        log(f"读取运行日志失败: {exc}", "ERROR")
+        return
+
+    latest_signature = last_signature
+    for line in lines:
+        if "PIPELINE_PROGRESS:" not in line:
+            continue
+        signature = line.strip()
+        if signature <= last_signature:
+            continue
+
+        marker = line.split("PIPELINE_PROGRESS:", 1)[1].strip()
+        ts_match = line.split('"time":"')
+        timestamp = ""
+        if len(ts_match) > 1:
+            timestamp = ts_match[1].split('"', 1)[0]
+
+        message = f"多智能体进度: {marker}"
+        details = {
+            "marker": marker,
+            "timestamp": timestamp,
+            "source_log": str(runtime_log),
+        }
+        record_change_log("pipeline", message, details)
+        latest_signature = signature
+
+    if latest_signature != last_signature:
+        STORE.save_runtime_value(
+            "pipeline_progress_cursor",
+            {"last_signature": latest_signature, "source_log": str(runtime_log)},
+        )
+
+
+def parse_runtime_timestamp(line: str) -> tuple[str, float | None]:
+    """Parse ISO timestamp from either JSONL runtime logs or plain text logs."""
+    if line.startswith("{"):
+        marker = '"time":"'
+        if marker in line:
+            raw = line.split(marker, 1)[1].split('"', 1)[0]
+            normalized = raw[:19]
+            try:
+                ts = datetime.strptime(normalized, "%Y-%m-%dT%H:%M:%S").timestamp()
+                return raw, ts
+            except Exception:
+                return raw, None
+    raw = line[:19]
+    try:
+        ts = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S").timestamp()
+        return raw, ts
+    except Exception:
+        return raw, None
+
+
+def extract_runtime_question(line: str) -> str | None:
+    """Extract a user-visible question from runtime logs when possible."""
+    lower = line.lower()
+    if " dm from " in lower and ": " in line:
+        idx = line.find(": ")
+        if idx > 0:
+            return line[idx + 2 :].strip()[:80]
+    if "message in" in lower and ": " in line:
+        idx = line.find(": ")
+        if idx > 0:
+            return line[idx + 2 :].strip()[:80]
+    if "feishu[default]:" in lower and ": " in line:
+        idx = line.find(": ")
+        if idx > 0:
+            return line[idx + 2 :].strip()[:80]
+    return None
+
+
+def extract_pipeline_marker(line: str) -> str | None:
+    """Extract a pipeline progress marker from the runtime logs."""
+    marker = "PIPELINE_PROGRESS:"
+    if marker not in line:
+        return None
+    return line.split(marker, 1)[1].strip()[:120]
+
+
+def trim_runtime_seen(seen: dict[str, int], keep: int = 2000) -> dict[str, int]:
+    """Bound the anomaly dedupe table so it cannot grow forever."""
+    if len(seen) <= keep:
+        return seen
+    newest = sorted(seen.items(), key=lambda item: item[1], reverse=True)[:keep]
+    return dict(newest)
+
+
+def collect_runtime_anomalies(
+    lines: list[str],
+    *,
+    now: float,
+    slow_threshold: int,
+    stalled_threshold: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Build anomaly records from recent runtime logs."""
+    question_candidates: list[tuple[int, str]] = []
+    open_dispatches: list[dict[str, Any]] = []
+    anomalies: list[dict[str, Any]] = []
+    latest_signature = ""
+
+    for line in lines:
+        signature = line.strip()
+        if signature and signature > latest_signature:
+            latest_signature = signature
+
+        ts_raw, ts = parse_runtime_timestamp(line)
+        message = extract_runtime_question(line)
+        if message and ts is not None:
+            question_candidates.append((int(ts), message))
+            question_candidates = question_candidates[-50:]
+
+        lower = line.lower()
+        if "dispatching to agent" in lower and ts is not None:
+            nearest_question = ""
+            for qts, qmsg in reversed(question_candidates):
+                if abs(int(ts) - qts) <= 15:
+                    nearest_question = qmsg
+                    break
+            open_dispatches.append(
+                {
+                    "started_at": ts,
+                    "timestamp": ts_raw,
+                    "question": nearest_question or "未知问题",
+                    "last_progress_at": ts,
+                    "marker": "",
+                }
+            )
+            continue
+
+        marker = extract_pipeline_marker(line)
+        if marker and ts is not None and open_dispatches:
+            dispatch = open_dispatches[-1]
+            dispatch["last_progress_at"] = ts
+            dispatch["marker"] = marker
+            continue
+
+        if "dispatch complete" in lower and open_dispatches:
+            dispatch = open_dispatches.pop(0)
+            duration = int(ts - dispatch["started_at"]) if ts is not None else 0
+            queued_final = "queuedfinal=true" in lower
+            replies = 0
+            if "replies=" in lower:
+                try:
+                    replies = int(lower.split("replies=", 1)[1].split(")", 1)[0].split(",", 1)[0])
+                except Exception:
+                    replies = 0
+
+            details = {
+                "question": dispatch["question"],
+                "duration": duration,
+                "timestamp": ts_raw,
+            }
+            if dispatch.get("marker"):
+                details["marker"] = dispatch["marker"]
+
+            if (not queued_final) or replies == 0:
+                details["queued_final"] = queued_final
+                details["replies"] = replies
+                anomalies.append(
+                    {
+                        "signature": signature,
+                        "type": "no_reply",
+                        "message": "任务完成但没有可见回复",
+                        "details": details,
+                    }
+                )
+            elif duration >= stalled_threshold:
+                anomalies.append(
+                    {
+                        "signature": signature,
+                        "type": "stalled_reply",
+                        "message": "任务响应严重超时",
+                        "details": details,
+                    }
+                )
+            elif duration >= slow_threshold:
+                anomalies.append(
+                    {
+                        "signature": signature,
+                        "type": "slow_reply",
+                        "message": "任务响应偏慢",
+                        "details": details,
+                    }
+                )
+            continue
+
+        if "gateway closed" in lower and "1006" in lower:
+            anomalies.append(
+                {
+                    "signature": signature,
+                    "type": "gateway_ws_closed",
+                    "message": "Gateway WebSocket 异常关闭",
+                    "details": {"timestamp": ts_raw},
+                }
+            )
+        elif "abort failed" in lower and "no_active_run" in lower:
+            anomalies.append(
+                {
+                    "signature": signature,
+                    "type": "run_tracking_warning",
+                    "message": "任务状态追踪异常",
+                    "details": {"timestamp": ts_raw},
+                }
+            )
+
+    for dispatch in open_dispatches:
+        duration = int(now - dispatch["started_at"])
+        details = {
+            "question": dispatch["question"],
+            "duration": duration,
+            "timestamp": dispatch["timestamp"],
+        }
+        if dispatch.get("marker"):
+            details["marker"] = dispatch["marker"]
+
+        if dispatch.get("marker") and int(now - dispatch["last_progress_at"]) >= stalled_threshold:
+            anomalies.append(
+                {
+                    "signature": f"stage:{dispatch['timestamp']}:{dispatch['marker']}",
+                    "type": "stage_stuck",
+                    "message": "任务阶段长时间无进展",
+                    "details": details,
+                }
+            )
+        elif duration >= stalled_threshold:
+            anomalies.append(
+                {
+                    "signature": f"open:{dispatch['timestamp']}:{dispatch['question']}",
+                    "type": "dispatch_stuck",
+                    "message": "任务长时间无最终结果",
+                    "details": details,
+                }
+            )
+
+    return anomalies, latest_signature
+
+
+def scan_runtime_anomalies() -> list[dict]:
+    """Detect stalled or no-reply situations from runtime logs."""
+    runtime_log = resolve_runtime_gateway_log()
+    if not runtime_log.exists():
+        return []
+
+    cursor = STORE.load_runtime_value("runtime_anomaly_cursor", {})
+    last_signature = cursor.get("last_signature", "")
+    stalled_threshold = int(CONFIG.get("STALLED_RESPONSE_THRESHOLD", 90))
+    slow_threshold = int(CONFIG.get("SLOW_RESPONSE_THRESHOLD", 30))
+
+    try:
+        with open(runtime_log) as handle:
+            lines = handle.readlines()[-4000:]
+    except Exception as exc:
+        log(f"读取运行日志失败: {exc}", "ERROR")
+        return []
+    anomalies, latest_signature = collect_runtime_anomalies(
+        lines,
+        now=time.time(),
+        slow_threshold=slow_threshold,
+        stalled_threshold=stalled_threshold,
+    )
+    latest_signature = latest_signature or last_signature
+
+    seen = STORE.load_runtime_value("runtime_anomaly_seen", {})
+    recorded: list[dict] = []
+    for anomaly in anomalies:
+        signature = anomaly["signature"]
+        if signature in seen:
+            continue
+        seen[signature] = int(time.time())
+        record_change_log("anomaly", anomaly["message"], anomaly["details"])
+        recorded.append(anomaly)
+
+        alert_key = f"runtime_anomaly_{anomaly['type']}"
+        if should_alert(alert_key):
+            detail_lines = [f"类型: {anomaly['type']}"]
+            if anomaly["details"].get("question"):
+                detail_lines.append(f"问题: {anomaly['details']['question']}")
+            if anomaly["details"].get("duration") is not None:
+                detail_lines.append(f"耗时: {anomaly['details']['duration']}秒")
+            if anomaly["details"].get("timestamp"):
+                detail_lines.append(f"时间: {anomaly['details']['timestamp']}")
+            notify("OpenClaw 任务异常", "\n".join(detail_lines), "warning")
+
+    if latest_signature != last_signature:
+        STORE.save_runtime_value(
+            "runtime_anomaly_cursor",
+            {"last_signature": latest_signature, "source_log": str(runtime_log)},
+        )
+    STORE.save_runtime_value("runtime_anomaly_seen", trim_runtime_seen(seen))
+    return recorded
 
 
 def has_config_changes() -> bool:
@@ -582,6 +896,9 @@ def main():
                     f"响应时间: {latest['duration']}秒\n原因: {latest['reason']}",
                     "warning"
                 )
+
+            scan_pipeline_progress_events()
+            scan_runtime_anomalies()
             
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:

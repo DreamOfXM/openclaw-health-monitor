@@ -1,0 +1,22 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: Core Monitoring
+      labels:
+        - monitoring
+        - guardian
+        - dashboard
+    - title: Packaging
+      labels:
+        - packaging
+        - release
+        - desktop
+    - title: Documentation
+      labels:
+        - docs
+    - title: Maintenance
+      labels:
+        - chore
+        - ci
