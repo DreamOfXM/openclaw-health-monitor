@@ -20,6 +20,8 @@ APP_BUNDLE="$DIST_DIR/${APP_NAME}.app"
 DMG_FILE="$DIST_DIR/${APP_NAME}.dmg"
 RELEASE_DMG="$RELEASE_DIR/${SLUG}-${VERSION}-macos-${ARCH}.dmg"
 RELEASE_ZIP="$RELEASE_DIR/${SLUG}-${VERSION}-macos-${ARCH}.app.zip"
+LATEST_DMG="$RELEASE_DIR/${SLUG}-macos-${ARCH}.dmg"
+LATEST_ZIP="$RELEASE_DIR/${SLUG}-macos-${ARCH}.app.zip"
 
 if [ ! -d "$APP_BUNDLE" ] || [ ! -f "$DMG_FILE" ]; then
     echo "Missing packaged app artifacts in $DIST_DIR" >&2
@@ -29,8 +31,12 @@ fi
 
 mkdir -p "$RELEASE_DIR"
 cp -f "$DMG_FILE" "$RELEASE_DMG"
+cp -f "$DMG_FILE" "$LATEST_DMG"
 ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$RELEASE_ZIP"
+cp -f "$RELEASE_ZIP" "$LATEST_ZIP"
 
 echo "Release artifacts ready:"
 echo "  $RELEASE_DMG"
 echo "  $RELEASE_ZIP"
+echo "  $LATEST_DMG"
+echo "  $LATEST_ZIP"
