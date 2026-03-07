@@ -1,7 +1,7 @@
 # OpenClaw Health Monitor
 
 <p align="center">
-  <img src="./assets/icons/openclaw_lobster_armor.png" alt="OpenClaw Health Monitor" width="180" />
+  <img src="./assets/readme/hero.svg" alt="OpenClaw Health Monitor" width="100%" />
 </p>
 
 <p align="center">
@@ -17,6 +17,9 @@
   </a>
   <a href="https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest/download/openclaw-health-monitor-macos-arm64.app.zip">
     <img src="https://img.shields.io/badge/Desktop-App%20Zip-f97316?style=for-the-badge" alt="Download App Zip" />
+  </a>
+  <a href="https://github.com/DreamOfXM/openclaw-health-monitor/actions/workflows/release.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/DreamOfXM/openclaw-health-monitor/release.yml?style=for-the-badge&label=Release%20Build" alt="Release Build" />
   </a>
   <a href="https://github.com/DreamOfXM/openclaw-health-monitor/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-a855f7?style=for-the-badge" alt="MIT License" />
@@ -77,7 +80,6 @@ cd ~/openclaw-health-monitor
 
 - [下载 DMG](https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest/download/openclaw-health-monitor-macos-arm64.dmg)
 - [下载 App Zip](https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest/download/openclaw-health-monitor-macos-arm64.app.zip)
-- [查看全部 Releases](https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest)
 
 桌面 App 行为：
 

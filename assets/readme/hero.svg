@@ -1,0 +1,50 @@
+<svg width="1200" height="420" viewBox="0 0 1200 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#CBD5E1"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#F97316"/>
+      <stop offset="1" stop-color="#EF4444"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#38BDF8" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#22C55E" stop-opacity="0.4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
+  <circle cx="200" cy="106" r="82" fill="#0B1220" opacity="0.65"/>
+  <circle cx="1010" cy="302" r="126" fill="#111827" opacity="0.6"/>
+  <path d="M188 70L290 100V178C290 236 247 287 188 304C129 287 86 236 86 178V100L188 70Z" fill="url(#shield)"/>
+  <path d="M188 95L268 118V177C268 222 237 262 188 279C139 262 108 222 108 177V118L188 95Z" fill="#0F172A"/>
+  <path d="M187 125L222 160L187 246L152 160L187 125Z" fill="url(#glow)"/>
+  <path d="M185 116L196 148H230L202 167L213 199L185 180L157 199L168 167L140 148H174L185 116Z" fill="url(#accent)"/>
+  <g transform="translate(875 88)">
+    <ellipse cx="86" cy="130" rx="74" ry="86" fill="url(#accent)"/>
+    <ellipse cx="86" cy="122" rx="48" ry="60" fill="#FB923C"/>
+    <rect x="71" y="37" width="30" height="42" rx="14" fill="#F97316"/>
+    <path d="M37 104C19 87 12 67 16 44C42 58 56 77 61 101" stroke="#FDBA74" stroke-width="16" stroke-linecap="round"/>
+    <path d="M136 101C141 77 155 58 181 44C185 67 178 87 160 104" stroke="#FDBA74" stroke-width="16" stroke-linecap="round"/>
+    <path d="M10 152C36 150 56 155 71 169" stroke="#FDBA74" stroke-width="14" stroke-linecap="round"/>
+    <path d="M162 169C177 155 197 150 223 152" stroke="#FDBA74" stroke-width="14" stroke-linecap="round"/>
+    <path d="M31 202C53 196 71 200 84 213" stroke="#FDBA74" stroke-width="12" stroke-linecap="round"/>
+    <path d="M141 213C154 200 172 196 194 202" stroke="#FDBA74" stroke-width="12" stroke-linecap="round"/>
+    <path d="M58 251L40 305" stroke="#FDBA74" stroke-width="12" stroke-linecap="round"/>
+    <path d="M114 251L132 305" stroke="#FDBA74" stroke-width="12" stroke-linecap="round"/>
+    <path d="M80 76H92" stroke="#7C2D12" stroke-width="10" stroke-linecap="round"/>
+    <path d="M46 130C63 118 76 121 84 137" stroke="#7C2D12" stroke-width="12" stroke-linecap="round"/>
+    <path d="M126 137C134 121 147 118 164 130" stroke="#7C2D12" stroke-width="12" stroke-linecap="round"/>
+  </g>
+  <text x="356" y="154" fill="#F8FAFC" font-family="Arial, sans-serif" font-size="52" font-weight="700">OpenClaw Health Monitor</text>
+  <text x="356" y="206" fill="#94A3B8" font-family="Arial, sans-serif" font-size="24">OpenClaw Gateway 的本地监控、诊断与恢复控制台</text>
+  <text x="356" y="258" fill="#E2E8F0" font-family="Arial, sans-serif" font-size="22">Gateway · Guardian · Dashboard</text>
+  <rect x="356" y="292" width="180" height="46" rx="23" fill="#111827"/>
+  <text x="390" y="321" fill="#38BDF8" font-family="Arial, sans-serif" font-size="22" font-weight="700">macOS App</text>
+  <rect x="556" y="292" width="154" height="46" rx="23" fill="#111827"/>
+  <text x="599" y="321" fill="#22C55E" font-family="Arial, sans-serif" font-size="22" font-weight="700">Local Ops</text>
+</svg>
