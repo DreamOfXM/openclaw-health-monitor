@@ -11,6 +11,7 @@ TRACKED_CONFIG="$BASE_DIR/config.conf"
 LOCAL_CONFIG="$BASE_DIR/config.local.conf"
 PYTHON_BIN=""
 OPENCLAW_BIN=""
+NODE_BIN=""
 
 mkdir -p "$LOG_DIR"
 
@@ -59,11 +60,27 @@ resolve_openclaw_bin() {
 }
 
 bootstrap_env() {
+    local login_path=""
+    login_path="$(/bin/zsh -lc 'printf %s "$PATH"' 2>/dev/null || true)"
+    if [ -n "$login_path" ]; then
+        PATH="$login_path:$PATH"
+        export PATH
+    fi
     if [ -z "$PYTHON_BIN" ]; then
         PYTHON_BIN="$(resolve_python_bin || true)"
     fi
     if [ -z "$OPENCLAW_BIN" ]; then
         OPENCLAW_BIN="$(resolve_openclaw_bin || true)"
+    fi
+    if [ -z "$NODE_BIN" ]; then
+        NODE_BIN="$(resolve_cmd_from_login_shell node || true)"
+        if [ -z "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
+            NODE_BIN="$(command -v node)"
+        fi
+    fi
+    if [ -n "$NODE_BIN" ]; then
+        PATH="$(dirname "$NODE_BIN"):$PATH"
+        export PATH
     fi
 }
 
