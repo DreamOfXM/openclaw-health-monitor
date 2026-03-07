@@ -87,6 +87,25 @@ class GuardianRuntimeAnomalyTests(unittest.TestCase):
 
 
 class GuardianProgressPushTests(unittest.TestCase):
+    def test_send_feishu_progress_push_prefixes_user_target(self):
+        commands = []
+        logs = []
+
+        with mock.patch.object(
+            guardian,
+            "run_cmd",
+            side_effect=lambda cmd: commands.append(cmd) or (0, "", ""),
+        ), mock.patch.object(
+            guardian,
+            "log",
+            side_effect=lambda msg, level="INFO": logs.append((level, msg)),
+        ):
+            ok = guardian.send_feishu_progress_push("ou_test", "进度正常")
+
+        self.assertTrue(ok)
+        self.assertIn('--target "user:ou_test"', commands[0])
+        self.assertIn("user:ou_test", logs[0][1])
+
     def test_collect_open_runtime_dispatches_tracks_latest_progress(self):
         lines = [
             "2026-03-06T05:00:00 dm from tester: 帮我继续处理\n",

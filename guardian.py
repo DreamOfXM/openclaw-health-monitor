@@ -369,13 +369,14 @@ def send_feishu_progress_push(open_id: str, message: str) -> bool:
     """Push a proactive progress message back to the user's Feishu DM."""
     if not open_id:
         return False
+    target = open_id if ":" in open_id else f"user:{open_id}"
     code, _, stderr = run_cmd(
-        f'openclaw message send --channel feishu --target "{open_id}" --message "{message.replace(chr(34), chr(39))}"'
+        f'openclaw message send --channel feishu --target "{target}" --message "{message.replace(chr(34), chr(39))}"'
     )
     if code == 0:
-        log(f"进度推送已发送到 {open_id}: {message}")
+        log(f"进度推送已发送到 {target}: {message}")
         return True
-    log(f"进度推送失败({open_id}): {stderr or 'unknown error'}", "ERROR")
+    log(f"进度推送失败({target}): {stderr or 'unknown error'}", "ERROR")
     return False
 
 
