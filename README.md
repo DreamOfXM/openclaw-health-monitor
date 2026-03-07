@@ -41,6 +41,11 @@
 OpenClaw Health Monitor 是一个面向 OpenClaw Gateway 的本地监控与恢复工具。  
 它把 `Gateway`、`Guardian`、`Dashboard` 组合成一套可以直接启动、直接停止、直接定位问题的本地控制台。
 
+它兼容两类 OpenClaw 运行方式：
+
+- 单 agent：关注是否长时间无最终回复、是否出现无可见回复、是否需要主动进度播报
+- 多 agent：在上述基础上继续识别阶段切换、阶段停滞、长任务升级播报
+
 适合两类人：
 
 - 小白用户：下载后直接启动，看到当前是否正常、哪里异常、要不要处理
@@ -95,7 +100,7 @@ cd ~/openclaw-health-monitor
 - `Gateway`
   真正提供 OpenClaw 能力的核心服务
 - `Guardian`
-  后台守护进程，负责健康检查、异常识别、告警和受控恢复
+  后台守护进程，负责健康检查、异常识别、告警、主动进度播报和受控恢复
 - `Dashboard`
   本地网页控制台，负责展示状态、问题定位、错误日志和操作入口
 
@@ -113,7 +118,7 @@ cd ~/openclaw-health-monitor
 ### 核心组件
 
 - `guardian.py`
-  后台守护进程。负责健康检查、异常识别、自动恢复、通知和变更记录。
+  后台守护进程。负责健康检查、异常识别、主动进度播报、自动恢复、通知和变更记录。
 
 - `dashboard.py`
   本地 Web UI。负责展示 Gateway / Guardian / Dashboard 状态、最近异常、内存归因、配置快照和操作入口。
@@ -146,7 +151,7 @@ cd ~/openclaw-health-monitor
    依次拉起 Gateway、Guardian、Dashboard，并记录 PID 文件
 
 3. `Guardian`
-   持续检查 Gateway 是否正常、扫描运行时异常、记录变更并发送通知
+   持续轮询 Gateway 和运行日志，识别长时间无回复、阶段停滞、网关异常，并在长任务场景下主动推送进度或升级播报
 
 4. `Dashboard`
    提供本地问题定位面板、最近异常、内存归因和快照操作
@@ -181,6 +186,41 @@ cd ~/openclaw-health-monitor
 - `abort failed ... no_active_run` 会被识别为任务状态追踪异常
 - 长时间只有 `dispatching to agent` 没有 `dispatch complete` 时，会出现“任务长时间无最终结果”
 - 长时间停留在同一个 `PIPELINE_PROGRESS` 阶段时，会出现“任务阶段长时间无进展”
+
+Guardian 同时支持单 agent / 多 agent：
+
+- 单 agent 场景：
+  - 长时间无最终回复会被识别为 `dispatch_stuck`
+  - 没有可见回复会被识别为 `no_reply`
+- 多 agent 场景：
+  - 会继续识别 `PIPELINE_PROGRESS` 阶段是否长时间无推进
+  - 并可对长任务主动做进度推送和升级播报
+
+### 2.1 轮询与主动进度推送
+
+Guardian 不是被动看板，而是会按固定间隔轮询运行状态和运行日志。
+
+默认相关配置：
+
+- `CHECK_INTERVAL`
+  - 轮询检查间隔
+- `SLOW_RESPONSE_THRESHOLD`
+  - 慢响应阈值
+- `STALLED_RESPONSE_THRESHOLD`
+  - 无回复 / 卡住阈值
+- `PROGRESS_PUSH_INTERVAL`
+  - 长时间无新进展后的首次主动推送阈值
+- `PROGRESS_PUSH_COOLDOWN`
+  - 两次主动进度推送之间的冷却时间
+- `PROGRESS_ESCALATION_INTERVAL`
+  - 长时间无新进展后的升级播报阈值
+
+设计目标：
+
+- 用户不用反复追问“现在做得怎么样了”
+- Guardian 先看运行日志里是否真的长期没有新进展，而不是机械按短周期刷屏
+- 对长时间无新进展的任务，Guardian 会主动播报“当前阶段 / 静默多久 / 已持续多久”
+- 如果静默时间继续拉长，Guardian 会升级播报，而不是静默等待
 
 ### 3. 内存归因验证
 

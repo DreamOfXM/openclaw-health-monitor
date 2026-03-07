@@ -336,12 +336,102 @@ def extract_pipeline_marker(line: str) -> str | None:
     return line.split(marker, 1)[1].strip()[:120]
 
 
+def extract_requester_open_id(line: str) -> str | None:
+    """Extract Feishu requester open_id from a dispatch session key."""
+    marker = "session=agent:main:feishu:direct:"
+    if marker not in line:
+        return None
+    tail = line.split(marker, 1)[1]
+    open_id = tail.split(")", 1)[0].strip()
+    return open_id or None
+
+
+def normalize_stage_label(marker: str) -> str:
+    """Convert a pipeline marker into a generic human-readable stage label."""
+    text = (marker or "").strip()
+    if not text:
+        return "处理中"
+    if "BLOCKED" in text:
+        return "当前阶段阻塞"
+    if "RUNNING" in text:
+        return "当前阶段运行中"
+    if "ANALYZING" in text:
+        return "当前阶段分析中"
+    if "IMPLEMENTING" in text:
+        return "当前阶段处理中"
+    if "->" in text:
+        left, right = [part.strip() for part in text.split("->", 1)]
+        return f"阶段切换: {left} -> {right}"
+    return text.replace("_", " ")
+
+
+def send_feishu_progress_push(open_id: str, message: str) -> bool:
+    """Push a proactive progress message back to the user's Feishu DM."""
+    if not open_id:
+        return False
+    code, _, stderr = run_cmd(
+        f'openclaw message send --channel feishu --target "{open_id}" --message "{message.replace(chr(34), chr(39))}"'
+    )
+    if code == 0:
+        log(f"进度推送已发送到 {open_id}: {message}")
+        return True
+    log(f"进度推送失败({open_id}): {stderr or 'unknown error'}", "ERROR")
+    return False
+
+
 def trim_runtime_seen(seen: dict[str, int], keep: int = 2000) -> dict[str, int]:
     """Bound the anomaly dedupe table so it cannot grow forever."""
     if len(seen) <= keep:
         return seen
     newest = sorted(seen.items(), key=lambda item: item[1], reverse=True)[:keep]
     return dict(newest)
+
+
+def collect_open_runtime_dispatches(lines: list[str]) -> list[dict[str, Any]]:
+    """Track currently open dispatches and their most recent visible progress."""
+    question_candidates: list[tuple[int, str]] = []
+    open_dispatches: list[dict[str, Any]] = []
+
+    for line in lines:
+        ts_raw, ts = parse_runtime_timestamp(line)
+        if ts is None:
+            continue
+
+        question = extract_runtime_question(line)
+        if question:
+            question_candidates.append((int(ts), question))
+            question_candidates = question_candidates[-50:]
+
+        lower = line.lower()
+        if "dispatching to agent" in lower:
+            nearest_question = ""
+            for qts, qmsg in reversed(question_candidates):
+                if abs(int(ts) - qts) <= 15:
+                    nearest_question = qmsg
+                    break
+            open_dispatches.append(
+                {
+                    "started_at": ts,
+                    "last_progress_at": ts,
+                    "timestamp": ts_raw,
+                    "question": nearest_question or "未知任务",
+                    "marker": "",
+                    "requester_open_id": extract_requester_open_id(line) or "",
+                }
+            )
+            continue
+
+        marker = extract_pipeline_marker(line)
+        if marker and open_dispatches:
+            dispatch = open_dispatches[-1]
+            dispatch["last_progress_at"] = ts
+            dispatch["marker"] = marker
+            continue
+
+        if "dispatch complete" in lower and open_dispatches:
+            open_dispatches.pop(0)
+
+    return open_dispatches
 
 
 def collect_runtime_anomalies(
@@ -375,6 +465,7 @@ def collect_runtime_anomalies(
                 if abs(int(ts) - qts) <= 15:
                     nearest_question = qmsg
                     break
+            requester_open_id = extract_requester_open_id(line)
             open_dispatches.append(
                 {
                     "started_at": ts,
@@ -382,6 +473,7 @@ def collect_runtime_anomalies(
                     "question": nearest_question or "未知问题",
                     "last_progress_at": ts,
                     "marker": "",
+                    "requester_open_id": requester_open_id or "",
                 }
             )
             continue
@@ -547,6 +639,108 @@ def scan_runtime_anomalies() -> list[dict]:
         )
     STORE.save_runtime_value("runtime_anomaly_seen", trim_runtime_seen(seen))
     return recorded
+
+
+def push_runtime_progress_updates() -> list[dict]:
+    """Push updates only when runtime logs show a real silence window."""
+    runtime_log = resolve_runtime_gateway_log()
+    if not runtime_log.exists():
+        return []
+
+    try:
+        with open(runtime_log) as handle:
+            lines = handle.readlines()[-4000:]
+    except Exception as exc:
+        log(f"读取运行日志失败: {exc}", "ERROR")
+        return []
+
+    now = time.time()
+    open_dispatches = collect_open_runtime_dispatches(lines)
+
+    progress_interval = int(CONFIG.get("PROGRESS_PUSH_INTERVAL", 180))
+    progress_cooldown = int(CONFIG.get("PROGRESS_PUSH_COOLDOWN", 300))
+    escalation_interval = int(CONFIG.get("PROGRESS_ESCALATION_INTERVAL", 600))
+    push_state = STORE.load_runtime_value("runtime_progress_push_state", {})
+    pushed: list[dict] = []
+    active_keys: set[str] = set()
+
+    for dispatch in open_dispatches:
+        open_id = dispatch.get("requester_open_id") or ""
+        if not open_id:
+            continue
+
+        duration = int(now - dispatch["started_at"])
+        idle = int(now - dispatch["last_progress_at"])
+        marker = dispatch.get("marker") or ""
+        stage_label = normalize_stage_label(marker)
+        push_key = f"{dispatch['timestamp']}:{open_id}"
+        active_keys.add(push_key)
+        state = push_state.get(push_key, {})
+        last_seen_progress_at = int(state.get("last_seen_progress_at", 0))
+        current_progress_at = int(dispatch["last_progress_at"])
+        if current_progress_at != last_seen_progress_at:
+            state["last_seen_progress_at"] = current_progress_at
+            state["last_stage_push"] = 0
+            state["last_escalation_push"] = 0
+            state["last_marker"] = marker
+
+        last_stage_push = int(state.get("last_stage_push", 0))
+        last_escalation_push = int(state.get("last_escalation_push", 0))
+
+        if idle >= progress_interval and now - last_stage_push >= progress_cooldown:
+            message = (
+                f"任务暂时没有新的可见进展。当前阶段：{stage_label}。"
+                f"距离上一次进展已过去 {idle} 秒，累计运行 {duration} 秒，系统会继续自动跟进。"
+            )
+            if send_feishu_progress_push(open_id, message):
+                record_change_log(
+                    "pipeline",
+                    "主动进度推送",
+                    {
+                        "question": dispatch["question"],
+                        "marker": marker or stage_label,
+                        "duration": duration,
+                        "idle": idle,
+                        "timestamp": dispatch["timestamp"],
+                    },
+                )
+                state["last_stage_push"] = int(now)
+                pushed.append(
+                    {"type": "progress_push", "open_id": open_id, "duration": duration, "idle": idle}
+                )
+
+        if idle >= escalation_interval and now - last_escalation_push >= escalation_interval:
+            message = (
+                f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
+                f"静默已持续 {idle} 秒，累计运行 {duration} 秒，系统已将其升级关注并会继续同步。"
+            )
+            if send_feishu_progress_push(open_id, message):
+                record_change_log(
+                    "anomaly",
+                    "长任务主动升级播报",
+                    {
+                        "question": dispatch["question"],
+                        "marker": marker or stage_label,
+                        "duration": duration,
+                        "idle": idle,
+                        "timestamp": dispatch["timestamp"],
+                    },
+                )
+                state["last_escalation_push"] = int(now)
+                pushed.append(
+                    {"type": "escalation_push", "open_id": open_id, "duration": duration, "idle": idle}
+                )
+
+        if state:
+            push_state[push_key] = state
+
+    for push_key in list(push_state.keys()):
+        if push_key not in active_keys:
+            push_state.pop(push_key, None)
+
+    if push_state:
+        STORE.save_runtime_value("runtime_progress_push_state", trim_runtime_seen(push_state, keep=500))
+    return pushed
 
 
 def has_config_changes() -> bool:
@@ -912,6 +1106,7 @@ def main():
 
             scan_pipeline_progress_events()
             scan_runtime_anomalies()
+            push_runtime_progress_updates()
             
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:
