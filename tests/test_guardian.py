@@ -126,6 +126,21 @@ class GuardianProgressPushTests(unittest.TestCase):
         self.assertEqual(dispatches[0]["marker"], "DEV_IMPLEMENTING")
         self.assertEqual(dispatches[0]["requester_open_id"], "ou_test")
 
+    def test_collect_open_runtime_dispatches_keeps_latest_for_same_session(self):
+        lines = [
+            "2026-03-06T05:00:00 dm from tester: 旧问题\n",
+            "2026-03-06T05:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)\n",
+            "2026-03-06T13:00:00 dm from tester: 新问题\n",
+            "2026-03-06T13:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)\n",
+            "2026-03-06T13:00:30 PIPELINE_PROGRESS: TEST_RUNNING\n",
+        ]
+
+        dispatches = guardian.collect_open_runtime_dispatches(lines)
+
+        self.assertEqual(len(dispatches), 1)
+        self.assertEqual(dispatches[0]["question"], "新问题")
+        self.assertEqual(dispatches[0]["marker"], "TEST_RUNNING")
+
     def test_push_runtime_progress_updates_only_when_idle(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

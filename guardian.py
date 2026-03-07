@@ -346,6 +346,18 @@ def extract_requester_open_id(line: str) -> str | None:
     return open_id or None
 
 
+def extract_runtime_session_key(line: str) -> str | None:
+    """Extract the session key from a runtime dispatch line when present."""
+    marker = "session="
+    if marker not in line:
+        return None
+    tail = line.split(marker, 1)[1]
+    for sep in (")", " ", "\n"):
+        tail = tail.split(sep, 1)[0]
+    session_key = tail.strip()
+    return session_key or None
+
+
 def normalize_stage_label(marker: str) -> str:
     """Convert a pipeline marker into a generic human-readable stage label."""
     text = (marker or "").strip()
@@ -406,7 +418,12 @@ def trim_runtime_seen(seen: dict[str, int], keep: int = 2000) -> dict[str, int]:
 def collect_open_runtime_dispatches(lines: list[str]) -> list[dict[str, Any]]:
     """Track currently open dispatches and their most recent visible progress."""
     question_candidates: list[tuple[int, str]] = []
-    open_dispatches: list[dict[str, Any]] = []
+    open_dispatches: dict[str, dict[str, Any]] = {}
+
+    def most_recent_key() -> str | None:
+        if not open_dispatches:
+            return None
+        return max(open_dispatches.items(), key=lambda item: item[1]["started_at"])[0]
 
     for line in lines:
         ts_raw, ts = parse_runtime_timestamp(line)
@@ -425,29 +442,38 @@ def collect_open_runtime_dispatches(lines: list[str]) -> list[dict[str, Any]]:
                 if abs(int(ts) - qts) <= 15:
                     nearest_question = qmsg
                     break
-            open_dispatches.append(
-                {
-                    "started_at": ts,
-                    "last_progress_at": ts,
-                    "timestamp": ts_raw,
-                    "question": nearest_question or "未知任务",
-                    "marker": "",
-                    "requester_open_id": extract_requester_open_id(line) or "",
-                }
+            session_key = (
+                extract_runtime_session_key(line)
+                or extract_requester_open_id(line)
+                or f"dispatch:{ts_raw}"
             )
+            open_dispatches[session_key] = {
+                "session_key": session_key,
+                "started_at": ts,
+                "last_progress_at": ts,
+                "timestamp": ts_raw,
+                "question": nearest_question or "未知任务",
+                "marker": "",
+                "requester_open_id": extract_requester_open_id(line) or "",
+            }
             continue
 
         marker = extract_pipeline_marker(line)
         if marker and open_dispatches:
-            dispatch = open_dispatches[-1]
+            current_key = most_recent_key()
+            if not current_key:
+                continue
+            dispatch = open_dispatches[current_key]
             dispatch["last_progress_at"] = ts
             dispatch["marker"] = marker
             continue
 
         if "dispatch complete" in lower and open_dispatches:
-            open_dispatches.pop(0)
+            current_key = most_recent_key()
+            if current_key:
+                open_dispatches.pop(current_key, None)
 
-    return open_dispatches
+    return sorted(open_dispatches.values(), key=lambda item: item["started_at"])
 
 
 def collect_runtime_anomalies(
@@ -459,9 +485,14 @@ def collect_runtime_anomalies(
 ) -> tuple[list[dict[str, Any]], str]:
     """Build anomaly records from recent runtime logs."""
     question_candidates: list[tuple[int, str]] = []
-    open_dispatches: list[dict[str, Any]] = []
+    open_dispatches: dict[str, dict[str, Any]] = {}
     anomalies: list[dict[str, Any]] = []
     latest_signature = ""
+
+    def most_recent_key() -> str | None:
+        if not open_dispatches:
+            return None
+        return max(open_dispatches.items(), key=lambda item: item[1]["started_at"])[0]
 
     for line in lines:
         signature = line.strip()
@@ -482,27 +513,33 @@ def collect_runtime_anomalies(
                     nearest_question = qmsg
                     break
             requester_open_id = extract_requester_open_id(line)
-            open_dispatches.append(
-                {
-                    "started_at": ts,
-                    "timestamp": ts_raw,
-                    "question": nearest_question or "未知问题",
-                    "last_progress_at": ts,
-                    "marker": "",
-                    "requester_open_id": requester_open_id or "",
-                }
-            )
+            session_key = extract_runtime_session_key(line) or requester_open_id or f"dispatch:{ts_raw}"
+            open_dispatches[session_key] = {
+                "session_key": session_key,
+                "started_at": ts,
+                "timestamp": ts_raw,
+                "question": nearest_question or "未知问题",
+                "last_progress_at": ts,
+                "marker": "",
+                "requester_open_id": requester_open_id or "",
+            }
             continue
 
         marker = extract_pipeline_marker(line)
         if marker and ts is not None and open_dispatches:
-            dispatch = open_dispatches[-1]
+            current_key = most_recent_key()
+            if not current_key:
+                continue
+            dispatch = open_dispatches[current_key]
             dispatch["last_progress_at"] = ts
             dispatch["marker"] = marker
             continue
 
         if "dispatch complete" in lower and open_dispatches:
-            dispatch = open_dispatches.pop(0)
+            current_key = most_recent_key()
+            if not current_key:
+                continue
+            dispatch = open_dispatches.pop(current_key)
             duration = int(ts - dispatch["started_at"]) if ts is not None else 0
             queued_final = "queuedfinal=true" in lower
             replies = 0
@@ -570,7 +607,7 @@ def collect_runtime_anomalies(
                 }
             )
 
-    for dispatch in open_dispatches:
+    for dispatch in sorted(open_dispatches.values(), key=lambda item: item["started_at"]):
         duration = int(now - dispatch["started_at"])
         details = {
             "question": dispatch["question"],
