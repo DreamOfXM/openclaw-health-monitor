@@ -431,6 +431,35 @@ def normalize_stage_label(marker: str) -> str:
     return text.replace("_", " ")
 
 
+def classify_guardian_followup_error(output: str) -> str:
+    """Classify follow-up failures into coarse blocking reasons."""
+    text = (output or "").lower()
+    if "session file locked" in text or ".jsonl.lock" in text:
+        return "session_lock"
+    if "oauth token refresh failed" in text or "re-authenticate" in text or "(auth)" in text:
+        return "model_auth"
+    if "model_not_found" in text or "404 page not found" in text:
+        return "model_unavailable"
+    if "all models failed" in text:
+        return "model_pool_failed"
+    if "timeout" in text:
+        return "timeout"
+    return "unknown"
+
+
+def blocked_reason_label(reason: str) -> str:
+    """Render a user-facing blocked reason label."""
+    mapping = {
+        "session_lock": "会话资源被占用",
+        "model_auth": "模型认证失效",
+        "model_unavailable": "模型不可用",
+        "model_pool_failed": "模型链路不可用",
+        "timeout": "会话响应超时",
+        "unknown": "内部执行异常",
+    }
+    return mapping.get(reason, "内部执行异常")
+
+
 def format_duration_label(seconds: int) -> str:
     """Render durations in a human-friendly label for push notifications."""
     total = max(0, int(seconds))
@@ -479,12 +508,14 @@ def lookup_openclaw_session_id(session_key: str) -> str | None:
     return cache.get(session_key)
 
 
-def send_guardian_followup(session_key: str, message: str, *, deliver: bool = True) -> bool:
+def send_guardian_followup(
+    session_key: str, message: str, *, deliver: bool = True
+) -> tuple[bool, str | None]:
     """Send a marked system follow-up into an existing OpenClaw session."""
     session_id = lookup_openclaw_session_id(session_key)
     if not session_id:
         log(f"守护追问失败，未找到会话: {session_key}", "ERROR")
-        return False
+        return False, "unknown"
 
     args = [
         "openclaw",
@@ -504,13 +535,14 @@ def send_guardian_followup(session_key: str, message: str, *, deliver: bool = Tr
     code, stdout, stderr = run_args(args, timeout=timeout)
     if code == 0:
         log(f"守护追问已发送到会话 {session_key}: {message}")
-        return True
+        return True, None
+    error_text = stderr or stdout or "unknown error"
     log(
         f"守护追问失败({session_key} -> {session_id}): "
-        f"{stderr or stdout or 'unknown error'}",
+        f"{error_text}",
         "ERROR",
     )
-    return False
+    return False, classify_guardian_followup_error(error_text)
 
 
 def send_feishu_progress_push(open_id: str, message: str) -> bool:
@@ -533,17 +565,22 @@ def deliver_guardian_progress_update(
     *,
     followup_message: str,
     fallback_message: str,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Deliver progress updates with retry, then fall back to direct Feishu push."""
     session_key = dispatch.get("session_key") or ""
     open_id = dispatch.get("requester_open_id") or ""
     retries = max(1, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRIES", 2)))
     retry_delay = max(0, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRY_DELAY", 3)))
+    blocked_reason: str | None = None
 
     if session_key:
         for attempt in range(1, retries + 1):
-            if send_guardian_followup(session_key, followup_message):
-                return "session"
+            ok, error_kind = send_guardian_followup(session_key, followup_message)
+            if ok:
+                return "session", None
+            blocked_reason = error_kind or blocked_reason
+            if blocked_reason in {"session_lock", "model_auth", "model_unavailable", "model_pool_failed"}:
+                break
             if attempt < retries and retry_delay:
                 time.sleep(retry_delay)
         log(
@@ -552,8 +589,8 @@ def deliver_guardian_progress_update(
         )
 
     if open_id and send_feishu_progress_push(open_id, fallback_message):
-        return "feishu"
-    return None
+        return "feishu", blocked_reason
+    return None, blocked_reason
 
 
 def trim_runtime_seen(seen: dict[str, int], keep: int = 2000) -> dict[str, int]:
@@ -868,6 +905,7 @@ def push_runtime_progress_updates() -> list[dict]:
     progress_interval = int(CONFIG.get("PROGRESS_PUSH_INTERVAL", 180))
     progress_cooldown = int(CONFIG.get("PROGRESS_PUSH_COOLDOWN", 300))
     escalation_interval = int(CONFIG.get("PROGRESS_ESCALATION_INTERVAL", 600))
+    blocked_cooldown = int(CONFIG.get("GUARDIAN_BLOCKED_COOLDOWN", 900))
     push_state = STORE.load_runtime_value("runtime_progress_push_state", {})
     pushed: list[dict] = []
     active_keys: set[str] = set()
@@ -900,9 +938,17 @@ def push_runtime_progress_updates() -> list[dict]:
             state["last_stage_push"] = 0
             state["last_escalation_push"] = 0
             state["last_marker"] = marker
+            state["blocked_reason"] = ""
+            state["blocked_until"] = 0
 
         last_stage_push = int(state.get("last_stage_push", 0))
         last_escalation_push = int(state.get("last_escalation_push", 0))
+        blocked_until = int(state.get("blocked_until", 0))
+        blocked_reason = str(state.get("blocked_reason", ""))
+        if blocked_until > int(now):
+            if state:
+                push_state[push_key] = state
+            continue
 
         if idle >= progress_interval and now - last_stage_push >= progress_cooldown:
             followup = (
@@ -919,7 +965,7 @@ def push_runtime_progress_updates() -> list[dict]:
                 f"距离上一次进展已过去 {format_duration_label(idle)}，"
                 f"累计运行 {format_duration_label(duration)}，系统会继续自动跟进。"
             )
-            channel = deliver_guardian_progress_update(
+            channel, failed_reason = deliver_guardian_progress_update(
                 dispatch,
                 followup_message=followup,
                 fallback_message=fallback_message,
@@ -936,9 +982,13 @@ def push_runtime_progress_updates() -> list[dict]:
                         "timestamp": dispatch["timestamp"],
                         "session_key": session_key,
                         "delivery_channel": channel,
+                        "blocked_reason": failed_reason or "",
                     },
                 )
                 state["last_stage_push"] = int(now)
+                if failed_reason in {"session_lock", "model_auth", "model_unavailable", "model_pool_failed"}:
+                    state["blocked_reason"] = failed_reason
+                    state["blocked_until"] = int(now) + blocked_cooldown
                 pushed.append(
                     {
                         "type": "progress_push",
@@ -946,6 +996,7 @@ def push_runtime_progress_updates() -> list[dict]:
                         "duration": duration,
                         "idle": idle,
                         "delivery_channel": channel,
+                        "blocked_reason": failed_reason or "",
                     }
                 )
 
@@ -957,12 +1008,22 @@ def push_runtime_progress_updates() -> list[dict]:
                 f"累计运行={format_duration_label(duration)}；当前问题={dispatch['question']}。"
                 "请明确向用户同步：当前是否仍在执行、是否已阻塞、下一步动作是什么。"
             )
+            escalation_reason = blocked_reason_label(blocked_reason) if blocked_reason else ""
             fallback_message = (
-                f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
-                f"静默已持续 {format_duration_label(idle)}，"
-                f"累计运行 {format_duration_label(duration)}，系统已将其升级关注并会继续同步。"
+                (
+                    f"任务当前已阻塞。当前阶段：{stage_label}。"
+                    f"阻塞原因：{escalation_reason}。"
+                    f"已静默 {format_duration_label(idle)}，累计运行 {format_duration_label(duration)}。"
+                    "系统会继续跟进，但会先等待阻塞解除。"
+                )
+                if blocked_reason
+                else (
+                    f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
+                    f"静默已持续 {format_duration_label(idle)}，"
+                    f"累计运行 {format_duration_label(duration)}，系统已将其升级关注并会继续同步。"
+                )
             )
-            channel = deliver_guardian_progress_update(
+            channel, failed_reason = deliver_guardian_progress_update(
                 dispatch,
                 followup_message=followup,
                 fallback_message=fallback_message,
@@ -979,9 +1040,13 @@ def push_runtime_progress_updates() -> list[dict]:
                         "timestamp": dispatch["timestamp"],
                         "session_key": session_key,
                         "delivery_channel": channel,
+                        "blocked_reason": failed_reason or blocked_reason or "",
                     },
                 )
                 state["last_escalation_push"] = int(now)
+                if failed_reason in {"session_lock", "model_auth", "model_unavailable", "model_pool_failed"}:
+                    state["blocked_reason"] = failed_reason
+                    state["blocked_until"] = int(now) + blocked_cooldown
                 pushed.append(
                     {
                         "type": "escalation_push",
@@ -989,6 +1054,7 @@ def push_runtime_progress_updates() -> list[dict]:
                         "duration": duration,
                         "idle": idle,
                         "delivery_channel": channel,
+                        "blocked_reason": failed_reason or blocked_reason or "",
                     }
                 )
 
