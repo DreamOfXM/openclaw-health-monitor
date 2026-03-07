@@ -108,6 +108,17 @@ def run_cmd(cmd: str) -> tuple:
         return -1, "", str(e)
 
 
+def run_args(args: list[str], timeout: int = 30) -> tuple[int, str, str]:
+    """Run a subprocess without going through a shell."""
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", "timeout"
+    except Exception as e:
+        return -1, "", str(e)
+
+
 def get_process_info(name: str) -> Optional[Dict]:
     """获取进程信息"""
     code, stdout, _ = run_cmd(f'ps aux | grep -i "{name}" | grep -v grep')
@@ -390,6 +401,72 @@ def format_duration_label(seconds: int) -> str:
     remain = total % 3600
     minutes = remain // 60
     return f"{hours}小时" if minutes == 0 else f"{hours}小时{minutes}分钟"
+
+
+def lookup_openclaw_session_id(session_key: str) -> str | None:
+    """Resolve a sessionKey to sessionId using the local OpenClaw session store."""
+    if not session_key:
+        return None
+    cache = STORE.load_runtime_value("openclaw_session_cache", {})
+    cached = cache.get(session_key)
+    if cached:
+        return cached
+
+    code, stdout, stderr = run_args(
+        ["openclaw", "sessions", "--json", "--all-agents", "--active", "10080"],
+        timeout=20,
+    )
+    if code != 0 or not stdout.strip():
+        log(f"读取 OpenClaw 会话失败: {stderr or 'unknown error'}", "ERROR")
+        return None
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        log("解析 OpenClaw 会话列表失败", "ERROR")
+        return None
+
+    for item in payload.get("sessions", []):
+        key = item.get("key")
+        session_id = item.get("sessionId")
+        if key and session_id:
+            cache[key] = session_id
+
+    if cache:
+        STORE.save_runtime_value("openclaw_session_cache", trim_runtime_seen(cache, keep=500))
+    return cache.get(session_key)
+
+
+def send_guardian_followup(session_key: str, message: str, *, deliver: bool = True) -> bool:
+    """Send a marked system follow-up into an existing OpenClaw session."""
+    session_id = lookup_openclaw_session_id(session_key)
+    if not session_id:
+        log(f"守护追问失败，未找到会话: {session_key}", "ERROR")
+        return False
+
+    args = [
+        "openclaw",
+        "agent",
+        "--session-id",
+        session_id,
+        "--message",
+        message,
+        "--json",
+        "--timeout",
+        "120",
+    ]
+    if deliver:
+        args.append("--deliver")
+
+    code, stdout, stderr = run_args(args, timeout=150)
+    if code == 0:
+        log(f"守护追问已发送到会话 {session_key}: {message}")
+        return True
+    log(
+        f"守护追问失败({session_key} -> {session_id}): "
+        f"{stderr or stdout or 'unknown error'}",
+        "ERROR",
+    )
+    return False
 
 
 def send_feishu_progress_push(open_id: str, message: str) -> bool:
@@ -719,18 +796,27 @@ def push_runtime_progress_updates() -> list[dict]:
 
     for dispatch in open_dispatches:
         open_id = dispatch.get("requester_open_id") or ""
-        if not open_id:
+        session_key = dispatch.get("session_key") or ""
+        if not session_key and not open_id:
             continue
 
         duration = int(now - dispatch["started_at"])
         idle = int(now - dispatch["last_progress_at"])
         marker = dispatch.get("marker") or ""
         stage_label = normalize_stage_label(marker)
-        push_key = f"{dispatch['timestamp']}:{open_id}"
+        push_key = session_key or f"{dispatch['timestamp']}:{open_id}"
         active_keys.add(push_key)
         state = push_state.get(push_key, {})
         last_seen_progress_at = int(state.get("last_seen_progress_at", 0))
         current_progress_at = int(dispatch["last_progress_at"])
+        last_dispatch_timestamp = str(state.get("last_dispatch_timestamp", ""))
+        current_dispatch_timestamp = str(dispatch["timestamp"])
+        if current_dispatch_timestamp != last_dispatch_timestamp:
+            state["last_dispatch_timestamp"] = current_dispatch_timestamp
+            state["last_seen_progress_at"] = current_progress_at
+            state["last_stage_push"] = 0
+            state["last_escalation_push"] = 0
+            state["last_marker"] = marker
         if current_progress_at != last_seen_progress_at:
             state["last_seen_progress_at"] = current_progress_at
             state["last_stage_push"] = 0
@@ -741,21 +827,35 @@ def push_runtime_progress_updates() -> list[dict]:
         last_escalation_push = int(state.get("last_escalation_push", 0))
 
         if idle >= progress_interval and now - last_stage_push >= progress_cooldown:
-            message = (
-                f"任务暂时没有新的可见进展。当前阶段：{stage_label}。"
-                f"距离上一次进展已过去 {format_duration_label(idle)}，"
-                f"累计运行 {format_duration_label(duration)}，系统会继续自动跟进。"
+            followup = (
+                "GUARDIAN_FOLLOWUP: 这是一条守护系统自动追问，不是用户新需求。"
+                "请不要开始新任务，也不要改写用户原始需求。"
+                f"请仅基于当前会话同步进展。当前阶段={stage_label}；"
+                f"距离上一次可见进展={format_duration_label(idle)}；"
+                f"累计运行={format_duration_label(duration)}；"
+                f"当前问题={dispatch['question']}。"
+                "请优先给用户一句简洁进度说明；若当前任务仍在处理中，只汇报现状，不要重新起新任务。"
             )
-            if send_feishu_progress_push(open_id, message):
+            if (session_key and send_guardian_followup(session_key, followup)) or (
+                not session_key and open_id and send_feishu_progress_push(
+                    open_id,
+                    (
+                        f"任务暂时没有新的可见进展。当前阶段：{stage_label}。"
+                        f"距离上一次进展已过去 {format_duration_label(idle)}，"
+                        f"累计运行 {format_duration_label(duration)}，系统会继续自动跟进。"
+                    ),
+                )
+            ):
                 record_change_log(
                     "pipeline",
-                    "主动进度推送",
+                    "守护系统主动追问",
                     {
                         "question": dispatch["question"],
                         "marker": marker or stage_label,
                         "duration": duration,
                         "idle": idle,
                         "timestamp": dispatch["timestamp"],
+                        "session_key": session_key,
                     },
                 )
                 state["last_stage_push"] = int(now)
@@ -764,21 +864,33 @@ def push_runtime_progress_updates() -> list[dict]:
                 )
 
         if idle >= escalation_interval and now - last_escalation_push >= escalation_interval:
-            message = (
-                f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
-                f"静默已持续 {format_duration_label(idle)}，"
-                f"累计运行 {format_duration_label(duration)}，系统已将其升级关注并会继续同步。"
+            followup = (
+                "GUARDIAN_ESCALATION: 这是一条守护系统升级催办，不是用户新需求。"
+                "请不要启动新任务。"
+                f"当前阶段={stage_label}；静默已持续={format_duration_label(idle)}；"
+                f"累计运行={format_duration_label(duration)}；当前问题={dispatch['question']}。"
+                "请明确向用户同步：当前是否仍在执行、是否已阻塞、下一步动作是什么。"
             )
-            if send_feishu_progress_push(open_id, message):
+            if (session_key and send_guardian_followup(session_key, followup)) or (
+                not session_key and open_id and send_feishu_progress_push(
+                    open_id,
+                    (
+                        f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
+                        f"静默已持续 {format_duration_label(idle)}，"
+                        f"累计运行 {format_duration_label(duration)}，系统已将其升级关注并会继续同步。"
+                    ),
+                )
+            ):
                 record_change_log(
                     "anomaly",
-                    "长任务主动升级播报",
+                    "守护系统升级催办",
                     {
                         "question": dispatch["question"],
                         "marker": marker or stage_label,
                         "duration": duration,
                         "idle": idle,
                         "timestamp": dispatch["timestamp"],
+                        "session_key": session_key,
                     },
                 )
                 state["last_escalation_push"] = int(now)

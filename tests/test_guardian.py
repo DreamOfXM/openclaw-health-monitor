@@ -112,6 +112,57 @@ class GuardianProgressPushTests(unittest.TestCase):
         self.assertIn('--target "user:ou_test"', commands[0])
         self.assertIn("user:ou_test", logs[0][1])
 
+    def test_push_runtime_progress_updates_prefers_guardian_followup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            runtime_log = base / "runtime.log"
+            runtime_log.write_text(
+                "\n".join(
+                    [
+                        "2026-03-06T05:00:00 dm from tester: 帮我继续处理",
+                        "2026-03-06T05:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)",
+                        "2026-03-06T05:04:30 PIPELINE_PROGRESS: DEV_IMPLEMENTING",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _, progress_ts = guardian.parse_runtime_timestamp(
+                "2026-03-06T05:04:30 PIPELINE_PROGRESS: DEV_IMPLEMENTING\n"
+            )
+            followups = []
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "PROGRESS_PUSH_INTERVAL": 180,
+                        "PROGRESS_PUSH_COOLDOWN": 300,
+                        "PROGRESS_ESCALATION_INTERVAL": 600,
+                    },
+                ), \
+                mock.patch.object(guardian, "resolve_runtime_gateway_log", return_value=runtime_log), \
+                mock.patch.object(guardian, "time", wraps=guardian.time) as mock_time, \
+                mock.patch.object(
+                    guardian,
+                    "send_guardian_followup",
+                    side_effect=lambda session_key, message, deliver=True: followups.append(
+                        (session_key, message, deliver)
+                    )
+                    or True,
+                ), \
+                mock.patch.object(guardian, "send_feishu_progress_push") as feishu_push, \
+                mock.patch.object(guardian, "record_change_log"):
+                mock_time.time.return_value = (progress_ts or 0) + 220
+                result = guardian.push_runtime_progress_updates()
+
+            self.assertEqual(result[0]["type"], "progress_push")
+            self.assertEqual(followups[0][0], "agent:main:feishu:direct:ou_test")
+            self.assertIn("GUARDIAN_FOLLOWUP:", followups[0][1])
+            feishu_push.assert_not_called()
+
     def test_collect_open_runtime_dispatches_tracks_latest_progress(self):
         lines = [
             "2026-03-06T05:00:00 dm from tester: 帮我继续处理\n",
@@ -177,9 +228,13 @@ class GuardianProgressPushTests(unittest.TestCase):
                 mock.patch.object(guardian, "time", wraps=guardian.time) as mock_time, \
                 mock.patch.object(
                     guardian,
-                    "send_feishu_progress_push",
-                    side_effect=lambda open_id, message: pushes.append((open_id, message)) or True,
+                    "send_guardian_followup",
+                    side_effect=lambda session_key, message, deliver=True: pushes.append(
+                        (session_key, message, deliver)
+                    )
+                    or True,
                 ), \
+                mock.patch.object(guardian, "send_feishu_progress_push"), \
                 mock.patch.object(
                     guardian,
                     "record_change_log",
@@ -194,8 +249,8 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(len(second), 1)
             self.assertEqual(second[0]["type"], "progress_push")
             self.assertEqual(second[0]["idle"], 220)
-            self.assertEqual(pushes[0][0], "ou_test")
-            self.assertIn("没有新的可见进展", pushes[0][1])
+            self.assertEqual(pushes[0][0], "agent:main:feishu:direct:ou_test")
+            self.assertIn("GUARDIAN_FOLLOWUP:", pushes[0][1])
             self.assertEqual(change_logs[0][2]["idle"], 220)
 
     def test_push_runtime_progress_updates_resets_after_new_progress(self):
@@ -233,9 +288,13 @@ class GuardianProgressPushTests(unittest.TestCase):
                 mock.patch.object(guardian, "time", wraps=guardian.time) as mock_time, \
                 mock.patch.object(
                     guardian,
-                    "send_feishu_progress_push",
-                    side_effect=lambda open_id, message: pushes.append((open_id, message)) or True,
+                    "send_guardian_followup",
+                    side_effect=lambda session_key, message, deliver=True: pushes.append(
+                        (session_key, message, deliver)
+                    )
+                    or True,
                 ), \
+                mock.patch.object(guardian, "send_feishu_progress_push"), \
                 mock.patch.object(guardian, "record_change_log"):
                 mock_time.time.return_value = (first_progress_ts or 0) + 220
                 guardian.push_runtime_progress_updates()
@@ -263,7 +322,7 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(len(pushes), 2)
             self.assertEqual(second, [])
             self.assertEqual(third[0]["type"], "progress_push")
-            self.assertIn("当前阶段", pushes[-1][1] or "")
+            self.assertIn("GUARDIAN_FOLLOWUP:", pushes[-1][1] or "")
             self.assertIn("3分40秒", pushes[-1][1] or "")
 
 
