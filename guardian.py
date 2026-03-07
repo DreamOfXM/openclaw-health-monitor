@@ -452,12 +452,13 @@ def send_guardian_followup(session_key: str, message: str, *, deliver: bool = Tr
         message,
         "--json",
         "--timeout",
-        "120",
+        str(int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120))),
     ]
     if deliver:
         args.append("--deliver")
 
-    code, stdout, stderr = run_args(args, timeout=150)
+    timeout = int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120)) + 30
+    code, stdout, stderr = run_args(args, timeout=timeout)
     if code == 0:
         log(f"守护追问已发送到会话 {session_key}: {message}")
         return True
@@ -482,6 +483,34 @@ def send_feishu_progress_push(open_id: str, message: str) -> bool:
         return True
     log(f"进度推送失败({target}): {stderr or 'unknown error'}", "ERROR")
     return False
+
+
+def deliver_guardian_progress_update(
+    dispatch: dict[str, Any],
+    *,
+    followup_message: str,
+    fallback_message: str,
+) -> str | None:
+    """Deliver progress updates with retry, then fall back to direct Feishu push."""
+    session_key = dispatch.get("session_key") or ""
+    open_id = dispatch.get("requester_open_id") or ""
+    retries = max(1, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRIES", 2)))
+    retry_delay = max(0, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRY_DELAY", 3)))
+
+    if session_key:
+        for attempt in range(1, retries + 1):
+            if send_guardian_followup(session_key, followup_message):
+                return "session"
+            if attempt < retries and retry_delay:
+                time.sleep(retry_delay)
+        log(
+            f"守护追问连续失败，降级为直接消息推送: {session_key}",
+            "WARNING",
+        )
+
+    if open_id and send_feishu_progress_push(open_id, fallback_message):
+        return "feishu"
+    return None
 
 
 def trim_runtime_seen(seen: dict[str, int], keep: int = 2000) -> dict[str, int]:
@@ -836,16 +865,17 @@ def push_runtime_progress_updates() -> list[dict]:
                 f"当前问题={dispatch['question']}。"
                 "请优先给用户一句简洁进度说明；若当前任务仍在处理中，只汇报现状，不要重新起新任务。"
             )
-            if (session_key and send_guardian_followup(session_key, followup)) or (
-                not session_key and open_id and send_feishu_progress_push(
-                    open_id,
-                    (
-                        f"任务暂时没有新的可见进展。当前阶段：{stage_label}。"
-                        f"距离上一次进展已过去 {format_duration_label(idle)}，"
-                        f"累计运行 {format_duration_label(duration)}，系统会继续自动跟进。"
-                    ),
-                )
-            ):
+            fallback_message = (
+                f"任务暂时没有新的可见进展。当前阶段：{stage_label}。"
+                f"距离上一次进展已过去 {format_duration_label(idle)}，"
+                f"累计运行 {format_duration_label(duration)}，系统会继续自动跟进。"
+            )
+            channel = deliver_guardian_progress_update(
+                dispatch,
+                followup_message=followup,
+                fallback_message=fallback_message,
+            )
+            if channel:
                 record_change_log(
                     "pipeline",
                     "守护系统主动追问",
@@ -856,11 +886,18 @@ def push_runtime_progress_updates() -> list[dict]:
                         "idle": idle,
                         "timestamp": dispatch["timestamp"],
                         "session_key": session_key,
+                        "delivery_channel": channel,
                     },
                 )
                 state["last_stage_push"] = int(now)
                 pushed.append(
-                    {"type": "progress_push", "open_id": open_id, "duration": duration, "idle": idle}
+                    {
+                        "type": "progress_push",
+                        "open_id": open_id,
+                        "duration": duration,
+                        "idle": idle,
+                        "delivery_channel": channel,
+                    }
                 )
 
         if idle >= escalation_interval and now - last_escalation_push >= escalation_interval:
@@ -871,16 +908,17 @@ def push_runtime_progress_updates() -> list[dict]:
                 f"累计运行={format_duration_label(duration)}；当前问题={dispatch['question']}。"
                 "请明确向用户同步：当前是否仍在执行、是否已阻塞、下一步动作是什么。"
             )
-            if (session_key and send_guardian_followup(session_key, followup)) or (
-                not session_key and open_id and send_feishu_progress_push(
-                    open_id,
-                    (
-                        f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
-                        f"静默已持续 {format_duration_label(idle)}，"
-                        f"累计运行 {format_duration_label(duration)}，系统已将其升级关注并会继续同步。"
-                    ),
-                )
-            ):
+            fallback_message = (
+                f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
+                f"静默已持续 {format_duration_label(idle)}，"
+                f"累计运行 {format_duration_label(duration)}，系统已将其升级关注并会继续同步。"
+            )
+            channel = deliver_guardian_progress_update(
+                dispatch,
+                followup_message=followup,
+                fallback_message=fallback_message,
+            )
+            if channel:
                 record_change_log(
                     "anomaly",
                     "守护系统升级催办",
@@ -891,11 +929,18 @@ def push_runtime_progress_updates() -> list[dict]:
                         "idle": idle,
                         "timestamp": dispatch["timestamp"],
                         "session_key": session_key,
+                        "delivery_channel": channel,
                     },
                 )
                 state["last_escalation_push"] = int(now)
                 pushed.append(
-                    {"type": "escalation_push", "open_id": open_id, "duration": duration, "idle": idle}
+                    {
+                        "type": "escalation_push",
+                        "open_id": open_id,
+                        "duration": duration,
+                        "idle": idle,
+                        "delivery_channel": channel,
+                    }
                 )
 
         if state:

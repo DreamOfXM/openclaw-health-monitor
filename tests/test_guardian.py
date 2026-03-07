@@ -161,7 +161,43 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(result[0]["type"], "progress_push")
             self.assertEqual(followups[0][0], "agent:main:feishu:direct:ou_test")
             self.assertIn("GUARDIAN_FOLLOWUP:", followups[0][1])
+            self.assertEqual(result[0]["delivery_channel"], "session")
             feishu_push.assert_not_called()
+
+    def test_deliver_guardian_progress_update_retries_then_falls_back(self):
+        dispatch = {
+            "session_key": "agent:main:feishu:direct:ou_test",
+            "requester_open_id": "ou_test",
+        }
+        logs = []
+
+        with mock.patch.object(
+            guardian,
+            "CONFIG",
+            {"GUARDIAN_FOLLOWUP_RETRIES": 2, "GUARDIAN_FOLLOWUP_RETRY_DELAY": 0},
+        ), mock.patch.object(
+            guardian,
+            "send_guardian_followup",
+            side_effect=[False, False],
+        ) as followup, mock.patch.object(
+            guardian,
+            "send_feishu_progress_push",
+            return_value=True,
+        ) as feishu_push, mock.patch.object(
+            guardian,
+            "log",
+            side_effect=lambda msg, level="INFO": logs.append((level, msg)),
+        ):
+            channel = guardian.deliver_guardian_progress_update(
+                dispatch,
+                followup_message="GUARDIAN_FOLLOWUP: test",
+                fallback_message="任务暂时没有新的可见进展",
+            )
+
+        self.assertEqual(channel, "feishu")
+        self.assertEqual(followup.call_count, 2)
+        feishu_push.assert_called_once_with("ou_test", "任务暂时没有新的可见进展")
+        self.assertTrue(any(level == "WARNING" and "降级" in msg for level, msg in logs))
 
     def test_collect_open_runtime_dispatches_tracks_latest_progress(self):
         lines = [
@@ -252,6 +288,7 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(pushes[0][0], "agent:main:feishu:direct:ou_test")
             self.assertIn("GUARDIAN_FOLLOWUP:", pushes[0][1])
             self.assertEqual(change_logs[0][2]["idle"], 220)
+            self.assertEqual(change_logs[0][2]["delivery_channel"], "session")
 
     def test_push_runtime_progress_updates_resets_after_new_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -324,6 +361,62 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(third[0]["type"], "progress_push")
             self.assertIn("GUARDIAN_FOLLOWUP:", pushes[-1][1] or "")
             self.assertIn("3分40秒", pushes[-1][1] or "")
+
+    def test_push_runtime_progress_updates_falls_back_to_feishu_after_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            runtime_log = base / "runtime.log"
+            runtime_log.write_text(
+                "\n".join(
+                    [
+                        "2026-03-06T05:00:00 dm from tester: 帮我继续处理",
+                        "2026-03-06T05:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)",
+                        "2026-03-06T05:04:30 PIPELINE_PROGRESS: DEV_IMPLEMENTING",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _, progress_ts = guardian.parse_runtime_timestamp(
+                "2026-03-06T05:04:30 PIPELINE_PROGRESS: DEV_IMPLEMENTING\n"
+            )
+            messages = []
+            change_logs = []
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "PROGRESS_PUSH_INTERVAL": 180,
+                        "PROGRESS_PUSH_COOLDOWN": 300,
+                        "PROGRESS_ESCALATION_INTERVAL": 600,
+                        "GUARDIAN_FOLLOWUP_RETRIES": 2,
+                        "GUARDIAN_FOLLOWUP_RETRY_DELAY": 0,
+                    },
+                ), \
+                mock.patch.object(guardian, "resolve_runtime_gateway_log", return_value=runtime_log), \
+                mock.patch.object(guardian, "time", wraps=guardian.time) as mock_time, \
+                mock.patch.object(guardian, "send_guardian_followup", return_value=False) as session_push, \
+                mock.patch.object(
+                    guardian,
+                    "send_feishu_progress_push",
+                    side_effect=lambda open_id, message: messages.append((open_id, message)) or True,
+                ), \
+                mock.patch.object(
+                    guardian,
+                    "record_change_log",
+                    side_effect=lambda ctype, msg, details=None: change_logs.append((ctype, msg, details)),
+                ):
+                mock_time.time.return_value = (progress_ts or 0) + 220
+                result = guardian.push_runtime_progress_updates()
+
+            self.assertEqual(result[0]["delivery_channel"], "feishu")
+            self.assertEqual(session_push.call_count, 2)
+            self.assertEqual(messages[0][0], "ou_test")
+            self.assertIn("任务暂时没有新的可见进展", messages[0][1])
+            self.assertEqual(change_logs[0][2]["delivery_channel"], "feishu")
 
 
 if __name__ == "__main__":
