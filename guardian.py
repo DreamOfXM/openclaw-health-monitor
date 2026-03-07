@@ -905,6 +905,7 @@ def push_runtime_progress_updates() -> list[dict]:
     progress_interval = int(CONFIG.get("PROGRESS_PUSH_INTERVAL", 180))
     progress_cooldown = int(CONFIG.get("PROGRESS_PUSH_COOLDOWN", 300))
     escalation_interval = int(CONFIG.get("PROGRESS_ESCALATION_INTERVAL", 600))
+    stale_task_max_age = int(CONFIG.get("GUARDIAN_STALE_TASK_MAX_AGE", 3600))
     blocked_cooldown = int(CONFIG.get("GUARDIAN_BLOCKED_COOLDOWN", 900))
     blocked_notice_interval = int(CONFIG.get("GUARDIAN_BLOCKED_NOTICE_INTERVAL", 1800))
     push_state = STORE.load_runtime_value("runtime_progress_push_state", {})
@@ -934,19 +935,46 @@ def push_runtime_progress_updates() -> list[dict]:
             state["last_stage_push"] = 0
             state["last_escalation_push"] = 0
             state["last_marker"] = marker
+            state["stale_suppressed_at"] = 0
         if current_progress_at != last_seen_progress_at:
             state["last_seen_progress_at"] = current_progress_at
             state["last_stage_push"] = 0
             state["last_escalation_push"] = 0
             state["last_marker"] = marker
+            state["stale_suppressed_at"] = 0
             state["blocked_reason"] = ""
             state["blocked_until"] = 0
 
         last_stage_push = int(state.get("last_stage_push", 0))
         last_escalation_push = int(state.get("last_escalation_push", 0))
+        stale_suppressed_at = int(state.get("stale_suppressed_at", 0))
         blocked_until = int(state.get("blocked_until", 0))
         blocked_reason = str(state.get("blocked_reason", ""))
         last_blocked_notice = int(state.get("last_blocked_notice", 0))
+
+        if duration >= stale_task_max_age:
+            if stale_suppressed_at == 0:
+                log(
+                    "检测到过时未完成任务，已抑制泛化跟进推送: "
+                    f"{session_key or open_id} (idle={format_duration_label(idle)}, total={format_duration_label(duration)})",
+                    "INFO",
+                )
+                record_change_log(
+                    "anomaly",
+                    "守护系统抑制过时任务跟进",
+                    {
+                        "question": dispatch["question"],
+                        "marker": marker or stage_label,
+                        "duration": duration,
+                        "idle": idle,
+                        "timestamp": dispatch["timestamp"],
+                        "session_key": session_key,
+                    },
+                )
+                state["stale_suppressed_at"] = int(now)
+            if state:
+                push_state[push_key] = state
+            continue
 
         if blocked_reason and blocked_until <= int(now) and now - last_blocked_notice >= blocked_notice_interval:
             reason_label = blocked_reason_label(blocked_reason)
