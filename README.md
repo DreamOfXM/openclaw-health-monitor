@@ -1,7 +1,7 @@
 # OpenClaw Health Monitor
 
 <p align="center">
-  <img src="./assets/readme/hero-banner-v2.png" alt="OpenClaw Health Monitor" width="100%" />
+  <img src="./assets/readme/hero.png" alt="OpenClaw Health Monitor" width="100%" />
 </p>
 
 <p align="center">
