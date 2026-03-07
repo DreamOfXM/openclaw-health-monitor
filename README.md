@@ -13,7 +13,7 @@
     <img src="https://img.shields.io/github/v/release/DreamOfXM/openclaw-health-monitor?style=for-the-badge&color=2f6feb&label=Release" alt="Release" />
   </a>
   <a href="https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest/download/openclaw-health-monitor-macos-arm64.dmg">
-    <img src="https://img.shields.io/badge/macOS-DMG%20Download-1f883d?style=for-the-badge&logo=apple" alt="Download DMG" />
+    <img src="https://img.shields.io/badge/macOS-dmg%20Download-1f883d?style=for-the-badge&logo=apple" alt="Download dmg" />
   </a>
   <a href="https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest/download/openclaw-health-monitor-macos-arm64.app.zip">
     <img src="https://img.shields.io/badge/Desktop-App%20Zip-f97316?style=for-the-badge" alt="Download App Zip" />
@@ -246,20 +246,72 @@ make release
 
 ## English
 
-OpenClaw Health Monitor is a local monitoring and recovery console for OpenClaw Gateway.
-It starts and manages three parts together:
+OpenClaw Health Monitor is a local monitoring, diagnosis, and recovery console for OpenClaw Gateway.
+It runs three parts together as a local control plane:
 
 - `Gateway`: the core OpenClaw runtime
 - `Guardian`: the background watcher for health checks, anomaly detection, alerts, and controlled recovery
 - `Dashboard`: the local control plane UI for status, logs, and operator actions
 
-Quick links:
+It is designed for two groups:
+
+- non-technical users who want a simple start / stop / status workflow
+- technical users who want to inspect runtime health, recovery behavior, recent anomalies, and memory attribution
+
+## Quick Start
+
+### Option 1: Script Startup
+
+Requirements:
+
+- macOS
+- a working `openclaw` command
+- Python 3.9+
+
+Start the full stack:
+
+```bash
+cd ~/openclaw-health-monitor
+./install.sh
+./start.sh
+```
+
+Common commands:
+
+```bash
+cd ~/openclaw-health-monitor
+./start.sh
+./status.sh
+./verify.sh
+./stop.sh
+```
+
+### Option 2: Desktop App
+
+Direct downloads:
 
 - [Download DMG](https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest/download/openclaw-health-monitor-macos-arm64.dmg)
 - [Download App Zip](https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest/download/openclaw-health-monitor-macos-arm64.app.zip)
-- [Latest Release](https://github.com/DreamOfXM/openclaw-health-monitor/releases/latest)
 
-Common commands:
+Desktop app behavior:
+
+- open the app: automatically start Gateway, Guardian, and Dashboard
+- quit the app: stop Gateway, Guardian, and Dashboard
+
+The current desktop app still assumes the local repository and runtime environment already exist at `~/openclaw-health-monitor`.
+
+## What This Project Does
+
+You can think of this project as the local operator console for OpenClaw Gateway:
+
+- `Gateway`
+  the service that actually does the work
+- `Guardian`
+  the watcher that checks health, detects anomalies, records incidents, and performs controlled recovery
+- `Dashboard`
+  the UI that shows current status, problem focus, recent incidents, and operator actions
+
+If you only care about daily usage, these are the four commands that matter most:
 
 ```bash
 ./install.sh
@@ -267,4 +319,142 @@ Common commands:
 ./status.sh
 ./verify.sh
 ./stop.sh
+```
+
+## Architecture
+
+### Core Components
+
+- `guardian.py`
+  Background daemon responsible for health checks, anomaly detection, recovery logic, notifications, and change logs.
+
+- `dashboard.py`
+  Local web UI that renders Gateway / Guardian / Dashboard state, recent incidents, memory attribution, snapshots, and operator controls.
+
+- `desktop_runtime.sh`
+  The local runtime controller that starts, stops, and inspects:
+  - Gateway
+  - Guardian
+  - Dashboard
+
+- `monitor_config.py`
+  Config loader with support for:
+  - `config.conf`
+  - `config.local.conf`
+  - environment variable overrides
+
+- `state_store.py`
+  SQLite-backed local state storage for:
+  - alerts
+  - versions
+  - change events
+  - health samples
+
+### Runtime Model
+
+1. `./start.sh`
+   calls `desktop_runtime.sh start all`
+
+2. `desktop_runtime.sh`
+   starts Gateway, Guardian, and Dashboard in order and records PID files
+
+3. `Guardian`
+   keeps checking Gateway health, scans runtime anomalies, records changes, and sends notifications
+
+4. `Dashboard`
+   exposes the local problem-focus view, recent anomalies, memory attribution, and snapshot actions
+
+5. `./stop.sh`
+   calls `desktop_runtime.sh stop all` and stops the whole local stack
+
+## Validation
+
+After installation or upgrade, validate the local monitor in this order.
+
+### 1. Basic Startup
+
+```bash
+cd ~/openclaw-health-monitor
+./preflight.sh
+./start.sh
+```
+
+Check that:
+
+- the Dashboard loads correctly
+- both `Guardian` and `Gateway` are visible
+- the recent incidents section and problem-focus section render without frontend errors
+
+### 2. Anomaly Detection
+
+These runtime situations should become visible in the change log and the incident area:
+
+- `dispatch complete (queuedFinal=false, replies=0)` becomes "completed without visible reply"
+- `gateway closed (1006 ...)` becomes `gateway_ws_closed`
+- `abort failed ... no_active_run` becomes a run-tracking anomaly
+- long-running `dispatching to agent` without a final completion becomes "stuck without final result"
+- being stuck in a single `PIPELINE_PROGRESS` stage becomes a stage-stuck anomaly
+
+### 3. Memory Attribution
+
+The homepage memory section should make memory usage explainable:
+
+- `Top 15 Processes`
+- `Kernel / Wired`
+- `Compressed`
+- `Other System`
+
+It should also explain:
+
+- how much of used memory is covered by the Top 15 processes
+- how much remains in system/cache/unattributed memory
+
+### 4. Notifications
+
+If DingTalk or Feishu webhooks are configured, verify:
+
+- the first occurrence of an anomaly triggers a notification
+- repeated anomalies are deduplicated within the configured interval
+
+### 5. Quick Regression
+
+Run the local test suite:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Run the online verification script:
+
+```bash
+cd ~/openclaw-health-monitor
+./verify.sh
+```
+
+## GitHub Actions
+
+The repository already includes a macOS release workflow:
+
+- `.github/workflows/release.yml`
+- `.github/release.yml`
+
+It automatically handles:
+
+- Python dependency installation
+- `pnpm` setup
+- Rust toolchain setup
+- test execution
+- desktop app build
+- `.dmg` and `.app.zip` packaging
+- workflow artifact upload
+
+When a `v*` tag is pushed, the workflow attaches the generated files to the GitHub Release.
+
+Recommended release flow:
+
+```bash
+cd ~/openclaw-health-monitor
+make test
+make pake
+make release
 ```
