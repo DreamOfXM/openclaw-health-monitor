@@ -228,6 +228,26 @@ class GuardianProgressPushTests(unittest.TestCase):
         self.assertEqual(dispatches[0]["question"], "新问题")
         self.assertEqual(dispatches[0]["marker"], "TEST_RUNNING")
 
+    def test_collect_open_runtime_dispatches_stops_after_visible_completion(self):
+        lines = [
+            "2026-03-06T05:00:00 dm from tester: 帮我继续处理\n",
+            "2026-03-06T05:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)\n",
+            "2026-03-06T05:01:00 PIPELINE_PROGRESS: DEV_IMPLEMENTING\n",
+            "2026-03-06T05:02:00 主人，任务已完成！✅\n",
+        ]
+
+        dispatches = guardian.collect_open_runtime_dispatches(lines)
+
+        self.assertEqual(dispatches, [])
+
+    def test_is_visible_completion_message_filters_internal_lines(self):
+        self.assertTrue(guardian.is_visible_completion_message("2026-03-06T05:02:00 任务已完成 ✅"))
+        self.assertFalse(
+            guardian.is_visible_completion_message(
+                "2026-03-06T05:02:00 dispatch complete (queuedFinal=true, replies=1)"
+            )
+        )
+
     def test_push_runtime_progress_updates_only_when_idle(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

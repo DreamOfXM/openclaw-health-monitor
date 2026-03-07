@@ -347,6 +347,49 @@ def extract_pipeline_marker(line: str) -> str | None:
     return line.split(marker, 1)[1].strip()[:120]
 
 
+def is_visible_completion_message(line: str) -> bool:
+    """Heuristically detect a user-visible completion reply in runtime logs."""
+    text = line.strip()
+    if not text:
+        return False
+
+    lower = text.lower()
+    ignore_markers = (
+        "dispatching to agent",
+        "dispatch complete",
+        "pipeline_progress:",
+        "[gateway]",
+        "[feishu]",
+        "[plugins]",
+        "[ws]",
+        "guardIAN_followup".lower(),
+        "guardian_escalation",
+        "received message from",
+        "dm from ",
+        "message in ",
+        "signal sigterm",
+        "gateway closed",
+        "error:",
+        "config warnings",
+    )
+    if any(marker in lower for marker in ignore_markers):
+        return False
+
+    completion_markers = (
+        "任务已完成",
+        "已完成：",
+        "已全部完成",
+        "全部配置完成",
+        "当前状态： 已结束",
+        "当前状态：已结束",
+        "无需后续操作",
+        "系统已就绪",
+        "以后每天都会自动推送",
+        "可以在飞书群里查看",
+    )
+    return any(marker in text for marker in completion_markers)
+
+
 def extract_requester_open_id(line: str) -> str | None:
     """Extract Feishu requester open_id from a dispatch session key."""
     marker = "session=agent:main:feishu:direct:"
@@ -572,6 +615,12 @@ def collect_open_runtime_dispatches(lines: list[str]) -> list[dict[str, Any]]:
             dispatch = open_dispatches[current_key]
             dispatch["last_progress_at"] = ts
             dispatch["marker"] = marker
+            continue
+
+        if is_visible_completion_message(line) and open_dispatches:
+            current_key = most_recent_key()
+            if current_key:
+                open_dispatches.pop(current_key, None)
             continue
 
         if "dispatch complete" in lower and open_dispatches:
