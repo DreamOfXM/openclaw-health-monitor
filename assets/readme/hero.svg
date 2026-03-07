@@ -1,69 +1,85 @@
-<svg width="1200" height="420" viewBox="0 0 1200 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="1200" height="420" viewBox="0 0 1200 420" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bg" x1="70" y1="40" x2="1130" y2="380" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#08111F"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#07111F"/>
       <stop offset="1" stop-color="#172554"/>
     </linearGradient>
-    <linearGradient id="shieldOuter" x1="120" y1="60" x2="340" y2="320" gradientUnits="userSpaceOnUse">
+    <linearGradient id="shieldOuter" x1="0" y1="0" x2="1" y2="1">
       <stop stop-color="#F8FAFC"/>
       <stop offset="1" stop-color="#94A3B8"/>
     </linearGradient>
-    <linearGradient id="shieldInner" x1="150" y1="92" x2="300" y2="284" gradientUnits="userSpaceOnUse">
+    <linearGradient id="shieldInner" x1="0" y1="0" x2="1" y2="1">
       <stop stop-color="#0F172A"/>
       <stop offset="1" stop-color="#1E293B"/>
     </linearGradient>
-    <linearGradient id="lobsterMain" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#FB7185"/>
-      <stop offset="0.5" stop-color="#EF4444"/>
-      <stop offset="1" stop-color="#B91C1C"/>
+    <linearGradient id="lobsterRed" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FF8A8A"/>
+      <stop offset="0.45" stop-color="#FF4D4F"/>
+      <stop offset="1" stop-color="#D61F2C"/>
     </linearGradient>
-    <linearGradient id="lobsterHighlight" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#FCA5A5"/>
-      <stop offset="1" stop-color="#F97316"/>
-    </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#38BDF8"/>
-      <stop offset="1" stop-color="#22C55E"/>
+    <linearGradient id="lobsterOrange" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFC4A0"/>
+      <stop offset="1" stop-color="#FF9A5A"/>
     </linearGradient>
   </defs>
 
   <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
-  <circle cx="168" cy="108" r="90" fill="#0B1220" opacity="0.52"/>
-  <circle cx="1048" cy="318" r="124" fill="#0F172A" opacity="0.38"/>
+  <circle cx="1058" cy="314" r="124" fill="#0B1220" opacity="0.35"/>
+  <circle cx="146" cy="112" r="84" fill="#020617" opacity="0.32"/>
 
-  <g transform="translate(74 58)">
-    <path d="M148 20L270 58V150C270 220 219 283 148 304C77 283 26 220 26 150V58L148 20Z" fill="url(#shieldOuter)"/>
-    <path d="M148 51L243 81V148C243 204 204 254 148 274C92 254 53 204 53 148V81L148 51Z" fill="url(#shieldInner)"/>
-    <path d="M147 94L174 140H227L184 174L201 227L147 196L93 227L110 174L67 140H120L147 94Z" fill="url(#accent)"/>
+  <g transform="translate(70 72)">
+    <path d="M150 18L268 56V146C268 217 218 280 150 302C82 280 32 217 32 146V56L150 18Z" fill="url(#shieldOuter)"/>
+    <path d="M150 49L240 79V145C240 200 202 249 150 268C98 249 60 200 60 145V79L150 49Z" fill="url(#shieldInner)"/>
+    <path d="M150 92L180 139H234L191 169L208 223L150 192L92 223L109 169L66 139H120L150 92Z" fill="#38BDF8"/>
+    <path d="M150 105L167 132H198L173 150L182 179L150 161L118 179L127 150L102 132H133L150 105Z" fill="#22C55E"/>
   </g>
 
-  <g transform="translate(780 36)">
-    <path d="M118 120C88 84 74 51 77 22C117 38 145 68 161 111" stroke="url(#lobsterHighlight)" stroke-width="18" stroke-linecap="round"/>
-    <path d="M276 111C292 68 320 38 360 22C363 51 349 84 319 120" stroke="url(#lobsterHighlight)" stroke-width="18" stroke-linecap="round"/>
-    <path d="M167 70H207" stroke="#FEE2E2" stroke-width="12" stroke-linecap="round"/>
-    <path d="M183 52L191 18" stroke="#FCA5A5" stroke-width="10" stroke-linecap="round"/>
-    <path d="M146 139C121 119 101 121 84 145" stroke="#7F1D1D" stroke-width="14" stroke-linecap="round"/>
-    <path d="M228 139C253 119 273 121 290 145" stroke="#7F1D1D" stroke-width="14" stroke-linecap="round"/>
-    <ellipse cx="188" cy="186" rx="98" ry="122" fill="url(#lobsterMain)"/>
-    <ellipse cx="188" cy="176" rx="60" ry="78" fill="url(#lobsterHighlight)" opacity="0.82"/>
-    <rect x="169" y="84" width="38" height="56" rx="18" fill="url(#lobsterMain)"/>
-    <circle cx="160" cy="166" r="8" fill="#111827"/>
-    <circle cx="216" cy="166" r="8" fill="#111827"/>
-    <path d="M55 205C88 200 114 210 134 231" stroke="url(#lobsterHighlight)" stroke-width="16" stroke-linecap="round"/>
-    <path d="M242 231C262 210 288 200 321 205" stroke="url(#lobsterHighlight)" stroke-width="16" stroke-linecap="round"/>
-    <path d="M82 273C111 266 132 274 145 292" stroke="url(#lobsterHighlight)" stroke-width="14" stroke-linecap="round"/>
-    <path d="M231 292C244 274 265 266 294 273" stroke="url(#lobsterHighlight)" stroke-width="14" stroke-linecap="round"/>
-    <path d="M142 302L112 374" stroke="url(#lobsterHighlight)" stroke-width="14" stroke-linecap="round"/>
-    <path d="M188 312V390" stroke="url(#lobsterHighlight)" stroke-width="14" stroke-linecap="round"/>
-    <path d="M234 302L264 374" stroke="url(#lobsterHighlight)" stroke-width="14" stroke-linecap="round"/>
+  <g transform="translate(735 34)">
+    <g stroke="#1F2937" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M118 90C96 62 84 37 84 16C121 24 148 43 164 74"/>
+      <path d="M304 74C320 43 347 24 384 16C384 37 372 62 350 90"/>
+      <path d="M182 60L190 28"/>
+      <path d="M220 60L228 28"/>
+      <path d="M144 220C108 212 77 218 49 241"/>
+      <path d="M258 220C294 212 325 218 353 241"/>
+      <path d="M166 309L132 379"/>
+      <path d="M206 320V390"/>
+      <path d="M246 309L280 379"/>
+    </g>
+
+    <path d="M118 90C96 62 84 37 84 16C121 24 148 43 164 74" fill="none" stroke="url(#lobsterOrange)" stroke-width="18" stroke-linecap="round"/>
+    <path d="M304 74C320 43 347 24 384 16C384 37 372 62 350 90" fill="none" stroke="url(#lobsterOrange)" stroke-width="18" stroke-linecap="round"/>
+
+    <path d="M108 172C88 146 67 134 42 136C46 177 68 205 110 215L128 194Z" fill="url(#lobsterRed)" stroke="#1F2937" stroke-width="10" stroke-linejoin="round"/>
+    <path d="M314 172C334 146 355 134 380 136C376 177 354 205 312 215L294 194Z" fill="url(#lobsterRed)" stroke="#1F2937" stroke-width="10" stroke-linejoin="round"/>
+
+    <path d="M205 88C270 88 320 140 320 209C320 278 270 332 205 332C140 332 90 278 90 209C90 140 140 88 205 88Z" fill="url(#lobsterRed)" stroke="#1F2937" stroke-width="10"/>
+    <path d="M205 115C252 115 287 153 287 205C287 257 252 296 205 296C158 296 123 257 123 205C123 153 158 115 205 115Z" fill="url(#lobsterOrange)" opacity="0.52"/>
+
+    <rect x="181" y="72" width="48" height="56" rx="22" fill="url(#lobsterRed)" stroke="#1F2937" stroke-width="10"/>
+    <path d="M180 145C170 161 165 180 165 198C165 218 170 238 180 254" fill="none" stroke="#1F2937" stroke-width="10" stroke-linecap="round"/>
+    <path d="M230 145C240 161 245 180 245 198C245 218 240 238 230 254" fill="none" stroke="#1F2937" stroke-width="10" stroke-linecap="round"/>
+    <path d="M168 196H242" stroke="#1F2937" stroke-width="8" stroke-linecap="round" opacity="0.35"/>
+
+    <circle cx="176" cy="178" r="9" fill="#111827"/>
+    <circle cx="234" cy="178" r="9" fill="#111827"/>
+    <path d="M185 223C197 236 213 236 225 223" fill="none" stroke="#7F1D1D" stroke-width="8" stroke-linecap="round"/>
+
+    <path d="M128 194C98 190 73 198 48 223" fill="none" stroke="url(#lobsterOrange)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M294 194C324 190 349 198 374 223" fill="none" stroke="url(#lobsterOrange)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M142 252C114 246 93 252 74 272" fill="none" stroke="url(#lobsterOrange)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M268 252C296 246 317 252 336 272" fill="none" stroke="url(#lobsterOrange)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M166 309L132 379" fill="none" stroke="url(#lobsterOrange)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M206 320V390" fill="none" stroke="url(#lobsterOrange)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M246 309L280 379" fill="none" stroke="url(#lobsterOrange)" stroke-width="14" stroke-linecap="round"/>
   </g>
 
-  <text x="350" y="148" fill="#F8FAFC" font-family="Arial, sans-serif" font-size="54" font-weight="700">OpenClaw Health Monitor</text>
-  <text x="350" y="201" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="25">OpenClaw Gateway 的本地监控、诊断与恢复控制台</text>
-  <text x="350" y="254" fill="#E2E8F0" font-family="Arial, sans-serif" font-size="22">Gateway · Guardian · Dashboard</text>
+  <text x="344" y="144" fill="#F8FAFC" font-family="Arial, sans-serif" font-size="54" font-weight="700">OpenClaw Health Monitor</text>
+  <text x="344" y="199" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="25">OpenClaw Gateway 的本地监控、诊断与恢复控制台</text>
+  <text x="344" y="252" fill="#E2E8F0" font-family="Arial, sans-serif" font-size="22">Gateway · Guardian · Dashboard</text>
 
-  <rect x="350" y="290" width="176" height="46" rx="23" fill="#0F172A" stroke="#1D4ED8"/>
-  <text x="391" y="319" fill="#60A5FA" font-family="Arial, sans-serif" font-size="22" font-weight="700">macOS dmg</text>
-  <rect x="548" y="290" width="156" height="46" rx="23" fill="#0F172A" stroke="#16A34A"/>
-  <text x="587" y="319" fill="#4ADE80" font-family="Arial, sans-serif" font-size="22" font-weight="700">local ops</text>
+  <rect x="344" y="288" width="182" height="48" rx="24" fill="#0F172A" stroke="#1D4ED8"/>
+  <text x="385" y="319" fill="#60A5FA" font-family="Arial, sans-serif" font-size="22" font-weight="700">macOS dmg</text>
+  <rect x="548" y="288" width="160" height="48" rx="24" fill="#0F172A" stroke="#16A34A"/>
+  <text x="586" y="319" fill="#4ADE80" font-family="Arial, sans-serif" font-size="22" font-weight="700">local ops</text>
 </svg>
