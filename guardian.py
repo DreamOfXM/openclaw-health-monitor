@@ -906,6 +906,7 @@ def push_runtime_progress_updates() -> list[dict]:
     progress_cooldown = int(CONFIG.get("PROGRESS_PUSH_COOLDOWN", 300))
     escalation_interval = int(CONFIG.get("PROGRESS_ESCALATION_INTERVAL", 600))
     blocked_cooldown = int(CONFIG.get("GUARDIAN_BLOCKED_COOLDOWN", 900))
+    blocked_notice_interval = int(CONFIG.get("GUARDIAN_BLOCKED_NOTICE_INTERVAL", 1800))
     push_state = STORE.load_runtime_value("runtime_progress_push_state", {})
     pushed: list[dict] = []
     active_keys: set[str] = set()
@@ -945,6 +946,46 @@ def push_runtime_progress_updates() -> list[dict]:
         last_escalation_push = int(state.get("last_escalation_push", 0))
         blocked_until = int(state.get("blocked_until", 0))
         blocked_reason = str(state.get("blocked_reason", ""))
+        last_blocked_notice = int(state.get("last_blocked_notice", 0))
+
+        if blocked_reason and blocked_until <= int(now) and now - last_blocked_notice >= blocked_notice_interval:
+            reason_label = blocked_reason_label(blocked_reason)
+            blocked_message = (
+                f"任务当前已阻塞。当前阶段：{stage_label}。"
+                f"阻塞原因：{reason_label}。"
+                f"已静默 {format_duration_label(idle)}，累计运行 {format_duration_label(duration)}。"
+                "系统已尝试自动恢复；若后续仍无结果，建议重新发起该任务。"
+            )
+            if open_id and send_feishu_progress_push(open_id, blocked_message):
+                record_change_log(
+                    "anomaly",
+                    "守护系统阻塞提示",
+                    {
+                        "question": dispatch["question"],
+                        "marker": marker or stage_label,
+                        "duration": duration,
+                        "idle": idle,
+                        "timestamp": dispatch["timestamp"],
+                        "session_key": session_key,
+                        "blocked_reason": blocked_reason,
+                        "delivery_channel": "feishu",
+                    },
+                )
+                state["last_blocked_notice"] = int(now)
+                state["blocked_until"] = int(now) + blocked_notice_interval
+                pushed.append(
+                    {
+                        "type": "blocked_notice",
+                        "open_id": open_id,
+                        "duration": duration,
+                        "idle": idle,
+                        "delivery_channel": "feishu",
+                        "blocked_reason": blocked_reason,
+                    }
+                )
+                push_state[push_key] = state
+            continue
+
         if blocked_until > int(now):
             if state:
                 push_state[push_key] = state

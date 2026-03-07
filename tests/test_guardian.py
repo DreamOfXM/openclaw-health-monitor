@@ -499,6 +499,59 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(first[0]["blocked_reason"], "session_lock")
             self.assertEqual(second, [])
 
+    def test_push_runtime_progress_updates_sends_blocked_notice_after_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            runtime_log = base / "runtime.log"
+            runtime_log.write_text(
+                "\n".join(
+                    [
+                        "2026-03-06T05:00:00 dm from tester: 帮我继续处理",
+                        "2026-03-06T05:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)",
+                        "2026-03-06T05:04:30 PIPELINE_PROGRESS: DEV_IMPLEMENTING",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _, progress_ts = guardian.parse_runtime_timestamp(
+                "2026-03-06T05:04:30 PIPELINE_PROGRESS: DEV_IMPLEMENTING\n"
+            )
+            messages = []
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "PROGRESS_PUSH_INTERVAL": 180,
+                        "PROGRESS_PUSH_COOLDOWN": 300,
+                        "PROGRESS_ESCALATION_INTERVAL": 600,
+                        "GUARDIAN_FOLLOWUP_RETRIES": 1,
+                        "GUARDIAN_FOLLOWUP_RETRY_DELAY": 0,
+                        "GUARDIAN_BLOCKED_COOLDOWN": 60,
+                        "GUARDIAN_BLOCKED_NOTICE_INTERVAL": 120,
+                    },
+                ), \
+                mock.patch.object(guardian, "resolve_runtime_gateway_log", return_value=runtime_log), \
+                mock.patch.object(guardian, "time", wraps=guardian.time) as mock_time, \
+                mock.patch.object(guardian, "send_guardian_followup", return_value=(False, "session_lock")), \
+                mock.patch.object(
+                    guardian,
+                    "send_feishu_progress_push",
+                    side_effect=lambda open_id, message: messages.append((open_id, message)) or True,
+                ), \
+                mock.patch.object(guardian, "record_change_log"):
+                mock_time.time.return_value = (progress_ts or 0) + 220
+                first = guardian.push_runtime_progress_updates()
+                mock_time.time.return_value = (progress_ts or 0) + 340
+                second = guardian.push_runtime_progress_updates()
+
+            self.assertEqual(first[0]["type"], "progress_push")
+            self.assertEqual(second[0]["type"], "blocked_notice")
+            self.assertIn("任务当前已阻塞", messages[-1][1])
+
 
 if __name__ == "__main__":
     unittest.main()
