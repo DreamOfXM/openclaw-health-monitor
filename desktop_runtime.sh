@@ -9,6 +9,13 @@ DASHBOARD_PID_FILE="$LOG_DIR/dashboard.pid"
 GATEWAY_PID_FILE="$LOG_DIR/gateway.pid"
 TRACKED_CONFIG="$BASE_DIR/config.conf"
 LOCAL_CONFIG="$BASE_DIR/config.local.conf"
+LAUNCH_DOMAIN="gui/$(id -u)"
+GUARDIAN_LABEL="ai.openclaw.guardian"
+DASHBOARD_LABEL="ai.openclaw.dashboard"
+LEGACY_MONITOR_LABEL="ai.openclaw.health-monitor"
+GUARDIAN_PLIST="$HOME/Library/LaunchAgents/${GUARDIAN_LABEL}.plist"
+DASHBOARD_PLIST="$HOME/Library/LaunchAgents/${DASHBOARD_LABEL}.plist"
+LEGACY_MONITOR_PLIST="$HOME/Library/LaunchAgents/${LEGACY_MONITOR_LABEL}.plist"
 PYTHON_BIN=""
 OPENCLAW_BIN=""
 NODE_BIN=""
@@ -18,6 +25,27 @@ mkdir -p "$LOG_DIR"
 find_pid() {
     local pattern="$1"
     pgrep -f "$pattern" 2>/dev/null | head -n 1 || true
+}
+
+launchd_pid() {
+    local label="$1"
+    launchctl print "${LAUNCH_DOMAIN}/${label}" 2>/dev/null | awk -F'= ' '/pid = / {print $2; exit}' | tr -d ';' || true
+}
+
+launchd_bootout() {
+    local label="$1"
+    local plist="$2"
+    launchctl bootout "${LAUNCH_DOMAIN}/${label}" 2>/dev/null || launchctl bootout "$LAUNCH_DOMAIN" "$plist" 2>/dev/null || true
+}
+
+launchd_bootstrap() {
+    local plist="$1"
+    launchctl bootstrap "$LAUNCH_DOMAIN" "$plist"
+}
+
+launchd_kickstart() {
+    local label="$1"
+    launchctl kickstart -k "${LAUNCH_DOMAIN}/${label}"
 }
 
 resolve_cmd_from_login_shell() {
@@ -59,6 +87,15 @@ resolve_openclaw_bin() {
     return 1
 }
 
+run_gateway_service_cmd() {
+    local subcmd="$1"
+    bootstrap_env
+    if [ -z "$OPENCLAW_BIN" ]; then
+        return 1
+    fi
+    "$OPENCLAW_BIN" gateway "$subcmd"
+}
+
 bootstrap_env() {
     local login_path=""
     login_path="$(/bin/zsh -lc 'printf %s "$PATH"' 2>/dev/null || true)"
@@ -82,6 +119,19 @@ bootstrap_env() {
         PATH="$(dirname "$NODE_BIN"):$PATH"
         export PATH
     fi
+}
+
+plist_python_bin() {
+    bootstrap_env
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        printf '%s\n' "$PYTHON_BIN"
+        return 0
+    fi
+    if [ -x "$VENV_PYTHON" ]; then
+        printf '%s\n' "$VENV_PYTHON"
+        return 0
+    fi
+    printf '%s\n' "python3"
 }
 
 raise_nofile_limit() {
@@ -120,11 +170,11 @@ read_pid_file() {
 }
 
 guardian_pid() {
-    read_pid_file "$GUARDIAN_PID_FILE" || find_pid "$BASE_DIR/guardian.py"
+    launchd_pid "$GUARDIAN_LABEL" || read_pid_file "$GUARDIAN_PID_FILE" || find_pid "$BASE_DIR/guardian.py"
 }
 
 dashboard_pid() {
-    read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard.py"
+    launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard.py"
 }
 
 dashboard_reachable() {
@@ -179,6 +229,102 @@ gateway_pid() {
     listener_pid "$(gateway_port)"
 }
 
+ensure_launch_agents_dir() {
+    mkdir -p "$HOME/Library/LaunchAgents"
+}
+
+install_guardian_launch_agent() {
+    local python_bin escaped_path escaped_base
+    ensure_launch_agents_dir
+    python_bin="$(plist_python_bin)"
+    cat > "$GUARDIAN_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${GUARDIAN_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${python_bin}</string>
+    <string>${BASE_DIR}/guardian.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${BASE_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>${PATH}</string>
+    <key>NO_PROXY</key>
+    <string>127.0.0.1,localhost</string>
+    <key>no_proxy</key>
+    <string>127.0.0.1,localhost</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/guardian.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/guardian.launchd.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
+install_dashboard_launch_agent() {
+    local python_bin
+    ensure_launch_agents_dir
+    python_bin="$(plist_python_bin)"
+    cat > "$DASHBOARD_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${DASHBOARD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${python_bin}</string>
+    <string>${BASE_DIR}/dashboard.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${BASE_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>${PATH}</string>
+    <key>DASHBOARD_PORT</key>
+    <string>$(dashboard_port)</string>
+    <key>DASHBOARD_HOST</key>
+    <string>127.0.0.1</string>
+    <key>NO_PROXY</key>
+    <string>127.0.0.1,localhost</string>
+    <key>no_proxy</key>
+    <string>127.0.0.1,localhost</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/dashboard.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/dashboard.launchd.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
 is_running() {
     case "${1:-}" in
         gateway)
@@ -218,17 +364,23 @@ start_gateway() {
         echo "openclaw command not found" >&2
         return 1
     fi
-    (
-        cd "$workdir"
-        "$OPENCLAW_BIN" gateway run >> "$LOG_DIR/gateway.log" 2>&1
-    ) &
-    pid=$!
-    echo "$pid" > "$GATEWAY_PID_FILE"
-    sleep 2
-    if ! kill -0 "$pid" 2>/dev/null; then
+    run_gateway_service_cmd install >> "$LOG_DIR/gateway.log" 2>&1 || true
+    local gateway_plist
+    gateway_plist="$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist"
+    if [ ! -f "$gateway_plist" ]; then
+        echo "Gateway launch agent not found" >&2
+        return 1
+    fi
+    launchd_bootout "ai.openclaw.gateway" "$gateway_plist"
+    launchd_bootstrap "$gateway_plist" >> "$LOG_DIR/gateway.log" 2>&1 || true
+    launchd_kickstart "ai.openclaw.gateway" >> "$LOG_DIR/gateway.log" 2>&1 || true
+    sleep 3
+    pid="$(gateway_pid || true)"
+    if [ -z "$pid" ]; then
         echo "Gateway failed to start" >&2
         return 1
     fi
+    echo "$pid" > "$GATEWAY_PID_FILE"
     echo "$pid"
 }
 
@@ -244,14 +396,18 @@ start_guardian() {
         echo "Python with flask+requests not found" >&2
         return 1
     fi
-    "$PYTHON_BIN" "$BASE_DIR/guardian.py" >> "$LOG_DIR/guardian.log" 2>&1 &
-    pid=$!
-    echo "$pid" > "$GUARDIAN_PID_FILE"
-    sleep 1
-    if ! kill -0 "$pid" 2>/dev/null; then
+    install_guardian_launch_agent
+    [ -f "$LEGACY_MONITOR_PLIST" ] && launchd_bootout "$LEGACY_MONITOR_LABEL" "$LEGACY_MONITOR_PLIST"
+    launchd_bootout "$GUARDIAN_LABEL" "$GUARDIAN_PLIST"
+    launchd_bootstrap "$GUARDIAN_PLIST"
+    launchd_kickstart "$GUARDIAN_LABEL"
+    sleep 2
+    pid="$(guardian_pid || true)"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         echo "Guardian failed to start" >&2
         return 1
     fi
+    echo "$pid" > "$GUARDIAN_PID_FILE"
     echo "$pid"
 }
 
@@ -271,15 +427,17 @@ start_dashboard() {
         echo "Python with flask+requests not found" >&2
         return 1
     fi
-    DASHBOARD_PORT="$(dashboard_port)" "$PYTHON_BIN" "$BASE_DIR/dashboard.py" >> "$LOG_DIR/dashboard.stdout.log" 2>&1 &
-    pid=$!
-    echo "$pid" > "$DASHBOARD_PID_FILE"
-    sleep 2
+    install_dashboard_launch_agent
+    launchd_bootout "$DASHBOARD_LABEL" "$DASHBOARD_PLIST"
+    launchd_bootstrap "$DASHBOARD_PLIST"
+    launchd_kickstart "$DASHBOARD_LABEL"
+    sleep 3
     pid="$(dashboard_pid || true)"
     if [ -z "$pid" ] || ! dashboard_reachable; then
         echo "Dashboard failed to start" >&2
         return 1
     fi
+    echo "$pid" > "$DASHBOARD_PID_FILE"
     echo "$pid"
 }
 
@@ -300,6 +458,7 @@ stop_pid() {
 
 stop_guardian() {
     local pid
+    launchd_bootout "$GUARDIAN_LABEL" "$GUARDIAN_PLIST"
     pid="$(guardian_pid || true)"
     if [ -n "$pid" ]; then
         stop_pid "$pid"
@@ -310,6 +469,7 @@ stop_guardian() {
 
 stop_dashboard() {
     local pid listener
+    launchd_bootout "$DASHBOARD_LABEL" "$DASHBOARD_PLIST"
     pid="$(dashboard_pid || true)"
     if [ -n "$pid" ]; then
         stop_pid "$pid"
@@ -324,6 +484,8 @@ stop_dashboard() {
 
 stop_gateway() {
     local pid listener
+    run_gateway_service_cmd stop >> "$LOG_DIR/gateway.log" 2>&1 || true
+    sleep 1
     pid="$(gateway_pid || true)"
     if [ -n "$pid" ]; then
         stop_pid "$pid"
