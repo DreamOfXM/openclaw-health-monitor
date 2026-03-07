@@ -365,6 +365,21 @@ def normalize_stage_label(marker: str) -> str:
     return text.replace("_", " ")
 
 
+def format_duration_label(seconds: int) -> str:
+    """Render durations in a human-friendly label for push notifications."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}秒"
+    if total < 3600:
+        minutes = total // 60
+        remain = total % 60
+        return f"{minutes}分钟" if remain == 0 else f"{minutes}分{remain}秒"
+    hours = total // 3600
+    remain = total % 3600
+    minutes = remain // 60
+    return f"{hours}小时" if minutes == 0 else f"{hours}小时{minutes}分钟"
+
+
 def send_feishu_progress_push(open_id: str, message: str) -> bool:
     """Push a proactive progress message back to the user's Feishu DM."""
     if not open_id:
@@ -691,7 +706,8 @@ def push_runtime_progress_updates() -> list[dict]:
         if idle >= progress_interval and now - last_stage_push >= progress_cooldown:
             message = (
                 f"任务暂时没有新的可见进展。当前阶段：{stage_label}。"
-                f"距离上一次进展已过去 {idle} 秒，累计运行 {duration} 秒，系统会继续自动跟进。"
+                f"距离上一次进展已过去 {format_duration_label(idle)}，"
+                f"累计运行 {format_duration_label(duration)}，系统会继续自动跟进。"
             )
             if send_feishu_progress_push(open_id, message):
                 record_change_log(
@@ -713,7 +729,8 @@ def push_runtime_progress_updates() -> list[dict]:
         if idle >= escalation_interval and now - last_escalation_push >= escalation_interval:
             message = (
                 f"任务长时间没有新的可见进展。当前阶段：{stage_label}。"
-                f"静默已持续 {idle} 秒，累计运行 {duration} 秒，系统已将其升级关注并会继续同步。"
+                f"静默已持续 {format_duration_label(idle)}，"
+                f"累计运行 {format_duration_label(duration)}，系统已将其升级关注并会继续同步。"
             )
             if send_feishu_progress_push(open_id, message):
                 record_change_log(

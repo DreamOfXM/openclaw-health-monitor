@@ -87,6 +87,12 @@ class GuardianRuntimeAnomalyTests(unittest.TestCase):
 
 
 class GuardianProgressPushTests(unittest.TestCase):
+    def test_format_duration_label(self):
+        self.assertEqual(guardian.format_duration_label(45), "45秒")
+        self.assertEqual(guardian.format_duration_label(120), "2分钟")
+        self.assertEqual(guardian.format_duration_label(220), "3分40秒")
+        self.assertEqual(guardian.format_duration_label(3661), "1小时1分钟")
+
     def test_send_feishu_progress_push_prefixes_user_target(self):
         commands = []
         logs = []
@@ -243,7 +249,7 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(second, [])
             self.assertEqual(third[0]["type"], "progress_push")
             self.assertIn("当前阶段", pushes[-1][1] or "")
-            self.assertIn("220 秒", pushes[-1][1] or "")
+            self.assertIn("3分40秒", pushes[-1][1] or "")
 
 
 if __name__ == "__main__":
