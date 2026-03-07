@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,17 @@ class MonitorStateStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def _connection(self):
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS kv_state (
@@ -56,7 +66,7 @@ class MonitorStateStore:
             )
 
     def _load_kv(self, namespace: str, key: str) -> Any | None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 "SELECT value_json FROM kv_state WHERE namespace = ? AND key = ?",
                 (namespace, key),
@@ -68,7 +78,7 @@ class MonitorStateStore:
     def _save_kv(self, namespace: str, key: str, value: Any) -> None:
         now = int(time.time())
         payload = json.dumps(value, ensure_ascii=False)
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO kv_state(namespace, key, value_json, updated_at)
@@ -117,7 +127,7 @@ class MonitorStateStore:
     def record_change(self, change_type: str, message: str, details: dict[str, Any] | None = None) -> None:
         details = details or {}
         now = time.localtime()
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO change_events(event_date, event_time, change_type, message, details_json)
@@ -134,7 +144,7 @@ class MonitorStateStore:
 
     def list_recent_changes(self, days: int = 7, limit: int = 100) -> list[dict[str, Any]]:
         cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * 86400))
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT event_date, event_time, change_type, message, details_json
@@ -165,7 +175,7 @@ class MonitorStateStore:
         mem_used: float | int | None,
         mem_total: float | int | None,
     ) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO health_samples(recorded_at, process_running, gateway_healthy, cpu, mem_used, mem_total)

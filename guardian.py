@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import threading
+import resource
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,17 @@ ALERTS = {}
 VERSIONS = {"current": None, "history": []}
 STORE = MonitorStateStore(BASE_DIR)
 SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
+
+
+def raise_nofile_limit(target: int = 65536) -> None:
+    """Best-effort bump of RLIMIT_NOFILE for long-running local agents."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        desired = min(max(soft, target), hard)
+        if desired > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+    except Exception:
+        pass
 
 
 def load_config():
@@ -790,6 +802,7 @@ def record_change_log(change_type: str, message: str, details: Optional[dict] = 
     except:
         pass
 def main():
+    raise_nofile_limit()
     load_config()
     load_alerts()
     load_versions()

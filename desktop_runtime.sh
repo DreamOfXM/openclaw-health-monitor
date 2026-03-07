@@ -84,6 +84,25 @@ bootstrap_env() {
     fi
 }
 
+raise_nofile_limit() {
+    local current hard target
+    current="$(ulimit -Sn 2>/dev/null || true)"
+    hard="$(ulimit -Hn 2>/dev/null || true)"
+    target=65536
+    if [ -z "$current" ] || [ -z "$hard" ]; then
+        return 0
+    fi
+    if ! [[ "$current" =~ ^[0-9]+$ ]]; then
+        return 0
+    fi
+    if [[ "$hard" =~ ^[0-9]+$ ]] && [ "$hard" -lt "$target" ]; then
+        target="$hard"
+    fi
+    if [ "$current" -lt "$target" ]; then
+        ulimit -Sn "$target" 2>/dev/null || true
+    fi
+}
+
 read_pid_file() {
     local pid_file="$1"
     if [ ! -f "$pid_file" ]; then
@@ -105,7 +124,11 @@ guardian_pid() {
 }
 
 dashboard_pid() {
-    read_pid_file "$DASHBOARD_PID_FILE" || find_pid "$BASE_DIR/dashboard.py"
+    read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard.py"
+}
+
+dashboard_reachable() {
+    env NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost curl --noproxy '*' -fsS "http://127.0.0.1:$(dashboard_port)/api/status" >/dev/null 2>&1
 }
 
 config_value() {
@@ -129,6 +152,10 @@ gateway_port() {
     local value
     value="$(config_value GATEWAY_PORT)"
     printf '%s\n' "${value:-18789}"
+}
+
+dashboard_port() {
+    printf '%s\n' "${DASHBOARD_PORT:-8080}"
 }
 
 gateway_workdir() {
@@ -232,19 +259,24 @@ start_dashboard() {
     local pid
     pid="$(dashboard_pid || true)"
     if [ -n "$pid" ]; then
-        echo "$pid"
-        return 0
+        if dashboard_reachable; then
+            echo "$pid"
+            return 0
+        fi
+        stop_pid "$pid" || true
+        rm -f "$DASHBOARD_PID_FILE"
     fi
     bootstrap_env
     if [ -z "$PYTHON_BIN" ]; then
         echo "Python with flask+requests not found" >&2
         return 1
     fi
-    "$PYTHON_BIN" "$BASE_DIR/dashboard.py" >> "$LOG_DIR/dashboard.stdout.log" 2>&1 &
+    DASHBOARD_PORT="$(dashboard_port)" "$PYTHON_BIN" "$BASE_DIR/dashboard.py" >> "$LOG_DIR/dashboard.stdout.log" 2>&1 &
     pid=$!
     echo "$pid" > "$DASHBOARD_PID_FILE"
     sleep 2
-    if ! kill -0 "$pid" 2>/dev/null; then
+    pid="$(dashboard_pid || true)"
+    if [ -z "$pid" ] || ! dashboard_reachable; then
         echo "Dashboard failed to start" >&2
         return 1
     fi
@@ -272,29 +304,40 @@ stop_guardian() {
     if [ -n "$pid" ]; then
         stop_pid "$pid"
     fi
+    pkill -f "$BASE_DIR/guardian.py" 2>/dev/null || true
     rm -f "$GUARDIAN_PID_FILE"
 }
 
 stop_dashboard() {
-    local pid
+    local pid listener
     pid="$(dashboard_pid || true)"
     if [ -n "$pid" ]; then
         stop_pid "$pid"
     fi
+    listener="$(listener_pid "$(dashboard_port)")"
+    if [ -n "$listener" ]; then
+        stop_pid "$listener" || true
+    fi
+    pkill -f "$BASE_DIR/dashboard.py" 2>/dev/null || true
     rm -f "$DASHBOARD_PID_FILE"
 }
 
 stop_gateway() {
-    local pid
+    local pid listener
     pid="$(gateway_pid || true)"
     if [ -n "$pid" ]; then
         stop_pid "$pid"
+    fi
+    listener="$(listener_pid "$(gateway_port)")"
+    if [ -n "$listener" ]; then
+        stop_pid "$listener" || true
     fi
     rm -f "$GATEWAY_PID_FILE"
 }
 
 start_all() {
     bootstrap_env
+    raise_nofile_limit
     start_gateway >/dev/null
     start_guardian >/dev/null
     start_dashboard >/dev/null

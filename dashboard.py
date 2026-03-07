@@ -12,6 +12,7 @@ import socket
 import re
 import subprocess
 import threading
+import resource
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request
@@ -30,6 +31,17 @@ LOCAL_CONFIG_FILE = BASE_DIR / "config.local.conf"
 STORE = MonitorStateStore(BASE_DIR)
 SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
 GUARDIAN_PID_FILE = BASE_DIR / "logs" / "guardian.pid"
+
+
+def raise_nofile_limit(target: int = 65536) -> None:
+    """Best-effort bump of RLIMIT_NOFILE for the dashboard server."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        desired = min(max(soft, target), hard)
+        if desired > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+    except Exception:
+        pass
 
 
 def get_change_log_path() -> Path:
@@ -1691,6 +1703,7 @@ def api_config():
 
 if __name__ == "__main__":
     import socket
+    raise_nofile_limit()
     
     def find_free_port(start=8080):
         for port in range(start, start + 10):
@@ -1702,10 +1715,15 @@ if __name__ == "__main__":
             except:
                 continue
         return 8080
-    
-    port = find_free_port()
+
+    requested_port = os.environ.get("DASHBOARD_PORT", "").strip()
+    if requested_port.isdigit():
+        port = int(requested_port)
+    else:
+        port = find_free_port()
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
     print("=" * 50)
     print("OpenClaw 健康监控中心")
-    print(f"访问: http://localhost:{port}")
+    print(f"访问: http://{host}:{port}")
     print("=" * 50)
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host=host, port=port, debug=False)
