@@ -212,6 +212,8 @@ data = json.loads(path.read_text(encoding="utf-8"))
 gateway = data.setdefault("gateway", {})
 auth = gateway.setdefault("auth", {})
 auth["token"] = secrets.token_hex(24)
+control_ui = gateway.setdefault("controlUi", {})
+control_ui["dangerouslyDisableDeviceAuth"] = True
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
 PY
 
