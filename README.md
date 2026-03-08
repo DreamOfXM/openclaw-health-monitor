@@ -304,7 +304,9 @@ Health Monitor 现在还提供一层外挂式任务注册表，不修改 OpenCla
 
 - 注册表属于守护层，不侵入 OpenClaw
 - 默认存储在 `data/monitor.db`
+- 任务合同默认来自 `task_contracts.json`
 - 每轮同步后还会额外生成 `data/task-registry-summary.json`
+- 守护者还会生成 `data/current-task-facts.json`，作为进度查询的事实源
 - 默认开启，可通过 `ENABLE_TASK_REGISTRY` 关闭
 - 当前活动任务、最近任务和时间线会展示在 Dashboard 页面中
 - 也可以通过 `/api/task-registry` 获取结构化摘要，而不是只从整包 `/api/status` 中手动拆字段
@@ -314,7 +316,28 @@ Health Monitor 现在还提供一层外挂式任务注册表，不修改 OpenCla
 - `ENABLE_TASK_REGISTRY`
 - `TASK_REGISTRY_MAX_ACTIVE`
 - `TASK_REGISTRY_RETENTION`
+- `TASK_CONTRACTS_FILE`
+- `TASK_CONTROL_RECEIPT_GRACE`
+- `TASK_CONTROL_FOLLOWUP_COOLDOWN`
+- `TASK_CONTROL_MAX_ATTEMPTS`
+- `TASK_CONTROL_BLOCK_TIMEOUT`
 - 这时页面展示可能会短暂落后于真实进程状态，建议重新通过 Dashboard 切换一次，或手动同步配置后再继续使用
+
+任务合同默认分三类：
+
+- `delivery_pipeline`
+  - 要求出现 `pm -> dev -> test` 的结构化回执
+- `quant_guarded`
+  - 要求出现 `calculator -> verifier` 的结构化回执
+- `single_agent`
+  - 不要求强制多代理合同
+
+这层能力遵循 OpenClaw 官方边界：
+
+- 不修改 OpenClaw 源码
+- 不假设 Feishu 私聊天然支持持久线程绑定
+- 继续使用官方 `sessions_spawn` / `allowAgents` / `runTimeoutSeconds` / `messages.queue.mode`
+- 任务合同、ACK 裁决、阻塞判定都放在守护者外挂层
 
 ## 运行验证
 
@@ -606,6 +629,22 @@ For the official validation environment:
 ### Task Registry
 
 Health Monitor also provides an external task registry layer without patching OpenClaw itself.
+
+Task registry highlights:
+
+- external task contracts come from `task_contracts.json`
+- every complex task is evaluated against a contract, not against free-form model text
+- `current-task-facts.json` becomes the source of truth for progress queries
+- weak evidence tasks can be escalated into explicit blocked states when receipts never arrive
+
+Built-in contracts:
+
+- `delivery_pipeline`
+  - requires `pm -> dev -> test` receipts
+- `quant_guarded`
+  - requires `calculator -> verifier` receipts
+- `single_agent`
+  - no strict multi-agent contract
 
 Default behavior:
 

@@ -625,6 +625,17 @@ class GuardianProgressPushTests(unittest.TestCase):
             )
             store.record_task_event("task-weak", "dispatch_started", {"question": "做量化回测"})
             store.record_task_event("task-weak", "dispatch_complete", {"status": "completed"})
+            store.upsert_task_contract(
+                "task-weak",
+                {
+                    "id": "quant_guarded",
+                    "required_receipts": [
+                        "calculator:started",
+                        "calculator:completed",
+                        "verifier:completed",
+                    ],
+                },
+            )
 
             with mock.patch.object(guardian, "STORE", store), \
                 mock.patch.object(
@@ -649,6 +660,7 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(outcomes[0]["action"], "followup_sent")
             self.assertEqual(followup.call_count, 1)
             self.assertIn("GUARDIAN_TASK_CONTROL:", followup.call_args.args[1])
+            self.assertIn("calculator", followup.call_args.args[1])
             events = store.list_task_events("task-weak", limit=10)
             self.assertTrue(any(item["event_type"] == "control_followup" for item in events))
 
@@ -675,6 +687,17 @@ class GuardianProgressPushTests(unittest.TestCase):
             )
             store.record_task_event("task-weak", "dispatch_started", {"question": "做量化回测"})
             store.record_task_event("task-weak", "dispatch_complete", {"status": "completed"})
+            store.upsert_task_contract(
+                "task-weak",
+                {
+                    "id": "quant_guarded",
+                    "required_receipts": [
+                        "calculator:started",
+                        "calculator:completed",
+                        "verifier:completed",
+                    ],
+                },
+            )
             store.save_runtime_value(
                 "task_control_followup_state",
                 {"task-weak": {"attempts": 2, "last_followup_at": 0, "last_error": "unknown"}},
@@ -703,6 +726,25 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(outcomes[0]["action"], "blocked")
             self.assertEqual(task["status"], "blocked")
             self.assertEqual(task["blocked_reason"], "missing_pipeline_receipt")
+
+    def test_build_control_plane_followup_targets_dev_start(self):
+        task = {
+            "task_id": "task-dev",
+            "question": "做一个新模块",
+            "last_user_message": "做一个新模块",
+            "current_stage": "planning:completed",
+        }
+        control = {
+            "control_state": "planning_only",
+            "next_action": "require_dev_receipt",
+            "contract": {"id": "delivery_pipeline"},
+            "missing_receipts": ["dev:started", "dev:completed", "test:started", "test:completed"],
+        }
+
+        message = guardian.build_control_plane_followup(task, control, idle=300, total=600)
+        self.assertIn("任务合同=delivery_pipeline", message)
+        self.assertIn("dev", message)
+        self.assertIn("缺失回执=dev:started, dev:completed, test:started, test:completed", message)
 
 
 if __name__ == "__main__":

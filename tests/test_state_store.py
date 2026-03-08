@@ -263,6 +263,95 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(control["control_state"], "blocked_unverified")
             self.assertEqual(control["next_action"], "manual_or_session_recovery")
 
+    def test_delivery_contract_requires_dev_receipt_after_pm_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-pipeline",
+                    "session_key": "session-pipeline",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "planning:completed",
+                    "question": "实现一个新系统",
+                    "last_user_message": "实现一个新系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_task_contract(
+                "task-pipeline",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": [
+                        "pm:started",
+                        "pm:completed",
+                        "dev:started",
+                        "dev:completed",
+                        "test:started",
+                        "test:completed",
+                    ],
+                },
+            )
+            store.record_task_event("task-pipeline", "dispatch_started", {"question": "实现一个新系统"})
+            store.record_task_event(
+                "task-pipeline",
+                "pipeline_receipt",
+                {"receipt": {"agent": "pm", "phase": "planning", "action": "completed", "evidence": "方案完成"}},
+            )
+
+            control = store.derive_task_control_state("task-pipeline")
+            self.assertEqual(control["control_state"], "planning_only")
+            self.assertEqual(control["next_action"], "require_dev_receipt")
+            self.assertIn("dev:started", control["missing_receipts"])
+
+    def test_quant_contract_requires_verifier_after_calculator_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-quant",
+                    "session_key": "session-quant",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "calculator:completed",
+                    "question": "做一轮量化回测",
+                    "last_user_message": "做一轮量化回测",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_task_contract(
+                "task-quant",
+                {
+                    "id": "quant_guarded",
+                    "required_receipts": [
+                        "calculator:started",
+                        "calculator:completed",
+                        "verifier:completed",
+                    ],
+                },
+            )
+            store.record_task_event("task-quant", "dispatch_started", {"question": "做一轮量化回测"})
+            store.record_task_event(
+                "task-quant",
+                "pipeline_receipt",
+                {"receipt": {"agent": "calculator", "phase": "analysis", "action": "completed", "evidence": "收益率=12%"}},
+            )
+
+            control = store.derive_task_control_state("task-quant")
+            self.assertEqual(control["control_state"], "awaiting_verifier")
+            self.assertEqual(control["next_action"], "require_verifier_receipt")
+            self.assertIn("verifier:completed", control["missing_receipts"])
+
 
 if __name__ == "__main__":
     unittest.main()

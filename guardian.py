@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional, List
 from monitor_config import DEFAULT_CONFIG, load_config as load_shared_config
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
+from task_contracts import infer_task_contract, load_task_contract_catalog
 
 # ========== 配置 ==========
 BASE_DIR = Path(__file__).parent
@@ -573,6 +574,46 @@ def format_duration_label(seconds: int) -> str:
     return f"{hours}小时" if minutes == 0 else f"{hours}小时{minutes}分钟"
 
 
+def build_control_plane_followup(
+    task: dict[str, Any],
+    control: dict[str, Any],
+    *,
+    idle: int,
+    total: int,
+) -> str:
+    """Build a task-contract-aware guardian control message."""
+    question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+    stage = str(task.get("current_stage") or "处理中")
+    control_state = str(control.get("control_state") or "unknown")
+    next_action = str(control.get("next_action") or "require_receipt_or_block")
+    contract = control.get("contract") or {}
+    contract_id = str(contract.get("id") or "single_agent")
+    missing = ", ".join(control.get("missing_receipts") or []) or "none"
+
+    action_instruction = {
+        "require_pm_receipt": "若产品阶段已开始，请补发 PIPELINE_RECEIPT: agent=pm | phase=planning | action=started/completed；若未开始，请明确阻塞原因。",
+        "await_pm_receipt": "若方案仍在整理，请补发 pm 的 started/completed 回执；若无法继续，请明确阻塞原因。",
+        "require_dev_receipt": "若方案已完成，请立即按官方 sessions_spawn(agentId='dev') 继续，并补发 dev started 回执；若开发无法启动，请明确阻塞原因。",
+        "await_dev_receipt": "若开发已开始，请补发 dev completed/blocked 回执，不要只发口头进度。",
+        "require_test_receipt": "若开发已完成，请立即按官方 sessions_spawn(agentId='test') 继续，并补发 test started 回执；若测试无法启动，请明确阻塞原因。",
+        "await_test_receipt": "若测试已开始，请补发 test completed/blocked 回执，不要只发口头进度。",
+        "require_calculator_start": "若这是量化/精算任务，请先启动 calculator，并补发 calculator started 回执；若未启动，请明确阻塞原因。",
+        "await_calculator_receipt": "若 calculator 已开始，请补发 calculator completed/blocked 回执，不要只发口头进度。",
+        "require_verifier_receipt": "若精算结果已得出，请继续 verifier，并补发 verifier completed 回执；若无法复核，请明确阻塞原因。",
+        "manual_or_session_recovery": "当前任务需要人工恢复或重新发起，请不要再口头宣称链路正在推进。",
+        "require_receipt_or_block": "请立即补发结构化 PIPELINE_RECEIPT；若链路未真正继续，请明确阻塞原因。",
+    }.get(next_action, "请立即补发结构化 PIPELINE_RECEIPT；若链路未真正继续，请明确阻塞原因。")
+
+    return (
+        "GUARDIAN_TASK_CONTROL: 这不是用户新需求。"
+        f"当前 task_id={task['task_id']}，任务合同={contract_id}，控制状态={control_state}，"
+        f"当前阶段={stage}，已静默={format_duration_label(idle)}，累计运行={format_duration_label(total)}，"
+        f"缺失回执={missing}。当前问题={question}。"
+        f"{action_instruction}"
+        "不要再口头宣称团队正在推进，也不要把这条控制消息当成新的用户需求。"
+    )
+
+
 def build_task_id(session_key: str, timestamp: str) -> str:
     raw = f"{session_key}|{timestamp}".encode("utf-8", errors="ignore")
     return hashlib.sha1(raw).hexdigest()[:16]
@@ -617,6 +658,7 @@ def write_task_registry_snapshot() -> None:
             "question": question,
             "last_user_message": last_user_message,
             "control": control,
+            "contract": control.get("contract") or {},
         }
 
     current_payload = enrich_task(current)
@@ -641,6 +683,8 @@ def write_task_registry_snapshot() -> None:
             "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
             "control_state": (facts_current or {}).get("control", {}).get("control_state"),
             "next_action": (facts_current or {}).get("control", {}).get("next_action"),
+            "contract_id": ((facts_current or {}).get("control", {}).get("contract") or {}).get("id"),
+            "missing_receipts": (facts_current or {}).get("control", {}).get("missing_receipts") or [],
         },
     }
     data_dir = BASE_DIR / "data"
@@ -661,6 +705,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
         return
 
     env_id = current_env_spec()["id"]
+    contract_catalog = load_task_contract_catalog(BASE_DIR, str(CONFIG.get("TASK_CONTRACTS_FILE", "") or ""))
     question_candidates: list[tuple[int, str]] = []
     open_dispatches: dict[str, dict[str, Any]] = {}
     touched_task_ids: set[str] = set()
@@ -695,6 +740,12 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 question_text = normalize_task_question(
                     existing.get("last_user_message") or existing.get("question", "")
                 )
+            existing_contract = STORE.get_task_contract(existing["task_id"]) if existing else None
+            contract = infer_task_contract(
+                question_text,
+                catalog=contract_catalog,
+                existing_contract_id=(existing_contract or {}).get("id"),
+            )
             task_id = build_task_id(session_key, ts_raw)
             current_stage = "处理中"
             task = {
@@ -715,6 +766,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             if int(CONFIG.get("TASK_REGISTRY_MAX_ACTIVE", 1)) <= 1:
                 STORE.background_other_tasks_for_session(session_key, task_id)
             STORE.upsert_task(task)
+            STORE.upsert_task_contract(task_id, contract)
             touched_task_ids.add(task_id)
             STORE.record_task_event(
                 task_id,
@@ -725,6 +777,15 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "channel": task["channel"],
                     "timestamp": ts_raw,
                     "env_id": env_id,
+                    "contract_id": contract.get("id"),
+                },
+            )
+            STORE.record_task_event(
+                task_id,
+                "contract_assigned",
+                {
+                    "contract": contract,
+                    "timestamp": ts_raw,
                 },
             )
             open_dispatches[session_key] = {
@@ -732,6 +793,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 "timestamp": ts_raw,
                 "requester_open_id": requester_open_id or "",
                 "marker": "",
+                "contract": contract,
             }
             continue
 
@@ -1558,8 +1620,21 @@ def enforce_task_registry_control_plane() -> list[dict]:
             continue
 
         control = STORE.derive_task_control_state(task["task_id"])
+        contract = control.get("contract") or {}
+        if not (contract.get("required_receipts") or []):
+            followup_state.pop(task["task_id"], None)
+            continue
         control_state = str(control.get("control_state") or "")
-        if control_state not in {"received_only", "planning_only", "progress_only"}:
+        if control_state not in {
+            "received_only",
+            "planning_only",
+            "progress_only",
+            "calculator_running",
+            "awaiting_verifier",
+            "dev_running",
+            "awaiting_test",
+            "test_running",
+        }:
             followup_state.pop(task["task_id"], None)
             continue
 
@@ -1662,15 +1737,11 @@ def enforce_task_registry_control_plane() -> list[dict]:
             )
             continue
 
-        control_message = (
-            "GUARDIAN_TASK_CONTROL: 这不是用户新需求。"
-            f"当前 task_id={task['task_id']}，守护控制面判定状态={control_state}，"
-            f"当前阶段={stage}，已静默={format_duration_label(idle)}，累计运行={format_duration_label(total)}。"
-            f"当前问题={question}。"
-            "请立即二选一："
-            "1) 若流水线确已继续，请补发一条结构化 PIPELINE_RECEIPT；"
-            "2) 若开发/精算/测试未真正启动或已卡住，请明确返回阻塞原因。"
-            "不要再口头宣称团队正在推进，也不要把这条控制消息当成新的用户需求。"
+        control_message = build_control_plane_followup(
+            task,
+            control,
+            idle=idle,
+            total=total,
         )
         ok, error_kind = send_guardian_followup(session_key, control_message)
         state["attempts"] = attempts + 1

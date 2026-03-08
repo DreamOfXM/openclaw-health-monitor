@@ -62,9 +62,39 @@ Core records:
 
 - `managed_tasks`
 - `task_events`
+- `task_contracts`
 - runtime `kv_state`
 
-## 4. Task Lifecycle
+## 4. Task Contracts and ACK Gate
+
+```mermaid
+flowchart LR
+    Q[Incoming user task]
+    R[Guardian task classifier]
+    C[(task_contracts.json)]
+    T[(task_contracts table)]
+    X[Expected receipts<br/>pm/dev/test or calculator/verifier]
+    G[Guardian ACK gate]
+
+    Q --> R
+    C --> R
+    R --> T
+    T --> X
+    X --> G
+```
+
+Task contracts are external, configurable, and intentionally non-invasive:
+
+- `delivery_pipeline`
+  - expects `pm -> dev -> test` receipts
+- `quant_guarded`
+  - expects `calculator -> verifier` receipts
+- `single_agent`
+  - no strict contract
+
+Guardian does not trust free-form agent text for pipeline truth. It only advances control states when the expected receipts arrive.
+
+## 5. Task Lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -82,7 +112,7 @@ stateDiagram-v2
     no_reply --> [*]
 ```
 
-## 5. Evidence Model
+## 6. Evidence Model
 
 The control plane treats these as strong runtime evidence:
 
@@ -94,7 +124,26 @@ The control plane treats these as strong runtime evidence:
 
 The control plane should not treat free-form model text as task truth when stronger evidence exists.
 
-## 6. Operator Surfaces
+## 7. Control States
+
+Examples:
+
+- `received_only`
+  - task was accepted, but no required contract receipts arrived
+- `planning_only`
+  - planning evidence exists, but `dev` has not started
+- `dev_running`
+  - `dev` receipt exists
+- `awaiting_test`
+  - `dev` completed, `test` not started
+- `calculator_running`
+  - calculator started, waiting for structured result
+- `awaiting_verifier`
+  - calculator completed, verifier not done
+- `blocked_unverified`
+  - Guardian escalated because the contract receipts never arrived
+
+## 8. Operator Surfaces
 
 Dashboard exposes:
 
@@ -109,10 +158,11 @@ Guardian provides:
 
 - anomaly detection
 - silence-based follow-up
+- contract-aware task follow-up
 - blocked-task handling
 - environment-aware recovery
 
-## 7. Design Boundary
+## 9. Design Boundary
 
 OpenClaw core is responsible for:
 

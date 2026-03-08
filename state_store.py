@@ -92,6 +92,13 @@ class MonitorStateStore:
                     payload_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS task_contracts (
+                    task_id TEXT PRIMARY KEY,
+                    contract_type TEXT NOT NULL,
+                    contract_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
                 """
             )
 
@@ -350,6 +357,40 @@ class MonitorStateStore:
             for row in rows
         ]
 
+    def upsert_task_contract(self, task_id: str, contract: dict[str, Any]) -> None:
+        payload = json.dumps(contract or {}, ensure_ascii=False)
+        now = int(time.time())
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_contracts(task_id, contract_type, contract_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    contract_type = excluded.contract_type,
+                    contract_json = excluded.contract_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    task_id,
+                    str((contract or {}).get("id") or "single_agent"),
+                    payload,
+                    now,
+                ),
+            )
+
+    def get_task_contract(self, task_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT contract_json FROM task_contracts WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["contract_json"] or "{}")
+        except Exception:
+            return None
+
     @staticmethod
     def _task_label_invalid(text: str | None) -> bool:
         raw = (text or "").strip()
@@ -401,16 +442,23 @@ class MonitorStateStore:
                 "control_state": "unknown",
                 "approved_summary": "任务不存在",
                 "next_action": "none",
+                "contract": {"id": "single_agent", "required_receipts": []},
+                "missing_receipts": [],
                 "flags": {},
             }
 
         events = self.list_task_events(task_id, limit=50)
+        contract = self.get_task_contract(task_id) or {
+            "id": "single_agent",
+            "required_receipts": [],
+        }
         flags = {
             "dispatch_started": False,
             "dispatch_completed": False,
             "visible_completion": False,
             "pipeline_progress": False,
             "pipeline_receipt": False,
+            "pm_started": False,
             "pm_completed": False,
             "dev_started": False,
             "dev_completed": False,
@@ -418,8 +466,18 @@ class MonitorStateStore:
             "test_started": False,
             "test_completed": False,
             "test_blocked": False,
+            "calculator_started": False,
+            "calculator_completed": False,
+            "calculator_blocked": False,
+            "verifier_started": False,
+            "verifier_completed": False,
+            "verifier_blocked": False,
+            "risk_started": False,
+            "risk_completed": False,
+            "risk_blocked": False,
         }
         latest_receipt: dict[str, Any] = task.get("latest_receipt") or {}
+        seen_receipts: set[str] = set()
 
         def apply_receipt(receipt: dict[str, Any]) -> None:
             if not receipt:
@@ -427,8 +485,15 @@ class MonitorStateStore:
             flags["pipeline_receipt"] = True
             agent = str(receipt.get("agent") or "")
             action = str(receipt.get("action") or "")
+            if agent and action:
+                seen_receipts.add(f"{agent}:{action}")
+            if agent and action in {"completed", "blocked"}:
+                seen_receipts.add(f"{agent}:started")
             if agent == "pm" and action == "completed":
+                flags["pm_started"] = True
                 flags["pm_completed"] = True
+            if agent == "pm" and action == "started":
+                flags["pm_started"] = True
             if agent == "dev":
                 if action == "started":
                     flags["dev_started"] = True
@@ -447,6 +512,33 @@ class MonitorStateStore:
                 elif action == "blocked":
                     flags["test_started"] = True
                     flags["test_blocked"] = True
+            if agent == "calculator":
+                if action == "started":
+                    flags["calculator_started"] = True
+                elif action == "completed":
+                    flags["calculator_started"] = True
+                    flags["calculator_completed"] = True
+                elif action == "blocked":
+                    flags["calculator_started"] = True
+                    flags["calculator_blocked"] = True
+            if agent == "verifier":
+                if action == "started":
+                    flags["verifier_started"] = True
+                elif action == "completed":
+                    flags["verifier_started"] = True
+                    flags["verifier_completed"] = True
+                elif action == "blocked":
+                    flags["verifier_started"] = True
+                    flags["verifier_blocked"] = True
+            if agent == "risk":
+                if action == "started":
+                    flags["risk_started"] = True
+                elif action == "completed":
+                    flags["risk_started"] = True
+                    flags["risk_completed"] = True
+                elif action == "blocked":
+                    flags["risk_started"] = True
+                    flags["risk_blocked"] = True
 
         apply_receipt(latest_receipt)
 
@@ -488,8 +580,69 @@ class MonitorStateStore:
             next_action = "manual_or_session_recovery"
             blocked_state_locked = True
 
+        required_receipts = list(contract.get("required_receipts") or [])
+        missing_receipts = [item for item in required_receipts if item not in seen_receipts]
+
         if blocked_state_locked:
             pass
+        elif contract.get("id") == "quant_guarded":
+            if not missing_receipts and flags["dispatch_completed"]:
+                control_state = "completed_verified"
+                approved_summary = "量化/精算任务已收到完整结构化回执。"
+                next_action = "none"
+            elif flags["calculator_blocked"] or flags["verifier_blocked"] or flags["risk_blocked"]:
+                control_state = "analysis_blocked"
+                approved_summary = "精算/复核链路已阻塞。"
+                next_action = "manual_or_session_recovery"
+            elif "calculator:started" in missing_receipts:
+                control_state = "received_only"
+                approved_summary = "任务已接收，但精算节点尚未启动。"
+                next_action = "require_calculator_start"
+            elif "calculator:completed" in missing_receipts:
+                control_state = "calculator_running"
+                approved_summary = "精算节点已启动，等待结构化计算结果。"
+                next_action = "await_calculator_receipt"
+            elif "verifier:completed" in missing_receipts:
+                control_state = "awaiting_verifier"
+                approved_summary = "精算结果已返回，但复核尚未完成。"
+                next_action = "require_verifier_receipt"
+        elif contract.get("id") == "delivery_pipeline":
+            if not missing_receipts and flags["dispatch_completed"]:
+                control_state = "completed_verified"
+                approved_summary = "产品、开发、测试链路都已收到结构化回执。"
+                next_action = "none"
+            elif flags["test_blocked"]:
+                control_state = "test_blocked"
+                approved_summary = "测试阶段已阻塞。"
+                next_action = "wait_for_test_recovery"
+            elif flags["dev_blocked"]:
+                control_state = "dev_blocked"
+                approved_summary = "开发阶段已阻塞。"
+                next_action = "wait_for_dev_recovery"
+            elif "pm:started" in missing_receipts:
+                control_state = "received_only"
+                approved_summary = "任务已接收，但产品梳理尚未开始。"
+                next_action = "require_pm_receipt"
+            elif "pm:completed" in missing_receipts:
+                control_state = "planning_only"
+                approved_summary = "产品阶段已启动，等待方案回执。"
+                next_action = "await_pm_receipt"
+            elif "dev:started" in missing_receipts:
+                control_state = "planning_only"
+                approved_summary = "方案已完成，但开发尚未启动。"
+                next_action = "require_dev_receipt"
+            elif "dev:completed" in missing_receipts:
+                control_state = "dev_running"
+                approved_summary = "开发阶段已启动，存在结构化执行证据。"
+                next_action = "await_dev_receipt"
+            elif "test:started" in missing_receipts:
+                control_state = "awaiting_test"
+                approved_summary = "开发回执已完成，但测试尚未启动。"
+                next_action = "require_test_receipt"
+            elif "test:completed" in missing_receipts:
+                control_state = "test_running"
+                approved_summary = "测试阶段已启动，等待最终测试回执。"
+                next_action = "await_test_receipt"
         elif flags["test_completed"]:
             control_state = "completed_verified"
             approved_summary = "测试回执已完成，任务具备强证据完成状态。"
@@ -532,6 +685,8 @@ class MonitorStateStore:
             "control_state": control_state,
             "approved_summary": approved_summary,
             "next_action": next_action,
+            "contract": contract,
+            "missing_receipts": missing_receipts,
             "flags": flags,
             "latest_receipt": latest_receipt,
         }
