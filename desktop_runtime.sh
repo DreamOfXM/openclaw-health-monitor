@@ -484,6 +484,9 @@ stop_dashboard() {
 
 stop_gateway() {
     local pid listener
+    local gateway_plist
+    gateway_plist="$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist"
+    launchd_bootout "ai.openclaw.gateway" "$gateway_plist"
     run_gateway_service_cmd stop >> "$LOG_DIR/gateway.log" 2>&1 || true
     sleep 1
     pid="$(gateway_pid || true)"

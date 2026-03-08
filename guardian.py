@@ -35,6 +35,7 @@ OPENCLAW_CODE = Path.home() / "openclaw-workspace" / "openclaw"
 GATEWAY_LOG = OPENCLAW_HOME / "logs" / "gateway.log"
 TMP_OPENCLAW_LOG_DIR = Path("/tmp/openclaw")
 OFFICIAL_MANAGER = BASE_DIR / "manage_official_openclaw.sh"
+DESKTOP_RUNTIME = BASE_DIR / "desktop_runtime.sh"
 
 CONFIG = {}
 ALERTS = {}
@@ -1275,29 +1276,13 @@ def restart_gateway():
         log(f"官方验证版 Gateway 重启失败: {(stderr or stdout).strip()}", "ERROR")
         return False
 
-    port = int(spec["port"])
-    existing_pid = get_listener_pid(port)
-    if existing_pid:
-        try:
-            os.kill(existing_pid, signal.SIGTERM)
-            time.sleep(2)
-        except OSError as exc:
-            log(f"结束旧 Gateway 失败: {exc}", "ERROR")
-
-    try:
-        with open(LOG_FILE, "a") as log_handle:
-            subprocess.Popen(
-                ["openclaw", "gateway", "run"],
-                cwd=str(spec["code"]),
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
-            )
-    except Exception as exc:
-        log(f"启动 Gateway 失败: {exc}", "ERROR")
+    run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+    code, stdout, stderr = run_args([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
+    if code != 0:
+        log(f"主用版 Gateway 重启失败: {(stderr or stdout).strip()}", "ERROR")
         return False
 
-    time.sleep(8)
+    time.sleep(5)
     if check_gateway_health():
         log("Gateway 重启成功")
         return True

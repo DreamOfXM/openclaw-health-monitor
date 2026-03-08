@@ -927,18 +927,20 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env not in {"primary", "official"}:
         return False, "未知环境"
 
+    # Always quiesce both managed environments before switching targets.
+    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=60)
+    run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=60)
+
     if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
         return False, "保存 ACTIVE_OPENCLAW_ENV 失败"
     STORE.save_runtime_value("active_openclaw_env", {"env_id": target_env, "updated_at": int(time.time())})
 
     if target_env == "official":
-        run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=60)
         code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
         if code != 0:
             return False, (stderr or stdout or "官方验证版启动失败").strip()
         return True, stdout.strip() or "已切换到官方验证版"
 
-    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=60)
     code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
         return False, (stderr or stdout or "主用版启动失败").strip()

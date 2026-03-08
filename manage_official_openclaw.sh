@@ -7,6 +7,8 @@ LOCAL_CONFIG="$BASE_DIR/config.local.conf"
 LOG_DIR="$BASE_DIR/logs"
 OFFICIAL_PID_FILE="$LOG_DIR/openclaw-official.pid"
 OFFICIAL_LOG_FILE="$LOG_DIR/openclaw-official.log"
+OFFICIAL_LABEL="ai.openclaw.gateway.official"
+OFFICIAL_PLIST="$HOME/Library/LaunchAgents/${OFFICIAL_LABEL}.plist"
 SCHEDULE_LABEL="ai.openclaw.official-update"
 SCHEDULE_PLIST="$HOME/Library/LaunchAgents/${SCHEDULE_LABEL}.plist"
 LAUNCH_DOMAIN="gui/$(id -u)"
@@ -91,6 +93,32 @@ bootstrap_env() {
     fi
     export NO_PROXY=127.0.0.1,localhost
     export no_proxy=127.0.0.1,localhost
+}
+
+resolve_login_cmd() {
+    local name="$1"
+    /bin/zsh -lc "command -v $name" 2>/dev/null | head -n 1 || true
+}
+
+launchd_bootout() {
+    local label="$1"
+    local plist="$2"
+    launchctl bootout "${LAUNCH_DOMAIN}/${label}" 2>/dev/null || launchctl bootout "$LAUNCH_DOMAIN" "$plist" 2>/dev/null || true
+}
+
+launchd_bootstrap() {
+    local plist="$1"
+    launchctl bootstrap "$LAUNCH_DOMAIN" "$plist"
+}
+
+launchd_kickstart() {
+    local label="$1"
+    launchctl kickstart -k "${LAUNCH_DOMAIN}/${label}"
+}
+
+launchd_pid() {
+    local label="$1"
+    launchctl print "${LAUNCH_DOMAIN}/${label}" 2>/dev/null | awk -F'= ' '/pid = / {print $2; exit}' | tr -d ';' || true
 }
 
 require_cmd() {
@@ -244,7 +272,7 @@ listener_pid() {
 }
 
 official_pid() {
-    read_pid_file || listener_pid
+    launchd_pid "$OFFICIAL_LABEL" || read_pid_file || listener_pid
 }
 
 health_check() {
@@ -263,11 +291,12 @@ prepare_official() {
 }
 
 start_official() {
-    local repo state port pid
+    local repo state port pid node_bin
     bootstrap_env
     repo="$(official_code)"
     state="$(official_state)"
     port="$(official_port)"
+    node_bin="$(resolve_login_cmd node)"
 
     if [ ! -d "$repo" ]; then
         prepare_official
@@ -282,27 +311,68 @@ start_official() {
     fi
 
     if [ -n "$pid" ]; then
-        kill "$pid" 2>/dev/null || true
-        sleep 1
+        stop_official >/dev/null 2>&1 || true
     fi
 
     : > "$OFFICIAL_LOG_FILE"
-    (
-        cd "$repo"
-        env \
-            OPENCLAW_CONFIG_PATH="$state/openclaw.json" \
-            OPENCLAW_STATE_DIR="$state" \
-            OPENCLAW_GATEWAY_PORT="$port" \
-            NO_PROXY=127.0.0.1,localhost \
-            no_proxy=127.0.0.1,localhost \
-            nohup node openclaw.mjs gateway --port "$port" >>"$OFFICIAL_LOG_FILE" 2>&1 &
-        echo $! > "$OFFICIAL_PID_FILE"
-    )
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$OFFICIAL_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${OFFICIAL_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${node_bin:-node}</string>
+    <string>${repo}/openclaw.mjs</string>
+    <string>gateway</string>
+    <string>--port</string>
+    <string>${port}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${repo}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>$(resolve_login_path)</string>
+    <key>OPENCLAW_CONFIG_PATH</key>
+    <string>${state}/openclaw.json</string>
+    <key>OPENCLAW_STATE_DIR</key>
+    <string>${state}</string>
+    <key>OPENCLAW_GATEWAY_PORT</key>
+    <string>${port}</string>
+    <key>NO_PROXY</key>
+    <string>127.0.0.1,localhost</string>
+    <key>no_proxy</key>
+    <string>127.0.0.1,localhost</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${OFFICIAL_LOG_FILE}</string>
+  <key>StandardErrorPath</key>
+  <string>${OFFICIAL_LOG_FILE}</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
+EOF
+    launchd_bootout "$OFFICIAL_LABEL" "$OFFICIAL_PLIST"
+    launchd_bootstrap "$OFFICIAL_PLIST"
+    launchd_kickstart "$OFFICIAL_LABEL"
 
     for _ in $(seq 1 40); do
         if health_check; then
+            pid="$(official_pid || true)"
+            if [ -n "$pid" ]; then
+                echo "$pid" > "$OFFICIAL_PID_FILE"
+            fi
             echo "Official OpenClaw validation gateway started."
-            echo "  pid      : $(official_pid)"
+            echo "  pid      : ${pid:-unknown}"
             echo "  health   : http://127.0.0.1:${port}/health"
             echo "  dashboard: $(dashboard_url)"
             return 0
@@ -318,16 +388,14 @@ start_official() {
 
 stop_official() {
     local pid
+    launchd_bootout "$OFFICIAL_LABEL" "$OFFICIAL_PLIST"
     pid="$(official_pid || true)"
-    if [ -z "$pid" ]; then
-        echo "Official OpenClaw validation gateway not running."
-        return 0
-    fi
-
-    kill "$pid" 2>/dev/null || true
-    sleep 1
-    if kill -0 "$pid" 2>/dev/null; then
-        kill -9 "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
     fi
     rm -f "$OFFICIAL_PID_FILE"
     echo "Stopped official OpenClaw validation gateway."
