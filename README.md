@@ -173,7 +173,7 @@ cd ~/openclaw-health-monitor
    持续轮询 Gateway 和运行日志，识别长时间无回复、阶段停滞、网关异常，并在长任务场景下主动推送进度或升级播报
 
 4. `Dashboard`
-   提供本地问题定位面板、最近异常、内存归因和快照操作
+   提供本地问题定位面板、最近异常、内存归因、快照操作，以及多版本 OpenClaw 环境管理
 
 5. `./stop.sh`
    调用 `desktop_runtime.sh stop all`，停止整套本地运行面
@@ -252,6 +252,27 @@ cd ~/openclaw-health-monitor
 
 - `~/openclaw-workspace/openclaw`
 - `~/.openclaw`
+
+### 版本环境管理面板
+
+Dashboard 首页现在会直接展示：
+
+- 当前主用版
+- 官方验证版
+- 当前守护目标环境
+- 每个环境各自的端口、版本、健康状态和 Dashboard 链接
+
+你可以直接在页面里做两件事：
+
+- 查看当前守护的是哪一套 OpenClaw
+- 一键切换守护目标环境
+
+切换行为默认是互斥的：
+
+- 切到官方验证版时，会停掉当前主用版 Gateway
+- 切回当前主用版时，会停掉官方验证版 Gateway
+
+这样不会出现两套 OpenClaw 同时抢同一套通道的情况。
 
 ## 运行验证
 

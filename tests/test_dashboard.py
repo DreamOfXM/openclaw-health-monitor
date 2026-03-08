@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+from pathlib import Path
 
 import dashboard
 
@@ -56,6 +57,39 @@ class DashboardMemoryTests(unittest.TestCase):
 
         self.assertEqual(info["pid"], 5678)
         by_name.assert_called_once_with(r"[g]uardian\.py")
+
+    def test_active_env_id_defaults_to_primary(self):
+        self.assertEqual(dashboard.active_env_id({}), "primary")
+        self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "official"}), "official")
+        self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "weird"}), "primary")
+
+    @mock.patch("dashboard.check_gateway_health_for_env")
+    @mock.patch("dashboard.read_git_head")
+    @mock.patch("dashboard.get_listener_pid")
+    def test_list_openclaw_environments_marks_active_environment(self, listener_pid, read_git_head, health):
+        listener_pid.side_effect = [1111, None]
+        read_git_head.side_effect = ["abc123", "def456"]
+        health.side_effect = [True]
+        config = {
+            "ACTIVE_OPENCLAW_ENV": "primary",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+            "OPENCLAW_OFFICIAL_PORT": 19001,
+        }
+
+        envs = dashboard.list_openclaw_environments(config)
+
+        self.assertEqual(len(envs), 2)
+        self.assertEqual(envs[0]["id"], "primary")
+        self.assertTrue(envs[0]["active"])
+        self.assertTrue(envs[0]["running"])
+        self.assertTrue(envs[0]["healthy"])
+        self.assertEqual(envs[1]["id"], "official")
+        self.assertFalse(envs[1]["active"])
+        self.assertFalse(envs[1]["running"])
 
 
 if __name__ == "__main__":

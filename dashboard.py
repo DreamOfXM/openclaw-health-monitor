@@ -31,6 +31,8 @@ LOCAL_CONFIG_FILE = BASE_DIR / "config.local.conf"
 STORE = MonitorStateStore(BASE_DIR)
 SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
 GUARDIAN_PID_FILE = BASE_DIR / "logs" / "guardian.pid"
+DESKTOP_RUNTIME = BASE_DIR / "desktop_runtime.sh"
+OFFICIAL_MANAGER = BASE_DIR / "manage_official_openclaw.sh"
 
 
 def raise_nofile_limit(target: int = 65536) -> None:
@@ -274,6 +276,145 @@ def list_snapshots(limit: int = 20) -> list[dict]:
     return snapshots
 
 
+def load_config() -> dict:
+    """加载配置"""
+    return load_shared_config(BASE_DIR)
+
+
+def active_env_id(config: Optional[dict] = None) -> str:
+    cfg = config or load_config()
+    selected = str(cfg.get("ACTIVE_OPENCLAW_ENV", "primary")).strip() or "primary"
+    return selected if selected in {"primary", "official"} else "primary"
+
+
+def get_env_specs(config: Optional[dict] = None) -> dict[str, dict]:
+    cfg = config or load_config()
+    primary_port = int(cfg.get("GATEWAY_PORT", 18789))
+    official_port = int(cfg.get("OPENCLAW_OFFICIAL_PORT", 19001))
+    primary_home = Path(str(cfg.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
+    primary_code = Path(str(cfg.get("OPENCLAW_CODE", str(Path.home() / "openclaw-workspace" / "openclaw"))))
+    official_state = Path(str(cfg.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official"))))
+    official_code = Path(str(cfg.get("OPENCLAW_OFFICIAL_CODE", str(Path.home() / "openclaw-workspace" / "openclaw-official"))))
+    return {
+        "primary": {
+            "id": "primary",
+            "name": "当前主用版",
+            "description": "当前日常使用的 OpenClaw 环境",
+            "home": primary_home,
+            "code": primary_code,
+            "port": primary_port,
+            "kind": "primary",
+        },
+        "official": {
+            "id": "official",
+            "name": "官方验证版",
+            "description": "用于并行验证官方最新版的隔离环境",
+            "home": official_state,
+            "code": official_code,
+            "port": official_port,
+            "kind": "official",
+        },
+    }
+
+
+def env_spec(env_id: Optional[str], config: Optional[dict] = None) -> dict:
+    specs = get_env_specs(config)
+    return specs.get(env_id or active_env_id(config), specs["primary"])
+
+
+def env_gateway_log(spec: dict) -> Path:
+    return Path(spec["home"]) / "logs" / "gateway.log"
+
+
+def env_gateway_err_log(spec: dict) -> Path:
+    return Path(spec["home"]) / "logs" / "gateway.err.log"
+
+
+def env_dashboard_url(spec: dict) -> str:
+    token = ""
+    config_path = Path(spec["home"]) / "openclaw.json"
+    try:
+        token = (
+            json.loads(config_path.read_text(encoding="utf-8"))
+            .get("gateway", {})
+            .get("auth", {})
+            .get("token", "")
+        )
+    except Exception:
+        token = ""
+    base = f"http://127.0.0.1:{spec['port']}/"
+    return f"{base}#token={token}" if token else base
+
+
+def read_git_head(repo: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def check_gateway_health_for_env(spec: dict) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "--noproxy",
+                "*",
+                "-fsS",
+                f"http://127.0.0.1:{spec['port']}/health",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"},
+        )
+        if result.returncode != 0:
+            return False
+        payload = json.loads(result.stdout or "{}")
+        return bool(payload.get("ok"))
+    except Exception:
+        return False
+
+
+def get_gateway_process_for_env(spec: dict) -> Optional[dict]:
+    pid = get_listener_pid(int(spec["port"]))
+    if pid is None:
+        return None
+    return get_process_info_by_pid(pid)
+
+
+def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
+    cfg = config or load_config()
+    current = active_env_id(cfg)
+    environments = []
+    for item in get_env_specs(cfg).values():
+        running = get_listener_pid(int(item["port"])) is not None
+        environments.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "description": item["description"],
+                "port": item["port"],
+                "code": str(item["code"]),
+                "home": str(item["home"]),
+                "git_head": read_git_head(Path(item["code"])),
+                "running": running,
+                "healthy": check_gateway_health_for_env(item) if running else False,
+                "dashboard_url": env_dashboard_url(item),
+                "active": item["id"] == current,
+            }
+        )
+    return environments
+
+
 def backup_change_logs():
     """备份旧日志"""
     CHANGE_LOG_DIR.mkdir(exist_ok=True)
@@ -477,9 +618,11 @@ def get_system_metrics() -> dict:
     }
 
 
-def analyze_sessions(minutes: int = 5) -> dict:
+def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
     """分析会话 - 每5分钟统计"""
-    if not GATEWAY_LOG.exists():
+    env = spec or env_spec(None)
+    gateway_log = env_gateway_log(env)
+    if not gateway_log.exists():
         return {"total": 0, "slow": 0, "stuck": 0, "sessions": []}
     
     sessions = []
@@ -487,7 +630,7 @@ def analyze_sessions(minutes: int = 5) -> dict:
     lines = []
     
     try:
-        with open(GATEWAY_LOG) as f:
+        with open(gateway_log) as f:
             lines = f.readlines()[-8000:]
         
         # 先收集所有问题 - 支持多种格式
@@ -625,11 +768,12 @@ def analyze_sessions(minutes: int = 5) -> dict:
     return {"total": len(sessions), "slow": slow, "stuck": stuck, "sessions": sessions, "reasons": slow_reasons}
 
 
-def get_error_logs(count: int = 20) -> list:
+def get_error_logs(count: int = 20, spec: Optional[dict] = None) -> list:
     """获取错误日志"""
     errors = []
-    
-    for log_file in [GATEWAY_ERR_LOG, GATEWAY_LOG]:
+    env = spec or env_spec(None)
+
+    for log_file in [env_gateway_err_log(env), env_gateway_log(env)]:
         if not log_file.exists():
             continue
         try:
@@ -652,12 +796,13 @@ def get_error_logs(count: int = 20) -> list:
     return errors[:count]
 
 
-def get_version() -> str:
+def get_version(spec: Optional[dict] = None) -> str:
     """获取版本"""
+    env = spec or env_spec(None)
     try:
         result = subprocess.run(
-            f"cd {OPENCLAW_CODE} && git describe --tags --always",
-            shell=True, capture_output=True, text=True, timeout=5
+            ["git", "-C", str(env["code"]), "describe", "--tags", "--always"],
+            capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
@@ -735,11 +880,6 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
     return diagnoses
 
 
-def load_config() -> dict:
-    """加载配置"""
-    return load_shared_config(BASE_DIR)
-
-
 def save_config(key: str, value: str) -> bool:
     """保存配置"""
     SNAPSHOTS.create_snapshot("before-config-change")
@@ -763,6 +903,35 @@ def load_versions() -> dict:
         with open(versions_file) as f:
             return json.load(f)
     return {"current": None, "history": []}
+
+
+def run_script(args: list[str], timeout: int = 180) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return result.returncode, result.stdout, result.stderr
+    except Exception as exc:
+        return -1, "", str(exc)
+
+
+def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
+    if target_env not in {"primary", "official"}:
+        return False, "未知环境"
+
+    if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
+        return False, "保存 ACTIVE_OPENCLAW_ENV 失败"
+
+    if target_env == "official":
+        run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=60)
+        code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
+        if code != 0:
+            return False, (stderr or stdout or "官方验证版启动失败").strip()
+        return True, stdout.strip() or "已切换到官方验证版"
+
+    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=60)
+    code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
+    if code != 0:
+        return False, (stderr or stdout or "主用版启动失败").strip()
+    return True, stdout.strip() or "已切换到当前主用版"
 
 
 # ========== API 端点 ==========
@@ -849,6 +1018,26 @@ def index():
         .memory-item-name { font-size: 13px; font-weight: 600; }
         .memory-item-note { font-size: 11px; color: #9ca3af; margin-top: 4px; }
         .memory-item-value { font-size: 13px; color: #f3f4f6; white-space: nowrap; }
+        .env-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 14px 0 6px; }
+        .env-card {
+            padding: 16px; border-radius: 12px; background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .env-card.active {
+            border-color: rgba(74,222,128,0.45);
+            box-shadow: 0 0 0 1px rgba(74,222,128,0.2) inset;
+        }
+        .env-title-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 8px; }
+        .env-title { font-size: 18px; font-weight: 700; }
+        .env-pill {
+            font-size: 11px; padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.08);
+            color: #d1d5db;
+        }
+        .env-pill.active { background: rgba(74,222,128,0.18); color: #bbf7d0; }
+        .env-meta { font-size: 12px; color: #9ca3af; line-height: 1.7; margin-top: 10px; }
+        .env-actions { display: flex; gap: 8px; margin-top: 14px; }
+        .env-link { color: #93c5fd; text-decoration: none; font-size: 12px; }
+        .env-link:hover { text-decoration: underline; }
         
         .diagnose-item { 
             display: flex; align-items: center; gap: 15px; padding: 15px; 
@@ -970,6 +1159,12 @@ def index():
                 <div class="value" id="gateway-status">--</div>
                 <div class="sub" id="process-pid">--</div>
             </div>
+        </div>
+
+        <div class="section">
+            <h2>🧭 版本环境</h2>
+            <div id="environment-summary" class="memory-box" style="margin-bottom:14px;"></div>
+            <div id="environment-cards" class="env-grid"></div>
         </div>
         
         <div class="row">
@@ -1144,6 +1339,41 @@ def index():
                     statusEl.innerHTML = '<span class="status-error">● 异常</span>';
                 }
                 document.getElementById('process-pid').textContent = data.gateway_process ? 'PID: ' + data.gateway_process.pid : '未运行';
+
+                // 版本环境
+                const envSummaryEl = document.getElementById('environment-summary');
+                const envCardsEl = document.getElementById('environment-cards');
+                const envs = data.environments || [];
+                const activeEnv = envs.find(item => item.active) || null;
+                envSummaryEl.innerHTML = activeEnv ? `
+                    <div class="memory-box-title">当前守护目标</div>
+                    <div class="memory-box-main">${activeEnv.name} · ${activeEnv.healthy ? '健康' : (activeEnv.running ? '运行中但健康检查失败' : '未运行')}</div>
+                    <div class="memory-box-sub">端口 ${activeEnv.port} · 版本 ${activeEnv.git_head} · ${activeEnv.code}</div>
+                ` : `
+                    <div class="memory-box-title">当前守护目标</div>
+                    <div class="memory-box-main">未识别</div>
+                    <div class="memory-box-sub">请检查版本环境配置。</div>
+                `;
+                envCardsEl.innerHTML = envs.map(item => `
+                    <div class="env-card ${item.active ? 'active' : ''}">
+                        <div class="env-title-row">
+                            <div class="env-title">${item.name}</div>
+                            <div class="env-pill ${item.active ? 'active' : ''}">${item.active ? '当前守护中' : '可切换'}</div>
+                        </div>
+                        <div class="event-details">${item.description}</div>
+                        <div class="env-meta">
+                            端口: ${item.port}<br/>
+                            版本: ${item.git_head}<br/>
+                            状态: ${item.running ? (item.healthy ? '健康' : '运行中但异常') : '未运行'}
+                        </div>
+                        <div class="env-actions">
+                            <button class="btn ${item.active ? '' : 'btn-primary'}" ${item.active ? 'disabled' : ''} onclick="switchEnvironment('${item.id}')">
+                                ${item.active ? '当前环境' : '切换到这里'}
+                            </button>
+                            <a class="env-link" href="${item.dashboard_url}" target="_blank" rel="noopener">打开 Dashboard</a>
+                        </div>
+                    </div>
+                `).join('');
                 
                 // 慢会话
                 const tbody = document.getElementById('slow-sessions');
@@ -1324,6 +1554,22 @@ def index():
                 alert('重启请求失败');
             }
         }
+
+        async function switchEnvironment(envId) {
+            if (!confirm(`确认切换守护目标到 ${envId} 吗？这会停止另一边的 Gateway。`)) return;
+            try {
+                const res = await fetch('/api/environments/switch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({env_id: envId})
+                });
+                const data = await res.json();
+                showToast(data.success ? 'success' : 'error', data.message || (data.success ? '切换成功' : '切换失败'));
+                setTimeout(loadData, 2000);
+            } catch (e) {
+                showToast('error', e.message || '切换失败');
+            }
+        }
         
         async function emergencyRecover() {
             if (!confirm('🚨 急救模式将：\\n1. 恢复最近一次配置快照\\n2. 重新启动 Gateway\\n\\n确定要执行吗？')) return;
@@ -1502,14 +1748,15 @@ def index():
 @app.route("/api/status")
 def api_status():
     """获取状态 API"""
-    metrics = get_system_metrics()
-    gateway_process = get_process_info("openclaw.*gateway")
-    guardian_process = get_guardian_process_info()
-    gateway_healthy = check_gateway_health()
-    sessions = analyze_sessions(5)
-    errors = get_error_logs(20)
-    version = get_version()
     config = load_config()
+    selected_env = env_spec(active_env_id(config), config)
+    metrics = get_system_metrics()
+    gateway_process = get_gateway_process_for_env(selected_env)
+    guardian_process = get_guardian_process_info()
+    gateway_healthy = check_gateway_health_for_env(selected_env)
+    sessions = analyze_sessions(5, selected_env)
+    errors = get_error_logs(20, selected_env)
+    version = get_version(selected_env)
     safe_config = sanitize_config_for_ui(config)
     version_history = load_versions()
     diagnoses = get_diagnoses(metrics, sessions, [gateway_process, guardian_process])
@@ -1517,8 +1764,11 @@ def api_status():
     recent_events = get_recent_anomalies(limit=8, days=7)
     incident_summary = build_incident_summary(recent_events)
     memory_summary = summarize_memory_usage(metrics, top_processes)
+    environments = list_openclaw_environments(config)
     
     data = {
+        "active_environment": selected_env["id"],
+        "environments": environments,
         "metrics": metrics,
         "gateway_process": gateway_process,
         "guardian_process": guardian_process,
@@ -1537,6 +1787,20 @@ def api_status():
         response=json.dumps(data, ensure_ascii=False),
         mimetype='application/json'
     )
+
+
+@app.route("/api/environments/switch", methods=["POST"])
+def api_switch_environment():
+    """切换当前守护目标环境。"""
+    try:
+        data = request.get_json(silent=True) or {}
+        env_id = str(data.get("env_id", "")).strip()
+        success, message = switch_openclaw_environment(env_id)
+        if success:
+            record_change("version", f"切换守护环境到 {env_id}", {"to": env_id})
+        return jsonify({"success": success, "message": message, "env_id": env_id})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)})
 
 
 @app.route("/api/restart", methods=["POST"])
