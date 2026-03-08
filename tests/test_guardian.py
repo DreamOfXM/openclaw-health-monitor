@@ -275,7 +275,9 @@ class GuardianProgressPushTests(unittest.TestCase):
             completed_events = store.list_task_events(tasks[1]["task_id"], limit=10)
             self.assertTrue(any(item["event_type"] == "dispatch_complete" for item in completed_events))
             summary_file = base / "data" / "task-registry-summary.json"
+            facts_file = base / "data" / "current-task-facts.json"
             self.assertTrue(summary_file.exists())
+            self.assertTrue(facts_file.exists())
 
     def test_extract_runtime_question_strips_json_runtime_metadata(self):
         line = '{"0":"{\\"subsystem\\":\\"gateway/channels/feishu\\"}","1":"Feishu[default] DM from ou_test: 我再提个需求，就是做一个系统","_meta":{"runtime":"node"}}'

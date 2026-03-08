@@ -601,16 +601,57 @@ def write_task_registry_snapshot() -> None:
     current = STORE.get_current_task(env_id=env_id)
     tasks = STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100)))
     filtered = [task for task in tasks if task.get("env_id") == env_id]
+
+    def enrich_task(task: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not task:
+            return None
+        question = normalize_task_question(task.get("question"))
+        last_user_message = normalize_task_question(task.get("last_user_message"))
+        if question == "未知任务":
+            question = STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
+        if last_user_message == "未知任务":
+            last_user_message = STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
+        control = STORE.derive_task_control_state(task["task_id"])
+        return {
+            **task,
+            "question": question,
+            "last_user_message": last_user_message,
+            "control": control,
+        }
+
+    current_payload = enrich_task(current)
+    tasks_payload = [task for task in (enrich_task(item) for item in filtered[:20]) if task]
+    facts_current = current_payload or (tasks_payload[0] if tasks_payload else None)
     payload = {
         "generated_at": int(time.time()),
         "env_id": env_id,
         "summary": STORE.summarize_tasks(env_id=env_id),
-        "current": current,
-        "tasks": filtered[:20],
+        "current": current_payload,
+        "tasks": tasks_payload,
     }
-    output = BASE_DIR / "data" / "task-registry-summary.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    facts_payload = {
+        "generated_at": payload["generated_at"],
+        "env_id": env_id,
+        "current_task": {
+            "task_id": facts_current.get("task_id") if facts_current else None,
+            "question": facts_current.get("question") if facts_current else None,
+            "status": facts_current.get("status") if facts_current else None,
+            "current_stage": facts_current.get("current_stage") if facts_current else None,
+            "approved_summary": (facts_current or {}).get("control", {}).get("approved_summary"),
+            "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
+            "control_state": (facts_current or {}).get("control", {}).get("control_state"),
+        },
+    }
+    data_dir = BASE_DIR / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "task-registry-summary.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (data_dir / "current-task-facts.json").write_text(
+        json.dumps(facts_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def sync_runtime_task_registry(lines: list[str]) -> None:
