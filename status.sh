@@ -14,11 +14,6 @@ discover_dashboard_url() {
 }
 
 json="$("$RUNTIME" status-json)"
-gateway_pid="$(python3 - <<'PY' "$json"
-import json, sys
-print((json.loads(sys.argv[1]).get("gateway") or "").strip())
-PY
-)"
 guardian_pid="$(python3 - <<'PY' "$json"
 import json, sys
 print((json.loads(sys.argv[1]).get("guardian") or "").strip())
@@ -34,7 +29,7 @@ dashboard_url="$(discover_dashboard_url || true)"
 echo "OpenClaw Health Monitor status"
 echo "Project dir: $BASE_DIR"
 echo
-echo "Gateway  : ${gateway_pid:-not running}"
+echo "Gateway  : resolving..."
 echo "Guardian : ${guardian_pid:-not running}"
 echo "Dashboard: ${dashboard_pid:-not running}"
 echo "URL      : ${dashboard_url:-not reachable}"
@@ -53,7 +48,11 @@ payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 metrics = payload.get("metrics") or {}
 incident = payload.get("incident_summary") or {}
 memory = payload.get("memory_summary") or {}
+gateway_process = payload.get("gateway_process") or {}
+active_environment = payload.get("active_environment") or "-"
 
+print(f"Active env      : {active_environment}")
+print(f"Gateway PID     : {gateway_process.get('pid', 'not running')}")
 print(f"Gateway healthy : {payload.get('gateway_healthy')}")
 print(f"CPU / Memory    : {metrics.get('cpu')}% / {metrics.get('mem_used')}G / {metrics.get('mem_total')}G")
 print(f"Incident        : {incident.get('headline', '-')}")

@@ -506,6 +506,7 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
     environments = []
     for item in get_env_specs(cfg).values():
         running = get_listener_pid(int(item["port"])) is not None
+        active = item["id"] == current
         environments.append(
             {
                 "id": item["id"],
@@ -518,8 +519,8 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "running": running,
                 "healthy": check_gateway_health_for_env(item) if running else False,
                 "dashboard_url": env_dashboard_url(item),
-                "dashboard_open_link": env_open_link(item),
-                "active": item["id"] == current,
+                "dashboard_open_link": env_open_link(item) if active and running else "",
+                "active": active,
             }
         )
     return environments
@@ -1027,13 +1028,15 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env not in {"primary", "official"}:
         return False, "未知环境"
 
-    # Always quiesce both managed environments before switching targets.
-    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=60)
-    run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=60)
-
     if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
         return False, "保存 ACTIVE_OPENCLAW_ENV 失败"
     STORE.save_runtime_value("active_openclaw_env", {"env_id": target_env, "updated_at": int(time.time())})
+
+    # First move the guardian target, then quiesce both environments so the old
+    # environment is not immediately restarted during the switch window.
+    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=60)
+    run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=60)
+    time.sleep(2)
 
     if target_env == "official":
         code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
@@ -1991,6 +1994,8 @@ def open_dashboard(env_id: str):
     spec = env_spec(env_id, config)
     if spec["id"] != env_id:
         return "Unknown environment", 404
+    if active_env_id(config) != env_id:
+        return "Environment is not active", 409
     if get_listener_pid(int(spec["port"])) is None:
         return "Environment is not running", 409
     return redirect(env_dashboard_url(spec), code=302)
