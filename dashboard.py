@@ -15,7 +15,7 @@ import threading
 import resource
 from datetime import datetime, timedelta
 from pathlib import Path
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, redirect
 
 from typing import Optional
 
@@ -282,7 +282,10 @@ def load_config() -> dict:
 
 
 def active_env_id(config: Optional[dict] = None) -> str:
-    cfg = config or load_config()
+    if config is None:
+        cfg = load_config()
+    else:
+        cfg = config
     selected = str(cfg.get("ACTIVE_OPENCLAW_ENV", "primary")).strip() or "primary"
     return selected if selected in {"primary", "official"} else "primary"
 
@@ -344,6 +347,10 @@ def env_dashboard_url(spec: dict) -> str:
         token = ""
     base = f"http://127.0.0.1:{spec['port']}/"
     return f"{base}#token={token}" if token else base
+
+
+def env_open_link(spec: dict) -> str:
+    return f"/open-dashboard/{spec['id']}"
 
 
 def read_git_head(repo: Path) -> str:
@@ -411,6 +418,7 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "running": running,
                 "healthy": check_gateway_health_for_env(item) if running else False,
                 "dashboard_url": env_dashboard_url(item),
+                "dashboard_open_link": env_open_link(item),
                 "active": item["id"] == current,
             }
         )
@@ -1374,7 +1382,7 @@ def index():
                             <button class="btn ${item.active ? '' : 'btn-primary'}" ${item.active ? 'disabled' : ''} onclick="switchEnvironment('${item.id}')">
                                 ${item.active ? '当前环境' : '切换到这里'}
                             </button>
-                            <a class="env-link ${item.running ? '' : 'disabled'}" ${item.running ? `href="${item.dashboard_url}" target="_blank" rel="noopener"` : 'href="javascript:void(0)" aria-disabled="true"'}>打开 Dashboard</a>
+                            <a class="env-link ${item.running ? '' : 'disabled'}" ${item.running ? `href="${item.dashboard_open_link}" target="_blank" rel="noopener"` : 'href="javascript:void(0)" aria-disabled="true"'}>打开 Dashboard</a>
                         </div>
                     </div>
                 `).join('');
@@ -1805,6 +1813,18 @@ def api_switch_environment():
         return jsonify({"success": success, "message": message, "env_id": env_id})
     except Exception as exc:
         return jsonify({"success": False, "message": str(exc)})
+
+
+@app.route("/open-dashboard/<env_id>")
+def open_dashboard(env_id: str):
+    """Open the target OpenClaw dashboard through a server-side redirect."""
+    config = load_config()
+    spec = env_spec(env_id, config)
+    if spec["id"] != env_id:
+        return "Unknown environment", 404
+    if get_listener_pid(int(spec["port"])) is None:
+        return "Environment is not running", 409
+    return redirect(env_dashboard_url(spec), code=302)
 
 
 @app.route("/api/restart", methods=["POST"])
