@@ -243,6 +243,33 @@ class GuardianProgressPushTests(unittest.TestCase):
         self.assertEqual(dispatches[0]["question"], "新问题")
         self.assertEqual(dispatches[0]["marker"], "TEST_RUNNING")
 
+    def test_sync_runtime_task_registry_tracks_current_and_completed_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            lines = [
+                "2026-03-06T05:00:00 dm from tester: 帮我做一个系统\n",
+                "2026-03-06T05:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)\n",
+                "2026-03-06T05:00:10 PIPELINE_PROGRESS: PM_ANALYZING\n",
+                "2026-03-06T05:00:20 PIPELINE_RECEIPT: agent=pm | phase=planning | action=completed | evidence=read=req,repo\n",
+                "2026-03-06T05:00:35 dispatch complete (queuedFinal=true, replies=1)\n",
+                "2026-03-06T05:01:00 dm from tester: 再加一个模块\n",
+                "2026-03-06T05:01:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)\n",
+                "2026-03-06T05:01:15 PIPELINE_RECEIPT: agent=dev | phase=implementation | action=blocked | evidence=test spawn rejected\n",
+            ]
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "CONFIG", {"ENABLE_TASK_REGISTRY": True}), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}):
+                guardian.sync_runtime_task_registry(lines)
+
+            tasks = store.list_tasks(limit=10)
+            self.assertEqual(len(tasks), 2)
+            self.assertEqual(tasks[0]["status"], "blocked")
+            self.assertEqual(tasks[0]["latest_receipt"]["agent"], "dev")
+            self.assertEqual(tasks[1]["status"], "completed")
+            self.assertEqual(tasks[1]["current_stage"], "已完成")
+
     def test_collect_open_runtime_dispatches_stops_after_visible_completion(self):
         lines = [
             "2026-03-06T05:00:00 dm from tester: 帮我继续处理\n",

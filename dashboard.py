@@ -176,6 +176,41 @@ def build_incident_summary(events: list[dict]) -> dict:
     return summary
 
 
+def get_task_registry_payload(limit: int = 8) -> dict:
+    """Return managed task registry data for dashboard/API consumers."""
+    config = load_config()
+    enabled = bool(config.get("ENABLE_TASK_REGISTRY", True))
+    tasks = STORE.list_tasks(limit=limit) if enabled else []
+
+    def normalize_question(text: str) -> str:
+        raw = (text or "").strip()
+        lower = raw.lower()
+        if not raw:
+            return "未知任务"
+        if "dispatching to agent" in lower:
+            return "未知任务"
+        if " dm from " in lower or "feishu[default] dm from " in lower:
+            if ": " in raw:
+                raw = raw.split(": ", 1)[1]
+            raw = raw.split('","_meta"', 1)[0]
+            raw = raw.strip()
+        return raw or "未知任务"
+
+    for task in tasks:
+        task["question"] = normalize_question(task.get("question", ""))
+        task["last_user_message"] = normalize_question(task.get("last_user_message", ""))
+        ts = int(task.get("last_progress_at") or 0)
+        task["last_progress_label"] = (
+            datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-"
+        )
+    active = [task for task in tasks if task.get("status") in {"running", "blocked", "background"}]
+    return {
+        "enabled": enabled,
+        "current": active[0] if active else (tasks[0] if tasks else None),
+        "tasks": tasks,
+    }
+
+
 def format_change_details(change: dict) -> str:
     """Render compact change details for the dashboard."""
     details = change.get("details", {}) or {}
@@ -1201,6 +1236,12 @@ def index():
         </div>
 
         <div class="section">
+            <h2>🗂️ 任务注册表</h2>
+            <div id="task-registry-summary" class="memory-box" style="margin-bottom:14px;"></div>
+            <div id="task-registry-list" class="event-list"></div>
+        </div>
+
+        <div class="section">
             <h2>🚨 最近异常 / 进度</h2>
             <div id="recent-events" class="event-list"></div>
         </div>
@@ -1470,6 +1511,43 @@ def index():
                         <div class="incident-sub">最近问题: ${incident.last_question || '-'}</div>
                     </div>
                 `;
+
+                // 任务注册表
+                const taskRegistry = data.task_registry || {};
+                const taskSummaryEl = document.getElementById('task-registry-summary');
+                const taskListEl = document.getElementById('task-registry-list');
+                const currentTask = taskRegistry.current || null;
+                if (!taskRegistry.enabled) {
+                    taskSummaryEl.innerHTML = `
+                        <div class="memory-box-title">当前活动任务</div>
+                        <div class="memory-box-main">未启用</div>
+                        <div class="memory-box-sub">可通过 ENABLE_TASK_REGISTRY 打开任务注册表。</div>
+                    `;
+                    taskListEl.innerHTML = '';
+                } else {
+                    taskSummaryEl.innerHTML = currentTask ? `
+                        <div class="memory-box-title">当前活动任务</div>
+                        <div class="memory-box-main">${currentTask.question || '未知任务'}</div>
+                        <div class="memory-box-sub">状态: ${currentTask.status} | 阶段: ${currentTask.current_stage} | 会话: ${currentTask.session_key}</div>
+                    ` : `
+                        <div class="memory-box-title">当前活动任务</div>
+                        <div class="memory-box-main">暂无活动任务</div>
+                        <div class="memory-box-sub">最近没有需要守护跟踪的复杂任务。</div>
+                    `;
+                    const tasks = taskRegistry.tasks || [];
+                    taskListEl.innerHTML = tasks.length ? tasks.map(item => `
+                        <div class="event-item ${item.status === 'completed' ? 'info' : (item.status === 'blocked' ? 'warning' : 'error')}">
+                            <div class="event-header">
+                                <div class="event-title">${item.question || '未知任务'}</div>
+                                <div class="event-time">${item.status} · ${item.current_stage}</div>
+                            </div>
+                            <div class="event-details">
+                                task_id=${item.task_id} | session=${item.session_key}<br/>
+                                最近进展时间: ${item.last_progress_label || '-'}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
+                            </div>
+                        </div>
+                    `).join('') : '<div class="event-empty">暂无任务记录</div>';
+                }
 
                 // 最近异常 / 进度
                 const eventsEl = document.getElementById('recent-events');
@@ -1779,6 +1857,7 @@ def api_status():
     incident_summary = build_incident_summary(recent_events)
     memory_summary = summarize_memory_usage(metrics, top_processes)
     environments = list_openclaw_environments(config)
+    task_registry = get_task_registry_payload(limit=8)
     
     data = {
         "active_environment": selected_env["id"],
@@ -1796,6 +1875,7 @@ def api_status():
         "recent_events": recent_events,
         "incident_summary": incident_summary,
         "memory_summary": memory_summary,
+        "task_registry": task_registry,
     }
     return app.response_class(
         response=json.dumps(data, ensure_ascii=False),

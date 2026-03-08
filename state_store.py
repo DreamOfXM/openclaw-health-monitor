@@ -62,6 +62,36 @@ class MonitorStateStore:
                     mem_used REAL,
                     mem_total REAL
                 );
+
+                CREATE TABLE IF NOT EXISTS managed_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL,
+                    env_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_stage TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    last_user_message TEXT NOT NULL,
+                    blocked_reason TEXT NOT NULL,
+                    latest_receipt_json TEXT NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    last_progress_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    completed_at INTEGER NOT NULL DEFAULT 0,
+                    backgrounded_at INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_managed_tasks_session_updated
+                ON managed_tasks(session_key, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
                 """
             )
 
@@ -190,3 +220,145 @@ class MonitorStateStore:
                     mem_total,
                 ),
             )
+
+    def upsert_task(self, task: dict[str, Any]) -> None:
+        now = int(time.time())
+        payload = {
+            "task_id": task["task_id"],
+            "session_key": task["session_key"],
+            "env_id": task.get("env_id", "primary"),
+            "channel": task.get("channel", "unknown"),
+            "status": task.get("status", "running"),
+            "current_stage": task.get("current_stage", "处理中"),
+            "question": task.get("question", ""),
+            "last_user_message": task.get("last_user_message", task.get("question", "")),
+            "blocked_reason": task.get("blocked_reason", ""),
+            "latest_receipt_json": json.dumps(task.get("latest_receipt", {}), ensure_ascii=False),
+            "started_at": int(task.get("started_at", now)),
+            "last_progress_at": int(task.get("last_progress_at", now)),
+            "created_at": int(task.get("created_at", now)),
+            "updated_at": int(task.get("updated_at", now)),
+            "completed_at": int(task.get("completed_at", 0)),
+            "backgrounded_at": int(task.get("backgrounded_at", 0)),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO managed_tasks(
+                    task_id, session_key, env_id, channel, status, current_stage, question,
+                    last_user_message, blocked_reason, latest_receipt_json, started_at,
+                    last_progress_at, created_at, updated_at, completed_at, backgrounded_at
+                )
+                VALUES(
+                    :task_id, :session_key, :env_id, :channel, :status, :current_stage, :question,
+                    :last_user_message, :blocked_reason, :latest_receipt_json, :started_at,
+                    :last_progress_at, :created_at, :updated_at, :completed_at, :backgrounded_at
+                )
+                ON CONFLICT(task_id) DO UPDATE SET
+                    session_key = excluded.session_key,
+                    env_id = excluded.env_id,
+                    channel = excluded.channel,
+                    status = excluded.status,
+                    current_stage = excluded.current_stage,
+                    question = excluded.question,
+                    last_user_message = excluded.last_user_message,
+                    blocked_reason = excluded.blocked_reason,
+                    latest_receipt_json = excluded.latest_receipt_json,
+                    started_at = excluded.started_at,
+                    last_progress_at = excluded.last_progress_at,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    completed_at = excluded.completed_at,
+                    backgrounded_at = excluded.backgrounded_at
+                """,
+                payload,
+            )
+
+    def update_task_fields(self, task_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        assignments: list[str] = []
+        params: dict[str, Any] = {"task_id": task_id}
+        for key, value in fields.items():
+            if key == "latest_receipt":
+                assignments.append("latest_receipt_json = :latest_receipt_json")
+                params["latest_receipt_json"] = json.dumps(value or {}, ensure_ascii=False)
+            else:
+                assignments.append(f"{key} = :{key}")
+                params[key] = value
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE managed_tasks SET {', '.join(assignments)} WHERE task_id = :task_id",
+                params,
+            )
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM managed_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._row_to_task(row)
+
+    def get_latest_task_for_session(self, session_key: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM managed_tasks
+                WHERE session_key = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (session_key,),
+            ).fetchone()
+        return self._row_to_task(row)
+
+    def list_tasks(self, *, limit: int = 20, statuses: list[str] | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM managed_tasks"
+        params: list[Any] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            query += f" WHERE status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [task for row in rows if (task := self._row_to_task(row))]
+
+    def list_active_tasks(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        return self.list_tasks(limit=limit, statuses=["running", "blocked", "background"])
+
+    def background_other_tasks_for_session(self, session_key: str, keep_task_id: str) -> None:
+        now = int(time.time())
+        with self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE managed_tasks
+                SET status = 'background', backgrounded_at = ?, updated_at = ?
+                WHERE session_key = ? AND task_id != ? AND status IN ('running', 'blocked')
+                """,
+                (now, now, session_key, keep_task_id),
+            )
+
+    def record_task_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_events(task_id, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    event_type,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    int(time.time()),
+                ),
+            )
+
+    def _row_to_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        task = dict(row)
+        task["latest_receipt"] = json.loads(task.pop("latest_receipt_json") or "{}")
+        return task

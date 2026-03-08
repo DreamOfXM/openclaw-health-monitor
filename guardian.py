@@ -13,6 +13,7 @@ import socket
 import subprocess
 import threading
 import resource
+import hashlib
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -365,6 +366,17 @@ def parse_runtime_timestamp(line: str) -> tuple[str, float | None]:
 def extract_runtime_question(line: str) -> str | None:
     """Extract a user-visible question from runtime logs when possible."""
     lower = line.lower()
+    ignore = (
+        "dispatching to agent",
+        "dispatch complete",
+        "pipeline_progress:",
+        "pipeline_receipt:",
+        "announce_skip",
+        "guardian_followup",
+        "guardian_escalation",
+    )
+    if any(marker in lower for marker in ignore):
+        return None
     if " dm from " in lower and ": " in line:
         idx = line.find(": ")
         if idx > 0:
@@ -386,6 +398,23 @@ def extract_pipeline_marker(line: str) -> str | None:
     if marker not in line:
         return None
     return line.split(marker, 1)[1].strip()[:120]
+
+
+def extract_pipeline_receipt(line: str) -> dict[str, str] | None:
+    """Extract a structured PIPELINE_RECEIPT payload from runtime logs."""
+    marker = "PIPELINE_RECEIPT:"
+    if marker not in line:
+        return None
+    payload = line.split(marker, 1)[1].strip()
+    receipt: dict[str, str] = {}
+    for part in payload.split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        receipt[key.strip()] = value.strip()
+    if not receipt.get("agent"):
+        return None
+    return receipt
 
 
 def is_visible_completion_message(line: str) -> bool:
@@ -514,6 +543,175 @@ def format_duration_label(seconds: int) -> str:
     remain = total % 3600
     minutes = remain // 60
     return f"{hours}小时" if minutes == 0 else f"{hours}小时{minutes}分钟"
+
+
+def build_task_id(session_key: str, timestamp: str) -> str:
+    raw = f"{session_key}|{timestamp}".encode("utf-8", errors="ignore")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def infer_task_channel(session_key: str) -> str:
+    if ":feishu:direct:" in session_key:
+        return "feishu_dm"
+    if ":feishu:group:" in session_key:
+        return "feishu_group"
+    return "unknown"
+
+
+def valid_task_question(text: str | None) -> bool:
+    candidate = (text or "").strip().lower()
+    if not candidate:
+        return False
+    return "dispatching to agent" not in candidate
+
+
+def sync_runtime_task_registry(lines: list[str]) -> None:
+    """Project runtime log activity into a persistent task registry."""
+    if not CONFIG.get("ENABLE_TASK_REGISTRY", True):
+        return
+
+    env_id = current_env_spec()["id"]
+    question_candidates: list[tuple[int, str]] = []
+    open_dispatches: dict[str, dict[str, Any]] = {}
+
+    def most_recent_key() -> str | None:
+        if not open_dispatches:
+            return None
+        return max(open_dispatches.items(), key=lambda item: item[1]["started_at"])[0]
+
+    for line in lines:
+        ts_raw, ts = parse_runtime_timestamp(line)
+        if ts is None:
+            continue
+
+        question = extract_runtime_question(line)
+        if question:
+            question_candidates.append((int(ts), question))
+            question_candidates = question_candidates[-50:]
+
+        lower = line.lower()
+        if "dispatching to agent" in lower:
+            nearest_question = ""
+            for qts, qmsg in reversed(question_candidates):
+                if abs(int(ts) - qts) <= 15:
+                    nearest_question = qmsg
+                    break
+            requester_open_id = extract_requester_open_id(line)
+            session_key = extract_runtime_session_key(line) or requester_open_id or f"dispatch:{ts_raw}"
+            existing = STORE.get_latest_task_for_session(session_key)
+            question_text = (
+                nearest_question
+                if valid_task_question(nearest_question)
+                else (existing.get("question", "") if existing and valid_task_question(existing.get("question")) else "未知任务")
+            )
+            task_id = build_task_id(session_key, ts_raw)
+            current_stage = "处理中"
+            task = {
+                "task_id": task_id,
+                "session_key": session_key,
+                "env_id": env_id,
+                "channel": infer_task_channel(session_key),
+                "status": "running",
+                "current_stage": current_stage,
+                "question": question_text,
+                "last_user_message": question_text,
+                "started_at": int(ts),
+                "last_progress_at": int(ts),
+                "created_at": int(ts),
+                "updated_at": int(ts),
+                "latest_receipt": {},
+            }
+            if int(CONFIG.get("TASK_REGISTRY_MAX_ACTIVE", 1)) <= 1:
+                STORE.background_other_tasks_for_session(session_key, task_id)
+            STORE.upsert_task(task)
+            open_dispatches[session_key] = {
+                **task,
+                "timestamp": ts_raw,
+                "requester_open_id": requester_open_id or "",
+                "marker": "",
+            }
+            continue
+
+        marker = extract_pipeline_marker(line)
+        if marker and open_dispatches:
+            current_key = most_recent_key()
+            if not current_key:
+                continue
+            dispatch = open_dispatches[current_key]
+            dispatch["marker"] = marker
+            dispatch["current_stage"] = normalize_stage_label(marker)
+            dispatch["last_progress_at"] = int(ts)
+            dispatch["updated_at"] = int(ts)
+            STORE.update_task_fields(
+                dispatch["task_id"],
+                current_stage=dispatch["current_stage"],
+                last_progress_at=int(ts),
+                updated_at=int(ts),
+            )
+            continue
+
+        receipt = extract_pipeline_receipt(line)
+        if receipt and open_dispatches:
+            current_key = most_recent_key()
+            if not current_key:
+                continue
+            dispatch = open_dispatches[current_key]
+            action = receipt.get("action", "")
+            phase = receipt.get("phase", "")
+            stage_label = f"{phase}:{action}".strip(":")
+            status = dispatch.get("status", "running")
+            blocked_reason = ""
+            if action == "blocked":
+                status = "blocked"
+                blocked_reason = receipt.get("evidence", "")
+            elif action == "completed":
+                status = "running"
+            dispatch["current_stage"] = stage_label or dispatch.get("current_stage", "处理中")
+            dispatch["last_progress_at"] = int(ts)
+            dispatch["updated_at"] = int(ts)
+            dispatch["status"] = status
+            STORE.update_task_fields(
+                dispatch["task_id"],
+                status=status,
+                current_stage=dispatch["current_stage"],
+                last_progress_at=int(ts),
+                updated_at=int(ts),
+                blocked_reason=blocked_reason,
+                latest_receipt=receipt,
+            )
+            continue
+
+        if is_visible_completion_message(line) and open_dispatches:
+            current_key = most_recent_key()
+            if current_key:
+                dispatch = open_dispatches.pop(current_key)
+                STORE.update_task_fields(
+                    dispatch["task_id"],
+                    status="completed",
+                    current_stage="已完成",
+                    updated_at=int(ts),
+                    completed_at=int(ts),
+                )
+            continue
+
+        if "dispatch complete" in lower and open_dispatches:
+            current_key = most_recent_key()
+            if not current_key:
+                continue
+            dispatch = open_dispatches.pop(current_key)
+            status = "completed"
+            stage = "已完成"
+            if "queuedfinal=false" in lower or "replies=0" in lower:
+                status = "no_reply"
+                stage = "完成但无可见回复"
+            STORE.update_task_fields(
+                dispatch["task_id"],
+                status=status,
+                current_stage=stage,
+                updated_at=int(ts),
+                completed_at=int(ts),
+            )
+
 
 
 def lookup_openclaw_session_id(session_key: str) -> str | None:
@@ -1549,6 +1747,14 @@ def main():
                     f"响应时间: {latest['duration']}秒\n原因: {latest['reason']}",
                     "warning"
                 )
+
+            runtime_log = resolve_runtime_gateway_log()
+            if runtime_log.exists():
+                try:
+                    with open(runtime_log) as handle:
+                        sync_runtime_task_registry(handle.readlines()[-4000:])
+                except Exception as exc:
+                    log(f"同步任务注册表失败: {exc}", "ERROR")
 
             scan_pipeline_progress_events()
             scan_runtime_anomalies()

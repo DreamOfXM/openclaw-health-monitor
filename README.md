@@ -284,6 +284,30 @@ Dashboard 首页现在会直接展示：
 
 - 如果你通过 Dashboard 页面切换环境，`ACTIVE_OPENCLAW_ENV` 和本地 SQLite 状态都会同步更新
 - 如果你绕开 Health Monitor，直接手工执行 OpenClaw 自己的脚本、`launchd`、或其他外部命令去启动/停止 Gateway，本地数据库里的“当前活动环境”记录不一定同步变化
+
+### 任务注册表
+
+Health Monitor 现在还提供一层外挂式任务注册表，不修改 OpenClaw 源码。
+
+默认行为：
+
+- 对复杂任务自动生成本地 `task_id`
+- 将任务与 `session_key`、当前阶段、最近回执、阻塞原因绑定到本地 SQLite
+- 同一会话默认只保留 1 个当前活动任务，其余任务转为后台任务
+- 当用户发 `?`、`进度`、`到哪了` 这类追问时，后续会优先基于注册表判断，而不是完全依赖模型脑补上下文
+
+关键点：
+
+- 注册表属于守护层，不侵入 OpenClaw
+- 默认存储在 `data/monitor.db`
+- 默认开启，可通过 `ENABLE_TASK_REGISTRY` 关闭
+- 当前活动任务和最近任务会展示在 Dashboard 页面中
+
+当前可配置项：
+
+- `ENABLE_TASK_REGISTRY`
+- `TASK_REGISTRY_MAX_ACTIVE`
+- `TASK_REGISTRY_RETENTION`
 - 这时页面展示可能会短暂落后于真实进程状态，建议重新通过 Dashboard 切换一次，或手动同步配置后再继续使用
 
 ## 运行验证
@@ -568,6 +592,30 @@ For the official validation environment:
 - Health Monitor prepares an isolated Control UI auth state automatically
 - you should not need to edit the official `openclaw.json` by hand
 - if you ever see a stale browser page, close the old tab and reopen the Dashboard from Health Monitor so the current tokenized URL is used
+
+### Task Registry
+
+Health Monitor also provides an external task registry layer without patching OpenClaw itself.
+
+Default behavior:
+
+- complex tasks get a local `task_id`
+- each task is linked to its `session_key`, current stage, latest receipt, and blocked reason in local SQLite
+- each session keeps one current active task by default, while older tasks move to the background
+- future follow-up queries like `?`, `progress`, or `where are we` can be answered from the registry instead of relying entirely on model memory
+
+Key points:
+
+- the registry belongs to the guardian layer, not OpenClaw core
+- it is stored in `data/monitor.db`
+- it is enabled by default and can be turned off with `ENABLE_TASK_REGISTRY`
+- the current active task and recent tasks are shown in the Dashboard
+
+Current config knobs:
+
+- `ENABLE_TASK_REGISTRY`
+- `TASK_REGISTRY_MAX_ACTIVE`
+- `TASK_REGISTRY_RETENTION`
 
 ## Validation
 
