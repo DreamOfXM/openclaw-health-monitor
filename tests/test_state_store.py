@@ -177,6 +177,67 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(task["question"], "我再提个需求")
             self.assertEqual(task["last_user_message"], "我再提个需求")
 
+    def test_derive_task_control_state_distinguishes_weak_and_strong_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-weak",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "任务A",
+                    "last_user_message": "任务A",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "completed_at": 3,
+                }
+            )
+            store.record_task_event("task-weak", "dispatch_started", {"question": "任务A"})
+            store.record_task_event("task-weak", "dispatch_complete", {"status": "completed"})
+
+            weak = store.derive_task_control_state("task-weak")
+            self.assertEqual(weak["evidence_level"], "weak")
+            self.assertEqual(weak["control_state"], "received_only")
+
+            store.upsert_task(
+                {
+                    "task_id": "task-strong",
+                    "session_key": "session-b",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "implementation:started",
+                    "question": "任务B",
+                    "last_user_message": "任务B",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.record_task_event("task-strong", "dispatch_started", {"question": "任务B"})
+            store.record_task_event(
+                "task-strong",
+                "pipeline_receipt",
+                {
+                    "receipt": {
+                        "agent": "dev",
+                        "phase": "implementation",
+                        "action": "started",
+                        "evidence": "files=3",
+                    }
+                },
+            )
+            strong = store.derive_task_control_state("task-strong")
+            self.assertEqual(strong["evidence_level"], "strong")
+            self.assertEqual(strong["control_state"], "dev_running")
+
 
 if __name__ == "__main__":
     unittest.main()

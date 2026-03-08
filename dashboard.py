@@ -206,6 +206,7 @@ def get_task_registry_payload(limit: int = 8) -> dict:
         ts = int(task.get("last_progress_at") or 0)
         latest_receipt = task.get("latest_receipt") or {}
         timeline = STORE.list_task_events(task["task_id"], limit=6)
+        control = STORE.derive_task_control_state(task["task_id"])
         question = normalize_question(task.get("question", ""))
         last_user_message = normalize_question(task.get("last_user_message", ""))
         if question == "未知任务":
@@ -225,6 +226,7 @@ def get_task_registry_payload(limit: int = 8) -> dict:
                 "action": latest_receipt.get("action", "-"),
                 "evidence": latest_receipt.get("evidence", "-"),
             },
+            "control": control,
             "timeline": [
                 {
                     "event_type": item.get("event_type", ""),
@@ -251,6 +253,7 @@ def get_task_registry_payload(limit: int = 8) -> dict:
         task["last_progress_label"] = (
             datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-"
         )
+        task["control"] = STORE.derive_task_control_state(task["task_id"])
     active = [task for task in tasks if task.get("status") in {"running", "blocked", "background"}]
     current = summarize_task(STORE.get_current_task(env_id=env_id)) if enabled else None
     summary = STORE.summarize_tasks(env_id=env_id) if enabled else {"total": 0}

@@ -127,6 +127,7 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["running"], 1)
             self.assertEqual(payload["current"]["task_id"], "task-1")
             self.assertEqual(payload["current"]["receipt_summary"]["agent"], "dev")
+            self.assertEqual(payload["current"]["control"]["control_state"], "dev_running")
             self.assertEqual(len(payload["current"]["timeline"]), 2)
 
 

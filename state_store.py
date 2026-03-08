@@ -393,6 +393,122 @@ class MonitorStateStore:
         self.update_task_fields(task_id, **fields)
         return True
 
+    def derive_task_control_state(self, task_id: str) -> dict[str, Any]:
+        task = self.get_task(task_id)
+        if not task:
+            return {
+                "evidence_level": "none",
+                "control_state": "unknown",
+                "approved_summary": "任务不存在",
+                "flags": {},
+            }
+
+        events = self.list_task_events(task_id, limit=50)
+        flags = {
+            "dispatch_started": False,
+            "dispatch_completed": False,
+            "visible_completion": False,
+            "pipeline_progress": False,
+            "pipeline_receipt": False,
+            "pm_completed": False,
+            "dev_started": False,
+            "dev_completed": False,
+            "dev_blocked": False,
+            "test_started": False,
+            "test_completed": False,
+            "test_blocked": False,
+        }
+        latest_receipt: dict[str, Any] = task.get("latest_receipt") or {}
+
+        def apply_receipt(receipt: dict[str, Any]) -> None:
+            if not receipt:
+                return
+            flags["pipeline_receipt"] = True
+            agent = str(receipt.get("agent") or "")
+            action = str(receipt.get("action") or "")
+            if agent == "pm" and action == "completed":
+                flags["pm_completed"] = True
+            if agent == "dev":
+                if action == "started":
+                    flags["dev_started"] = True
+                elif action == "completed":
+                    flags["dev_started"] = True
+                    flags["dev_completed"] = True
+                elif action == "blocked":
+                    flags["dev_started"] = True
+                    flags["dev_blocked"] = True
+            if agent == "test":
+                if action == "started":
+                    flags["test_started"] = True
+                elif action == "completed":
+                    flags["test_started"] = True
+                    flags["test_completed"] = True
+                elif action == "blocked":
+                    flags["test_started"] = True
+                    flags["test_blocked"] = True
+
+        apply_receipt(latest_receipt)
+
+        for event in events:
+            event_type = str(event.get("event_type") or "")
+            payload = event.get("payload") or {}
+            if event_type == "dispatch_started":
+                flags["dispatch_started"] = True
+            elif event_type == "dispatch_complete":
+                flags["dispatch_completed"] = True
+            elif event_type == "visible_completion":
+                flags["visible_completion"] = True
+            elif event_type == "stage_progress":
+                flags["pipeline_progress"] = True
+            elif event_type == "pipeline_receipt":
+                latest_receipt = payload.get("receipt") or latest_receipt
+                apply_receipt(payload.get("receipt") or {})
+
+        evidence_level = "weak"
+        if flags["pipeline_receipt"]:
+            evidence_level = "strong"
+        elif flags["pipeline_progress"]:
+            evidence_level = "moderate"
+
+        control_state = "received_only"
+        approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
+
+        if flags["test_completed"]:
+            control_state = "completed_verified"
+            approved_summary = "测试回执已完成，任务具备强证据完成状态。"
+        elif flags["test_blocked"]:
+            control_state = "test_blocked"
+            approved_summary = "测试阶段已阻塞。"
+        elif flags["dev_blocked"]:
+            control_state = "dev_blocked"
+            approved_summary = "开发阶段已阻塞。"
+        elif flags["dev_completed"] and not flags["test_started"]:
+            control_state = "awaiting_test"
+            approved_summary = "开发回执已完成，但测试尚未启动。"
+        elif flags["dev_started"]:
+            control_state = "dev_running"
+            approved_summary = "开发阶段已启动，存在结构化执行证据。"
+        elif flags["pm_completed"]:
+            control_state = "planning_only"
+            approved_summary = "方案已完成，但开发尚未启动。"
+        elif flags["pipeline_progress"]:
+            control_state = "progress_only"
+            approved_summary = "存在阶段进展标记，但缺少结构化回执。"
+        elif flags["dispatch_started"] and flags["dispatch_completed"]:
+            control_state = "received_only"
+            approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
+
+        if task.get("status") == "completed" and flags["visible_completion"] and evidence_level == "weak":
+            approved_summary = "任务已给出可见完成回复，但没有流水线级结构化证据。"
+
+        return {
+            "evidence_level": evidence_level,
+            "control_state": control_state,
+            "approved_summary": approved_summary,
+            "flags": flags,
+            "latest_receipt": latest_receipt,
+        }
+
     def get_current_task(self, *, env_id: str | None = None) -> dict[str, Any] | None:
         query = """
             SELECT * FROM managed_tasks
