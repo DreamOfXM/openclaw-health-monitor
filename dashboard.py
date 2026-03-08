@@ -921,6 +921,7 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
 
     if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
         return False, "保存 ACTIVE_OPENCLAW_ENV 失败"
+    STORE.save_runtime_value("active_openclaw_env", {"env_id": target_env, "updated_at": int(time.time())})
 
     if target_env == "official":
         run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=60)
@@ -1040,6 +1041,7 @@ def index():
         .env-actions { display: flex; gap: 8px; margin-top: 14px; }
         .env-link { color: #93c5fd; text-decoration: none; font-size: 12px; }
         .env-link:hover { text-decoration: underline; }
+        .env-link.disabled { color: #6b7280; pointer-events: none; cursor: not-allowed; text-decoration: none; }
         
         .diagnose-item { 
             display: flex; align-items: center; gap: 15px; padding: 15px; 
@@ -1372,7 +1374,7 @@ def index():
                             <button class="btn ${item.active ? '' : 'btn-primary'}" ${item.active ? 'disabled' : ''} onclick="switchEnvironment('${item.id}')">
                                 ${item.active ? '当前环境' : '切换到这里'}
                             </button>
-                            <a class="env-link" href="${item.dashboard_url}" target="_blank" rel="noopener">打开 Dashboard</a>
+                            <a class="env-link ${item.running ? '' : 'disabled'}" ${item.running ? `href="${item.dashboard_url}" target="_blank" rel="noopener"` : 'href="javascript:void(0)" aria-disabled="true"'}>打开 Dashboard</a>
                         </div>
                     </div>
                 `).join('');

@@ -34,6 +34,7 @@ OPENCLAW_HOME = Path.home() / ".openclaw"
 OPENCLAW_CODE = Path.home() / "openclaw-workspace" / "openclaw"
 GATEWAY_LOG = OPENCLAW_HOME / "logs" / "gateway.log"
 TMP_OPENCLAW_LOG_DIR = Path("/tmp/openclaw")
+OFFICIAL_MANAGER = BASE_DIR / "manage_official_openclaw.sh"
 
 CONFIG = {}
 ALERTS = {}
@@ -57,6 +58,32 @@ def load_config():
     """加载配置文件"""
     global CONFIG
     CONFIG = load_shared_config(BASE_DIR)
+
+
+def active_env_id() -> str:
+    env_id = str(CONFIG.get("ACTIVE_OPENCLAW_ENV", "primary")).strip() or "primary"
+    return env_id if env_id in {"primary", "official"} else "primary"
+
+
+def current_env_spec() -> dict[str, Any]:
+    env_id = active_env_id()
+    if env_id == "official":
+        return {
+            "id": "official",
+            "home": Path(str(CONFIG.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official")))),
+            "code": Path(str(CONFIG.get("OPENCLAW_OFFICIAL_CODE", str(Path.home() / "openclaw-workspace" / "openclaw-official")))),
+            "port": int(CONFIG.get("OPENCLAW_OFFICIAL_PORT", 19001)),
+        }
+    return {
+        "id": "primary",
+        "home": Path(str(CONFIG.get("OPENCLAW_HOME", str(Path.home() / ".openclaw")))),
+        "code": Path(str(CONFIG.get("OPENCLAW_CODE", str(Path.home() / "openclaw-workspace" / "openclaw")))),
+        "port": int(CONFIG.get("GATEWAY_PORT", 18789)),
+    }
+
+
+def current_gateway_log() -> Path:
+    return current_env_spec()["home"] / "logs" / "gateway.log"
 
 
 def load_alerts():
@@ -154,6 +181,19 @@ def get_listener_pid(port: int) -> Optional[int]:
 
 def check_gateway_health() -> bool:
     """检查 Gateway 健康状态"""
+    spec = current_env_spec()
+    if spec["id"] == "official":
+        try:
+            response = requests.get(
+                f"http://127.0.0.1:{spec['port']}/health",
+                timeout=5,
+                proxies={"http": None, "https": None},
+            )
+            payload = response.json()
+            return response.ok and bool(payload.get("ok"))
+        except Exception:
+            return False
+
     retries = CONFIG.get("HEALTH_CHECK_RETRIES", 3)
     delay = CONFIG.get("HEALTH_CHECK_DELAY", 5)
 
@@ -169,7 +209,7 @@ def check_gateway_health() -> bool:
 
 def check_process_running() -> bool:
     """检查进程是否运行"""
-    return get_listener_pid(int(CONFIG.get("GATEWAY_PORT", 18789))) is not None
+    return get_listener_pid(int(current_env_spec()["port"])) is not None
 
 
 def get_system_metrics() -> Dict:
@@ -252,7 +292,7 @@ def resolve_runtime_gateway_log() -> Path:
     candidates = sorted(TMP_OPENCLAW_LOG_DIR.glob("openclaw-*.log"), key=lambda p: p.stat().st_mtime)
     if candidates:
         return candidates[-1]
-    return GATEWAY_LOG
+    return current_gateway_log()
 
 
 def scan_pipeline_progress_events() -> None:
@@ -1141,13 +1181,17 @@ def push_runtime_progress_updates() -> list[dict]:
 
 def has_config_changes() -> bool:
     """检查配置变更"""
-    if (OPENCLAW_HOME / ".git").exists():
-        code, stdout, _ = run_cmd(f"cd {OPENCLAW_HOME} && git diff --quiet")
+    spec = current_env_spec()
+    env_home = spec["home"]
+    env_code = spec["code"]
+
+    if (env_home / ".git").exists():
+        code, stdout, _ = run_cmd(f"cd {env_home} && git diff --quiet")
         if code != 0:
             return True
     
-    if OPENCLAW_CODE.exists() and (OPENCLAW_CODE / ".git").exists():
-        code, stdout, _ = run_cmd(f"cd {OPENCLAW_CODE} && git diff --quiet")
+    if env_code.exists() and (env_code / ".git").exists():
+        code, stdout, _ = run_cmd(f"cd {env_code} && git diff --quiet")
         if code != 0:
             return True
     
@@ -1156,8 +1200,9 @@ def has_config_changes() -> bool:
 
 def get_current_version() -> str:
     """获取当前版本"""
-    if (OPENCLAW_CODE / ".git").exists():
-        code, stdout, _ = run_cmd(f"cd {OPENCLAW_CODE} && git describe --tags --always")
+    env_code = current_env_spec()["code"]
+    if (env_code / ".git").exists():
+        code, stdout, _ = run_cmd(f"cd {env_code} && git describe --tags --always")
         if code == 0 and stdout.strip():
             return stdout.strip()
     return "unknown"
@@ -1219,9 +1264,18 @@ def notify(title: str, message: str, level: str = "info"):
 
 def restart_gateway():
     """重启 Gateway"""
-    log("尝试重启 Gateway...")
+    spec = current_env_spec()
+    log(f"尝试重启 Gateway ({spec['id']})...")
 
-    port = int(CONFIG.get("GATEWAY_PORT", 18789))
+    if spec["id"] == "official":
+        code, stdout, stderr = run_args([str(OFFICIAL_MANAGER), "start"], timeout=300)
+        if code == 0 and check_gateway_health():
+            log("官方验证版 Gateway 重启成功")
+            return True
+        log(f"官方验证版 Gateway 重启失败: {(stderr or stdout).strip()}", "ERROR")
+        return False
+
+    port = int(spec["port"])
     existing_pid = get_listener_pid(port)
     if existing_pid:
         try:
@@ -1234,7 +1288,7 @@ def restart_gateway():
         with open(LOG_FILE, "a") as log_handle:
             subprocess.Popen(
                 ["openclaw", "gateway", "run"],
-                cwd=str(OPENCLAW_CODE),
+                cwd=str(spec["code"]),
                 stdout=log_handle,
                 stderr=log_handle,
                 start_new_session=True,
@@ -1270,16 +1324,22 @@ def rollback_to_last_good() -> bool:
 
 def check_update_available() -> bool:
     """检查是否有可用更新"""
-    if not (OPENCLAW_CODE / ".git").exists():
+    env_code = current_env_spec()["code"]
+    if not (env_code / ".git").exists():
         return False
     
-    code, _, _ = run_cmd(f"cd {OPENCLAW_CODE} && git fetch --dry-run")
+    code, _, _ = run_cmd(f"cd {env_code} && git fetch --dry-run")
     return code == 0
 
 
 def do_auto_update() -> bool:
     """执行自动更新"""
-    if not CONFIG.get("AUTO_UPDATE", False):
+    spec = current_env_spec()
+    if spec["id"] == "official":
+        auto_update_enabled = CONFIG.get("OPENCLAW_OFFICIAL_AUTO_UPDATE", False)
+    else:
+        auto_update_enabled = CONFIG.get("AUTO_UPDATE", False)
+    if not auto_update_enabled:
         return False
     
     channel = CONFIG.get("UPDATE_CHANNEL", "stable")
@@ -1291,21 +1351,24 @@ def do_auto_update() -> bool:
     VERSIONS["history"].append({
         "version": current_ver,
         "date": datetime.now().isoformat(),
-        "commit": run_cmd(f"cd {OPENCLAW_CODE} && git rev-parse HEAD")[1].strip()
+        "commit": run_cmd(f"cd {spec['code']} && git rev-parse HEAD")[1].strip()
     })
     # 保留最近5个版本
     VERSIONS["history"] = VERSIONS["history"][-5:]
     save_versions()
     
     # 执行更新
-    code, _, stderr = run_cmd(f"openclaw update --channel {channel}")
+    if spec["id"] == "official":
+        code, stdout, stderr = run_args([str(OFFICIAL_MANAGER), "update"], timeout=1800)
+    else:
+        code, stdout, stderr = run_cmd(f"openclaw update --channel {channel}")
     
     if code != 0:
-        log(f"更新失败: {stderr}")
+        log(f"更新失败: {stderr or stdout}")
         # 回滚到稳定版本
         if rollback_to_last_good():
             restart_gateway()
-        notify("自动更新失败", f"更新失败，已回退到上一版本\n{stderr[:200]}", "error")
+        notify("自动更新失败", f"更新失败，已回退到上一版本\n{(stderr or stdout)[:200]}", "error")
         return False
     
     # 重启
