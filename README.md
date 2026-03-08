@@ -274,6 +274,12 @@ Dashboard 首页现在会直接展示：
 
 这样不会出现两套 OpenClaw 同时抢同一套通道的情况。
 
+注意：
+
+- 如果你通过 Dashboard 页面切换环境，`ACTIVE_OPENCLAW_ENV` 和本地 SQLite 状态都会同步更新
+- 如果你绕开 Health Monitor，直接手工执行 OpenClaw 自己的脚本、`launchd`、或其他外部命令去启动/停止 Gateway，本地数据库里的“当前活动环境”记录不一定同步变化
+- 这时页面展示可能会短暂落后于真实进程状态，建议重新通过 Dashboard 切换一次，或手动同步配置后再继续使用
+
 ## 运行验证
 
 完成安装或升级后，可按下面顺序验证本地监控是否正常工作。
@@ -523,6 +529,33 @@ If you only care about daily usage, these are the four commands that matter most
 
 5. `./stop.sh`
    calls `desktop_runtime.sh stop all` and stops the whole local stack
+
+### Version Environment Panel
+
+The Dashboard homepage now shows:
+
+- the current primary environment
+- the official validation environment
+- the currently guarded target environment
+- each environment's port, version, health status, and Dashboard link
+
+You can use it to:
+
+- see which OpenClaw environment Guardian is currently managing
+- switch the guarded target with one click
+
+Switching is mutually exclusive by default:
+
+- switching to the official validation environment stops the primary Gateway
+- switching back to the primary environment stops the official validation Gateway
+
+This avoids two OpenClaw instances competing for the same channels.
+
+Important:
+
+- when you switch environments through the Dashboard, both `ACTIVE_OPENCLAW_ENV` and the local SQLite state are updated together
+- if you bypass Health Monitor and start or stop Gateway manually through raw scripts, `launchd`, or other external commands, the local database may not immediately reflect the real active environment
+- in that case the UI can temporarily lag behind the actual process state; switch once again through the Dashboard or resync the config before relying on the panel
 
 ## Validation
 
