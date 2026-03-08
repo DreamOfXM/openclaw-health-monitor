@@ -362,10 +362,12 @@ def read_git_head(repo: Path) -> str:
 
 
 def check_gateway_health_for_env(spec: dict) -> bool:
+    if spec.get("id") == "primary":
+        return check_gateway_health()
     try:
         result = subprocess.run(
             [
-                "curl",
+                "/usr/bin/curl",
                 "--noproxy",
                 "*",
                 "-fsS",
