@@ -144,13 +144,53 @@ sync_private_state() {
         --exclude 'cron/runs/' \
         "$source_state/" "$target_state/"
 
-    if [ -f "$target_state/openclaw.json" ]; then
-        perl -0pi -e "s/\Q$source_state\E/$target_state/g; s/\Q$source_code\E/$target_code/g" "$target_state/openclaw.json"
-    fi
+    python3 - <<PY
+from pathlib import Path
 
-    while IFS= read -r file; do
-        perl -0pi -e "s/\Q$source_state\E/$target_state/g; s/\Q$source_code\E/$target_code/g" "$file"
-    done < <(rg -l --hidden --glob '!logs/**' --glob '!sessions/**' --glob '!memory/**' --glob '!*.db' --glob '!*.sqlite*' "$source_state|$source_code" "$target_state" || true)
+source_state = "$source_state"
+target_state = "$target_state"
+source_code = "$source_code"
+target_code = "$target_code"
+root = Path(target_state)
+
+for path in root.rglob("*"):
+    if not path.is_file():
+        continue
+    rel = path.relative_to(root).as_posix()
+    if rel.startswith("logs/") or "/logs/" in rel:
+        continue
+    if rel.startswith("sessions/") or "/sessions/" in rel:
+        continue
+    if rel.startswith("memory/") or "/memory/" in rel:
+        continue
+    if path.suffix in {".db", ".sqlite", ".sqlite3"}:
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        continue
+    replaced = text.replace(source_state, target_state).replace(source_code, target_code)
+    if replaced != text:
+        path.write_text(replaced, encoding="utf-8")
+PY
+
+    python3 - <<PY
+import json
+import secrets
+from pathlib import Path
+
+path = Path("$target_state") / "openclaw.json"
+data = json.loads(path.read_text(encoding="utf-8"))
+gateway = data.setdefault("gateway", {})
+auth = gateway.setdefault("auth", {})
+auth["token"] = secrets.token_hex(24)
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+PY
+
+    rm -f "$target_state/identity/device.json" "$target_state/identity/device-auth.json"
+    rm -f "$target_state/devices/paired.json" "$target_state/devices/pending.json"
+    rm -rf "$target_state/browser/openclaw/user-data"
+    rm -f "$target_state/workspace/data/browserwing.db"
 }
 
 build_official_repo() {
