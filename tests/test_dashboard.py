@@ -2,6 +2,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 import tempfile
+import json
+import time
 
 import dashboard
 from state_store import MonitorStateStore
@@ -129,6 +131,96 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["current"]["receipt_summary"]["agent"], "dev")
             self.assertEqual(payload["current"]["control"]["control_state"], "dev_running")
             self.assertEqual(len(payload["current"]["timeline"]), 2)
+
+    def test_get_active_agent_activity_reads_recent_session_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = {
+                "AGENT_ACTIVITY_LOOKBACK_SECONDS": 1800,
+                "AGENT_ACTIVITY_SCAN_LIMIT": 12,
+            }
+            openclaw_json = {
+                "agents": {
+                    "list": [
+                        {"id": "pm", "identity": {"name": "产品经理", "emoji": "📋"}},
+                        {"id": "dev", "identity": {"name": "开发工程师", "emoji": "💻"}},
+                    ]
+                }
+            }
+            (home / "openclaw.json").write_text(json.dumps(openclaw_json, ensure_ascii=False), encoding="utf-8")
+
+            pm_dir = home / "agents" / "pm" / "sessions"
+            pm_dir.mkdir(parents=True, exist_ok=True)
+            pm_file = pm_dir / "session-a.jsonl"
+            pm_file.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "message": {
+                                    "role": "user",
+                                    "content": [{"type": "text", "text": "[Subagent Task]: A股实时数据方案与回测系统"}],
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [
+                                        {
+                                            "type": "toolCall",
+                                            "name": "sessions_spawn",
+                                            "arguments": {"agentId": "dev", "label": "A股实现"},
+                                        }
+                                    ],
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            dev_dir = home / "agents" / "dev" / "sessions"
+            dev_dir.mkdir(parents=True, exist_ok=True)
+            dev_file = dev_dir / "session-b.jsonl"
+            dev_file.write_text(
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "ANNOUNCE_SKIP"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            now = time.time()
+            os_times = (now, now)
+            import os
+
+            os.utime(pm_file, os_times)
+            os.utime(dev_file, os_times)
+
+            payload = dashboard.get_active_agent_activity({"home": home}, config)
+
+            self.assertEqual(payload["summary"]["active_agents"], 2)
+            self.assertEqual(len(payload["agents"]), 2)
+            agent_ids = {item["agent_id"] for item in payload["agents"]}
+            self.assertEqual(agent_ids, {"pm", "dev"})
+            pm_entry = next(item for item in payload["agents"] if item["agent_id"] == "pm")
+            self.assertEqual(pm_entry["state_label"], "正在派发")
+            self.assertIn("A股实时数据方案与回测系统", pm_entry["task_hint"])
+            dev_entry = next(item for item in payload["agents"] if item["agent_id"] == "dev")
+            self.assertEqual(dev_entry["state_label"], "等待下游")
 
 
 if __name__ == "__main__":

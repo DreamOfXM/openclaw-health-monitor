@@ -13,6 +13,7 @@ import re
 import subprocess
 import threading
 import resource
+import html
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request, redirect
@@ -273,6 +274,214 @@ def get_task_registry_payload(limit: int = 8) -> dict:
         "summary": summary,
         "current": current or (summarize_task(active[0]) if active else (summarize_task(tasks[0]) if tasks else None)),
         "tasks": tasks,
+    }
+
+
+def load_agent_catalog(spec: dict) -> dict[str, dict]:
+    """Load agent display metadata from the environment config when available."""
+    config_path = spec["home"] / "openclaw.json"
+    catalog: dict[str, dict] = {}
+    if not config_path.exists():
+        return catalog
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return catalog
+    for item in ((payload.get("agents") or {}).get("list") or []):
+        agent_id = str(item.get("id") or "").strip()
+        if not agent_id:
+            continue
+        identity = item.get("identity") or {}
+        catalog[agent_id] = {
+            "name": str(identity.get("name") or agent_id),
+            "emoji": str(identity.get("emoji") or ""),
+        }
+    return catalog
+
+
+def _extract_text_items(content: list[dict]) -> list[str]:
+    texts: list[str] = []
+    for item in content or []:
+        if item.get("type") == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                texts.append(text)
+    return texts
+
+
+def _extract_task_hint_from_text(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if "[Subagent Task]:" in raw:
+        chunk = raw.split("[Subagent Task]:", 1)[1].strip()
+        for line in chunk.splitlines():
+            line = line.strip()
+            if line and not line.startswith("执行要求") and not line.startswith("主人原始需求"):
+                return line[:120]
+    if "主人需求：" in raw:
+        chunk = raw.split("主人需求：", 1)[1].strip()
+        first = chunk.splitlines()[0].strip()
+        return first[:120]
+    if "\ntask:" in raw:
+        chunk = raw.split("\ntask:", 1)[1].strip()
+        first = chunk.splitlines()[0].strip()
+        return first[:120]
+    if raw.startswith("task:"):
+        return raw.split("task:", 1)[1].strip()[:120]
+    return ""
+
+
+def _summarize_session_message(entry: dict) -> tuple[str, str]:
+    message = entry.get("message") or {}
+    role = str(message.get("role") or "")
+    content = message.get("content") or []
+
+    for item in content:
+        if item.get("type") != "toolCall":
+            continue
+        name = str(item.get("name") or "")
+        args = item.get("arguments") or {}
+        if name == "sessions_spawn":
+            agent_id = args.get("agentId") or "?"
+            label = str(args.get("label") or "").strip()
+            suffix = f" · {label}" if label else ""
+            return "正在派发", f"启动子代理 {agent_id}{suffix}"
+        if name == "sessions_send":
+            return "正在回传", "向上游回传结构化进度或回执"
+        if name == "exec":
+            return "正在执行", "执行命令或本地检查"
+
+    if role == "toolResult":
+        tool_name = str(message.get("toolName") or "")
+        details = message.get("details") or {}
+        status = str(details.get("status") or "").strip()
+        if tool_name == "sessions_spawn":
+            if status == "accepted":
+                child = str(details.get("childSessionKey") or "").strip()
+                return "子任务已启动", child or "下游子代理已接受任务"
+            if status == "forbidden":
+                return "派发受限", str(details.get("error") or "sessions_spawn 被拒绝")[:160]
+        if tool_name == "sessions_send":
+            if status == "forbidden":
+                return "回执受限", str(details.get("error") or "sessions_send 被拒绝")[:160]
+            return "已回传", status or "结构化消息已回传"
+        if tool_name == "exec":
+            exit_code = details.get("exitCode")
+            return "命令完成", f"exit={exit_code}" if exit_code is not None else "命令执行完成"
+
+    texts = _extract_text_items(content)
+    if texts:
+        text = texts[-1]
+        if text == "ANNOUNCE_SKIP":
+            return "等待下游", "当前阶段已继续下发，等待后续回执"
+        if text == "NO_REPLY":
+            return "静默等待", "收到内部更新，但当前无需对外回复"
+        if "OpenClaw runtime context" in text:
+            return "收到内部结果", "子代理或运行时回传了内部完成事件"
+        snippet = re.sub(r"\s+", " ", text)
+        return "正在处理", snippet[:160]
+
+    if role == "user":
+        for text in texts:
+            hint = _extract_task_hint_from_text(text)
+            if hint:
+                return "收到任务", hint
+    return "活动中", "最近会话有更新"
+
+
+def summarize_agent_session(session_path: Path, agent_id: str, meta: dict) -> dict | None:
+    """Summarize the latest visible activity from an agent session file."""
+    try:
+        lines = session_path.read_text(encoding="utf-8").splitlines()[-24:]
+    except Exception:
+        return None
+
+    entries: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    if not entries:
+        return None
+
+    task_hint = ""
+    for entry in reversed(entries):
+        message = entry.get("message") or {}
+        content = message.get("content") or []
+        for text in _extract_text_items(content):
+            task_hint = _extract_task_hint_from_text(text)
+            if task_hint:
+                break
+        if task_hint:
+            break
+
+    state_label = "活动中"
+    detail = "最近会话有更新"
+    for entry in reversed(entries):
+        state_label, detail = _summarize_session_message(entry)
+        if detail:
+            break
+
+    updated_at = int(session_path.stat().st_mtime)
+    display_name = meta.get("name") or agent_id
+    emoji = meta.get("emoji") or ""
+    return {
+        "agent_id": agent_id,
+        "display_name": display_name,
+        "emoji": emoji,
+        "session_file": session_path.name,
+        "updated_at": updated_at,
+        "updated_label": datetime.fromtimestamp(updated_at).strftime("%m-%d %H:%M:%S"),
+        "state_label": state_label,
+        "detail": detail,
+        "task_hint": task_hint or "-",
+    }
+
+
+def get_active_agent_activity(spec: dict, config: dict) -> dict:
+    """Return recent active agent sessions for the current environment."""
+    agents_dir = spec["home"] / "agents"
+    if not agents_dir.exists():
+        return {"summary": {"active_agents": 0, "recent_sessions": 0}, "agents": []}
+
+    lookback_seconds = int(config.get("AGENT_ACTIVITY_LOOKBACK_SECONDS", 1800))
+    scan_limit = int(config.get("AGENT_ACTIVITY_SCAN_LIMIT", 12))
+    cutoff = time.time() - max(60, lookback_seconds)
+    catalog = load_agent_catalog(spec)
+    agent_entries: list[dict] = []
+
+    for agent_dir in sorted(agents_dir.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        sessions_dir = agent_dir / "sessions"
+        if not sessions_dir.exists():
+            continue
+        candidates = [
+            path
+            for path in sessions_dir.glob("*.jsonl")
+            if path.is_file() and path.stat().st_mtime >= cutoff
+        ]
+        if not candidates:
+            continue
+        latest = max(candidates, key=lambda item: item.stat().st_mtime)
+        summary = summarize_agent_session(latest, agent_dir.name, catalog.get(agent_dir.name, {}))
+        if summary:
+            agent_entries.append(summary)
+
+    agent_entries.sort(key=lambda item: item["updated_at"], reverse=True)
+    agent_entries = agent_entries[:scan_limit]
+    return {
+        "summary": {
+            "active_agents": len({item["agent_id"] for item in agent_entries}),
+            "recent_sessions": len(agent_entries),
+            "lookback_seconds": lookback_seconds,
+        },
+        "agents": agent_entries,
     }
 
 
@@ -1310,6 +1519,12 @@ def index():
         </div>
 
         <div class="section">
+            <h2>🤖 活跃代理</h2>
+            <div id="active-agents-summary" class="memory-box" style="margin-bottom:14px;"></div>
+            <div id="active-agents-list" class="event-list"></div>
+        </div>
+
+        <div class="section">
             <h2>🚨 最近异常 / 进度</h2>
             <div id="recent-events" class="event-list"></div>
         </div>
@@ -1629,6 +1844,40 @@ def index():
                     `).join('') : '<div class="event-empty">暂无任务记录</div>';
                 }
 
+                // 活跃代理
+                const agentActivity = data.active_agents || {};
+                const agentSummaryEl = document.getElementById('active-agents-summary');
+                const agentListEl = document.getElementById('active-agents-list');
+                const agentSummary = agentActivity.summary || {};
+                const activeAgents = agentActivity.agents || [];
+                if (!activeAgents.length) {
+                    agentSummaryEl.innerHTML = `
+                        <div class="memory-box-title">当前活跃代理</div>
+                        <div class="memory-box-main">暂无活跃代理</div>
+                        <div class="memory-box-sub">最近 ${Math.round((agentSummary.lookback_seconds || 1800) / 60)} 分钟内没有检测到新的 agent 会话更新。</div>
+                    `;
+                    agentListEl.innerHTML = '<div class="event-empty">暂无 agent 活动记录</div>';
+                } else {
+                    agentSummaryEl.innerHTML = `
+                        <div class="memory-box-title">当前活跃代理</div>
+                        <div class="memory-box-main">${agentSummary.active_agents || activeAgents.length} 个代理活跃</div>
+                        <div class="memory-box-sub">最近 ${Math.round((agentSummary.lookback_seconds || 1800) / 60)} 分钟内，共检测到 ${agentSummary.recent_sessions || activeAgents.length} 个活跃 session。</div>
+                    `;
+                    agentListEl.innerHTML = activeAgents.map(item => `
+                        <div class="event-item info">
+                            <div class="event-header">
+                                <div class="event-title">${item.emoji ? item.emoji + ' ' : ''}${item.display_name || item.agent_id}</div>
+                                <div class="event-time">${item.updated_label || '-'} · ${item.state_label || '活动中'}</div>
+                            </div>
+                            <div class="event-details">
+                                任务: ${item.task_hint || '-'}<br/>
+                                详情: ${item.detail || '-'}<br/>
+                                会话文件: ${item.session_file || '-'}
+                            </div>
+                        </div>
+                    `).join('');
+                }
+
                 // 最近异常 / 进度
                 const eventsEl = document.getElementById('recent-events');
                 if (!data.recent_events || data.recent_events.length === 0) {
@@ -1938,6 +2187,7 @@ def api_status():
     memory_summary = summarize_memory_usage(metrics, top_processes)
     environments = list_openclaw_environments(config)
     task_registry = get_task_registry_payload(limit=8)
+    active_agents = get_active_agent_activity(selected_env, config)
     
     data = {
         "active_environment": selected_env["id"],
@@ -1956,6 +2206,7 @@ def api_status():
         "incident_summary": incident_summary,
         "memory_summary": memory_summary,
         "task_registry": task_registry,
+        "active_agents": active_agents,
     }
     return app.response_class(
         response=json.dumps(data, ensure_ascii=False),
