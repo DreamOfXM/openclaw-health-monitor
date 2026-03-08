@@ -352,6 +352,164 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(control["next_action"], "require_verifier_receipt")
             self.assertIn("verifier:completed", control["missing_receipts"])
 
+    def test_reconcile_task_control_action_creates_pending_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-pipeline",
+                    "session_key": "session-pipeline",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "planning:completed",
+                    "question": "实现一个新系统",
+                    "last_user_message": "实现一个新系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_task_contract(
+                "task-pipeline",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": [
+                        "pm:started",
+                        "pm:completed",
+                        "dev:started",
+                        "dev:completed",
+                        "test:started",
+                        "test:completed",
+                    ],
+                },
+            )
+            store.record_task_event("task-pipeline", "dispatch_started", {"question": "实现一个新系统"})
+            store.record_task_event(
+                "task-pipeline",
+                "pipeline_receipt",
+                {"receipt": {"agent": "pm", "phase": "planning", "action": "completed", "evidence": "方案完成"}},
+            )
+
+            control = store.derive_task_control_state("task-pipeline")
+            action = store.reconcile_task_control_action(store.get_task("task-pipeline"), control)
+
+            self.assertIsNotNone(action)
+            self.assertEqual(action["action_type"], "require_dev_receipt")
+            self.assertEqual(action["status"], "pending")
+            self.assertIn("dev:started", action["required_receipts"])
+
+    def test_reconcile_task_control_action_supersedes_old_action_after_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-pipeline",
+                    "session_key": "session-pipeline",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "planning:completed",
+                    "question": "实现一个新系统",
+                    "last_user_message": "实现一个新系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_task_contract(
+                "task-pipeline",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": [
+                        "pm:started",
+                        "pm:completed",
+                        "dev:started",
+                        "dev:completed",
+                        "test:started",
+                        "test:completed",
+                    ],
+                },
+            )
+            store.record_task_event("task-pipeline", "dispatch_started", {"question": "实现一个新系统"})
+            store.record_task_event(
+                "task-pipeline",
+                "pipeline_receipt",
+                {"receipt": {"agent": "pm", "phase": "planning", "action": "completed", "evidence": "方案完成"}},
+            )
+            initial = store.derive_task_control_state("task-pipeline")
+            store.reconcile_task_control_action(store.get_task("task-pipeline"), initial)
+
+            store.record_task_event(
+                "task-pipeline",
+                "pipeline_receipt",
+                {"receipt": {"agent": "dev", "phase": "implementation", "action": "started", "evidence": "files=2"}},
+            )
+            next_control = store.derive_task_control_state("task-pipeline")
+            next_action = store.reconcile_task_control_action(store.get_task("task-pipeline"), next_control)
+            actions = store.list_task_control_actions(task_id="task-pipeline", limit=10)
+
+            self.assertEqual(next_action["action_type"], "await_dev_receipt")
+            self.assertTrue(any(item["action_type"] == "require_dev_receipt" and item["status"] == "resolved" for item in actions))
+            self.assertTrue(any(item["action_type"] == "await_dev_receipt" and item["status"] in {"pending", "sent"} for item in actions))
+
+    def test_reconcile_task_control_action_resolves_when_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-quant",
+                    "session_key": "session-quant",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "做一轮量化回测",
+                    "last_user_message": "做一轮量化回测",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "completed_at": 3,
+                }
+            )
+            store.upsert_task_contract(
+                "task-quant",
+                {
+                    "id": "quant_guarded",
+                    "required_receipts": [
+                        "calculator:started",
+                        "calculator:completed",
+                        "verifier:completed",
+                    ],
+                },
+            )
+            store.record_task_event("task-quant", "dispatch_started", {"question": "做一轮量化回测"})
+            store.record_task_event(
+                "task-quant",
+                "pipeline_receipt",
+                {"receipt": {"agent": "calculator", "phase": "analysis", "action": "completed", "evidence": "收益率=12%"}},
+            )
+            control = store.derive_task_control_state("task-quant")
+            store.reconcile_task_control_action(store.get_task("task-quant"), control)
+            store.record_task_event(
+                "task-quant",
+                "pipeline_receipt",
+                {"receipt": {"agent": "verifier", "phase": "review", "action": "completed", "evidence": "复核通过"}},
+            )
+            store.record_task_event("task-quant", "dispatch_complete", {"status": "completed"})
+            completed_control = store.derive_task_control_state("task-quant")
+            store.reconcile_task_control_action(store.get_task("task-quant"), completed_control)
+            action = store.get_open_control_action("task-quant")
+
+            self.assertEqual(completed_control["control_state"], "completed_verified")
+            self.assertIsNone(action)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -207,6 +207,11 @@ def get_task_registry_payload(limit: int = 8) -> dict:
         latest_receipt = task.get("latest_receipt") or {}
         timeline = STORE.list_task_events(task["task_id"], limit=6)
         control = STORE.derive_task_control_state(task["task_id"])
+        control_actions = STORE.list_task_control_actions(
+            task_id=task["task_id"],
+            statuses=["pending", "sent", "blocked"],
+            limit=5,
+        )
         question = normalize_question(task.get("question", ""))
         last_user_message = normalize_question(task.get("last_user_message", ""))
         if question == "未知任务":
@@ -227,6 +232,7 @@ def get_task_registry_payload(limit: int = 8) -> dict:
                 "evidence": latest_receipt.get("evidence", "-"),
             },
             "control": control,
+            "control_actions": control_actions,
             "timeline": [
                 {
                     "event_type": item.get("event_type", ""),
@@ -254,6 +260,11 @@ def get_task_registry_payload(limit: int = 8) -> dict:
             datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-"
         )
         task["control"] = STORE.derive_task_control_state(task["task_id"])
+        task["control_actions"] = STORE.list_task_control_actions(
+            task_id=task["task_id"],
+            statuses=["pending", "sent", "blocked"],
+            limit=5,
+        )
     active = [task for task in tasks if task.get("status") in {"running", "blocked", "background"}]
     current = summarize_task(STORE.get_current_task(env_id=env_id)) if enabled else None
     summary = STORE.summarize_tasks(env_id=env_id) if enabled else {"total": 0}
@@ -1582,11 +1593,15 @@ def index():
                     const summary = taskRegistry.summary || {};
                     const timeline = (currentTask && currentTask.timeline) || [];
                     const receipt = (currentTask && currentTask.receipt_summary) || {};
+                    const control = (currentTask && currentTask.control) || {};
+                    const controlAction = (control && control.control_action) || null;
                     taskSummaryEl.innerHTML = currentTask ? `
                         <div class="memory-box-title">当前活动任务</div>
                         <div class="memory-box-main">${currentTask.question || '未知任务'}</div>
                         <div class="memory-box-sub">状态: ${currentTask.status} | 阶段: ${currentTask.current_stage} | 会话: ${currentTask.session_key}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">任务总数: ${summary.total || 0} | 运行中: ${summary.running || 0} | 阻塞: ${summary.blocked || 0} | 后台: ${summary.background || 0}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">控制裁决: ${control.approved_summary || '-'} | 证据: ${control.evidence_level || '-'} | 合同: ${(control.contract || {}).id || '-'}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">缺失回执: ${(control.missing_receipts || []).join(', ') || '无'}${controlAction ? ` | 控制动作: ${controlAction.action_type} (${controlAction.status}, attempts=${controlAction.attempts})` : ''}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">最近回执: ${receipt.agent || '-'} / ${receipt.phase || '-'} / ${receipt.action || '-'}${receipt.evidence && receipt.evidence !== '-' ? ` | ${receipt.evidence}` : ''}</div>
                         ${timeline.length ? `<div class="memory-box-sub" style="margin-top:8px;">时间线: ${timeline.map(item => `${item.created_label} ${item.event_type}`).join(' → ')}</div>` : ''}
                     ` : `
@@ -1604,7 +1619,8 @@ def index():
                             </div>
                             <div class="event-details">
                                 task_id=${item.task_id} | session=${item.session_key}<br/>
-                                最近进展时间: ${item.last_progress_label || '-'}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
+                                最近进展时间: ${item.last_progress_label || '-'}<br/>
+                                控制: ${(item.control || {}).control_state || '-'} | 证据: ${(item.control || {}).evidence_level || '-'}${(item.control || {}).missing_receipts?.length ? `<br/>缺失回执: ${(item.control || {}).missing_receipts.join(', ')}` : ''}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
                             </div>
                         </div>
                     `).join('') : '<div class="event-empty">暂无任务记录</div>';

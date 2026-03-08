@@ -164,6 +164,10 @@ cd ~/openclaw-health-monitor
   - versions
   - change events
   - health samples
+  - managed tasks
+  - task events
+  - task contracts
+  - task control actions
 
 ### 运行模型
 
@@ -634,6 +638,8 @@ Task registry highlights:
 
 - external task contracts come from `task_contracts.json`
 - every complex task is evaluated against a contract, not against free-form model text
+- every missing receipt becomes a persisted control action in SQLite
+- Guardian consumes those control actions and either retries, blocks, or approves the next summary
 - `current-task-facts.json` becomes the source of truth for progress queries
 - weak evidence tasks can be escalated into explicit blocked states when receipts never arrive
 
@@ -645,6 +651,13 @@ Built-in contracts:
   - requires `calculator -> verifier` receipts
 - `single_agent`
   - no strict multi-agent contract
+
+Control-plane behavior:
+
+- `task_control_actions` stores the current missing step for each active task
+- Guardian retries against the current action instead of blindly trusting chat text
+- dashboard and progress summaries read the approved control state, not raw model narration
+- if the required receipts never arrive, the task is marked blocked instead of being described as "still progressing"
 
 Default behavior:
 

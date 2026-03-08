@@ -685,6 +685,7 @@ def write_task_registry_snapshot() -> None:
             "next_action": (facts_current or {}).get("control", {}).get("next_action"),
             "contract_id": ((facts_current or {}).get("control", {}).get("contract") or {}).get("id"),
             "missing_receipts": (facts_current or {}).get("control", {}).get("missing_receipts") or [],
+            "control_action": (facts_current or {}).get("control", {}).get("control_action"),
         },
     }
     data_dir = BASE_DIR / "data"
@@ -1612,7 +1613,6 @@ def enforce_task_registry_control_plane() -> list[dict]:
     cooldown = int(CONFIG.get("TASK_CONTROL_FOLLOWUP_COOLDOWN", 300))
     max_attempts = max(1, int(CONFIG.get("TASK_CONTROL_MAX_ATTEMPTS", 2)))
     block_timeout = int(CONFIG.get("TASK_CONTROL_BLOCK_TIMEOUT", 900))
-    followup_state = STORE.load_runtime_value("task_control_followup_state", {})
     outcomes: list[dict] = []
 
     for task in STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100))):
@@ -1620,9 +1620,10 @@ def enforce_task_registry_control_plane() -> list[dict]:
             continue
 
         control = STORE.derive_task_control_state(task["task_id"])
+        action = STORE.reconcile_task_control_action(task, control)
+        control = STORE.derive_task_control_state(task["task_id"])
         contract = control.get("contract") or {}
         if not (contract.get("required_receipts") or []):
-            followup_state.pop(task["task_id"], None)
             continue
         control_state = str(control.get("control_state") or "")
         if control_state not in {
@@ -1635,18 +1636,15 @@ def enforce_task_registry_control_plane() -> list[dict]:
             "awaiting_test",
             "test_running",
         }:
-            followup_state.pop(task["task_id"], None)
             continue
 
         idle = max(0, now - int(task.get("last_progress_at") or task.get("updated_at") or now))
         total = max(0, now - int(task.get("started_at") or now))
-        state = followup_state.get(task["task_id"], {})
-        attempts = int(state.get("attempts", 0))
-        last_followup_at = int(state.get("last_followup_at", 0))
+        action = action or control.get("control_action")
+        attempts = int((action or {}).get("attempts", 0))
+        last_followup_at = int((action or {}).get("last_followup_at", 0))
 
         if idle < grace:
-            if state:
-                followup_state[task["task_id"]] = state
             continue
 
         if task.get("status") == "blocked" and str(task.get("blocked_reason") or "") in {
@@ -1698,11 +1696,16 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "control_state": control_state,
                 }
             )
-            followup_state.pop(task["task_id"], None)
+            if action:
+                STORE.update_control_action(
+                    int(action["id"]),
+                    status="blocked",
+                    summary="任务缺少结构化回执，控制面已判阻塞。",
+                    control_state=control_state,
+                )
             continue
 
         if now - last_followup_at < cooldown:
-            followup_state[task["task_id"]] = state
             continue
 
         session_key = str(task.get("session_key") or "")
@@ -1735,6 +1738,13 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "control_state": control_state,
                 }
             )
+            if action:
+                STORE.update_control_action(
+                    int(action["id"]),
+                    status="blocked",
+                    summary="守护控制面无法继续催办，任务已阻塞。",
+                    control_state=control_state,
+                )
             continue
 
         control_message = build_control_plane_followup(
@@ -1744,16 +1754,22 @@ def enforce_task_registry_control_plane() -> list[dict]:
             total=total,
         )
         ok, error_kind = send_guardian_followup(session_key, control_message)
-        state["attempts"] = attempts + 1
-        state["last_followup_at"] = now
-        state["last_error"] = error_kind or ""
-        followup_state[task["task_id"]] = state
+        next_attempts = attempts + 1
+        if action:
+            STORE.update_control_action(
+                int(action["id"]),
+                status="sent" if ok else "pending",
+                attempts=next_attempts,
+                last_followup_at=now,
+                last_error=error_kind or "",
+                control_state=control_state,
+            )
         STORE.record_task_event(
             task["task_id"],
             "control_followup",
             {
                 "control_state": control_state,
-                "attempt": state["attempts"],
+                "attempt": next_attempts,
                 "idle": idle,
                 "total": total,
                 "sent": ok,
@@ -1780,7 +1796,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "control_state": control_state,
                 }
             )
-        elif state["attempts"] >= max_attempts or error_kind in {
+        elif next_attempts >= max_attempts or error_kind in {
             "session_lock",
             "model_auth",
             "model_unavailable",
@@ -1827,11 +1843,16 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "control_state": control_state,
                 }
             )
-
-    if followup_state:
-        STORE.save_runtime_value("task_control_followup_state", trim_runtime_state_map(followup_state, keep=500))
-    else:
-        STORE.save_runtime_value("task_control_followup_state", {})
+            if action:
+                STORE.update_control_action(
+                    int(action["id"]),
+                    status="blocked",
+                    attempts=next_attempts,
+                    last_followup_at=now,
+                    last_error=error_kind or "",
+                    summary="守护控制面催办失败，任务已阻塞。",
+                    control_state=control_state,
+                )
     write_task_registry_snapshot()
     return outcomes
 

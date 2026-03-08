@@ -698,9 +698,15 @@ class GuardianProgressPushTests(unittest.TestCase):
                     ],
                 },
             )
-            store.save_runtime_value(
-                "task_control_followup_state",
-                {"task-weak": {"attempts": 2, "last_followup_at": 0, "last_error": "unknown"}},
+            action = store.reconcile_task_control_action(
+                store.get_task("task-weak"),
+                store.derive_task_control_state("task-weak"),
+            )
+            store.update_control_action(
+                int(action["id"]),
+                attempts=2,
+                last_followup_at=0,
+                last_error="unknown",
             )
 
             with mock.patch.object(guardian, "STORE", store), \

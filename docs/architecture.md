@@ -63,6 +63,7 @@ Core records:
 - `managed_tasks`
 - `task_events`
 - `task_contracts`
+- `task_control_actions`
 - runtime `kv_state`
 
 ## 4. Task Contracts and ACK Gate
@@ -112,7 +113,34 @@ stateDiagram-v2
     no_reply --> [*]
 ```
 
-## 6. Evidence Model
+## 6. Control Actions Queue
+
+```mermaid
+flowchart LR
+    S[Derived control state]
+    A[(task_control_actions)]
+    F[Guardian follow-up worker]
+    R[Structured receipts]
+    U[Approved user summary]
+
+    S --> A
+    A --> F
+    F -->|follow-up / retry / block| R
+    R --> S
+    S --> U
+```
+
+Principles:
+
+- the registry is not just a ledger; it emits explicit control actions
+- each control action is persisted in SQLite with attempts, last error, and status
+- Guardian consumes those actions and either:
+  - requests the missing receipt
+  - retries after cooldown
+  - marks the task blocked
+- dashboard and user-facing progress should read the approved state, not free-form agent text
+
+## 7. Evidence Model
 
 The control plane treats these as strong runtime evidence:
 
@@ -124,7 +152,7 @@ The control plane treats these as strong runtime evidence:
 
 The control plane should not treat free-form model text as task truth when stronger evidence exists.
 
-## 7. Control States
+## 8. Control States
 
 Examples:
 
@@ -143,7 +171,7 @@ Examples:
 - `blocked_unverified`
   - Guardian escalated because the contract receipts never arrived
 
-## 8. Operator Surfaces
+## 9. Operator Surfaces
 
 Dashboard exposes:
 
@@ -153,16 +181,18 @@ Dashboard exposes:
 - task registry summary
 - current active task
 - recent task timeline
+- control actions queue and missing receipts
 
 Guardian provides:
 
 - anomaly detection
 - silence-based follow-up
 - contract-aware task follow-up
+- persisted control actions with retry / block lifecycle
 - blocked-task handling
 - environment-aware recovery
 
-## 9. Design Boundary
+## 10. Design Boundary
 
 OpenClaw core is responsible for:
 

@@ -99,6 +99,27 @@ class MonitorStateStore:
                     contract_json TEXT NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS task_control_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    env_id TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    control_state TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    required_receipts_json TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_followup_at INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    resolved_at INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_control_actions_task_status
+                ON task_control_actions(task_id, status, updated_at DESC);
                 """
             )
 
@@ -391,6 +412,202 @@ class MonitorStateStore:
         except Exception:
             return None
 
+    def list_task_control_actions(
+        self,
+        *,
+        task_id: str | None = None,
+        env_id: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT id, task_id, env_id, action_type, control_state, status,
+                   required_receipts_json, summary, attempts, last_followup_at,
+                   last_error, details_json, created_at, updated_at, resolved_at
+            FROM task_control_actions
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if task_id:
+            query += " AND task_id = ?"
+            params.append(task_id)
+        if env_id:
+            query += " AND env_id = ?"
+            params.append(env_id)
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            query += f" AND status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "id": int(row["id"] or 0),
+                "task_id": row["task_id"],
+                "env_id": row["env_id"],
+                "action_type": row["action_type"],
+                "control_state": row["control_state"],
+                "status": row["status"],
+                "required_receipts": json.loads(row["required_receipts_json"] or "[]"),
+                "summary": row["summary"] or "",
+                "attempts": int(row["attempts"] or 0),
+                "last_followup_at": int(row["last_followup_at"] or 0),
+                "last_error": row["last_error"] or "",
+                "details": json.loads(row["details_json"] or "{}"),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "resolved_at": int(row["resolved_at"] or 0),
+            }
+            for row in rows
+        ]
+
+    def get_open_control_action(self, task_id: str) -> dict[str, Any] | None:
+        actions = self.list_task_control_actions(
+            task_id=task_id,
+            statuses=["pending", "sent", "blocked"],
+            limit=1,
+        )
+        return actions[0] if actions else None
+
+    def reconcile_task_control_action(
+        self,
+        task: dict[str, Any],
+        control: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        now = int(time.time())
+        task_id = task["task_id"]
+        env_id = str(task.get("env_id") or "primary")
+        next_action = str(control.get("next_action") or "none")
+        summary = str(control.get("approved_summary") or "")
+        missing = list(control.get("missing_receipts") or [])
+        control_state = str(control.get("control_state") or "unknown")
+        existing = self.list_task_control_actions(
+            task_id=task_id,
+            statuses=["pending", "sent", "blocked"],
+            limit=20,
+        )
+
+        if next_action in {"none", "manual_or_session_recovery"}:
+            final_status = "resolved" if next_action == "none" else "blocked"
+            with self._connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE task_control_actions
+                    SET status = ?, summary = ?, control_state = ?, updated_at = ?, resolved_at = ?
+                    WHERE task_id = ? AND status IN ('pending', 'sent', 'blocked')
+                    """,
+                    (final_status, summary, control_state, now, now, task_id),
+                )
+            return None
+
+        current = next((item for item in existing if item["action_type"] == next_action), None)
+        stale_ids = [item["id"] for item in existing if item["action_type"] != next_action]
+        with self._connection() as conn:
+            if stale_ids:
+                placeholders = ",".join("?" for _ in stale_ids)
+                conn.execute(
+                    f"""
+                    UPDATE task_control_actions
+                    SET status = 'resolved', updated_at = ?, resolved_at = ?
+                    WHERE id IN ({placeholders})
+                    """,
+                    [now, now, *stale_ids],
+                )
+            if current:
+                conn.execute(
+                    """
+                    UPDATE task_control_actions
+                    SET env_id = ?, control_state = ?, required_receipts_json = ?, summary = ?, details_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        env_id,
+                        control_state,
+                        json.dumps(missing, ensure_ascii=False),
+                        summary,
+                        json.dumps(
+                            {
+                                "contract_id": ((control.get("contract") or {}).get("id") or "single_agent"),
+                                "next_action": next_action,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        now,
+                        current["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO task_control_actions(
+                        task_id, env_id, action_type, control_state, status,
+                        required_receipts_json, summary, attempts, last_followup_at,
+                        last_error, details_json, created_at, updated_at, resolved_at
+                    )
+                    VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, 0, '', ?, ?, ?, 0)
+                    """,
+                    (
+                        task_id,
+                        env_id,
+                        next_action,
+                        control_state,
+                        json.dumps(missing, ensure_ascii=False),
+                        summary,
+                        json.dumps(
+                            {
+                                "contract_id": ((control.get("contract") or {}).get("id") or "single_agent"),
+                                "next_action": next_action,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        now,
+                        now,
+                    ),
+                )
+        return self.get_open_control_action(task_id)
+
+    def update_control_action(
+        self,
+        action_id: int,
+        *,
+        status: str | None = None,
+        attempts: int | None = None,
+        last_followup_at: int | None = None,
+        last_error: str | None = None,
+        summary: str | None = None,
+        control_state: str | None = None,
+    ) -> None:
+        fields: list[str] = ["updated_at = :updated_at"]
+        params: dict[str, Any] = {"action_id": action_id, "updated_at": int(time.time())}
+        if status is not None:
+            fields.append("status = :status")
+            params["status"] = status
+            if status in {"resolved", "blocked"}:
+                fields.append("resolved_at = :resolved_at")
+                params["resolved_at"] = int(time.time())
+        if attempts is not None:
+            fields.append("attempts = :attempts")
+            params["attempts"] = attempts
+        if last_followup_at is not None:
+            fields.append("last_followup_at = :last_followup_at")
+            params["last_followup_at"] = last_followup_at
+        if last_error is not None:
+            fields.append("last_error = :last_error")
+            params["last_error"] = last_error
+        if summary is not None:
+            fields.append("summary = :summary")
+            params["summary"] = summary
+        if control_state is not None:
+            fields.append("control_state = :control_state")
+            params["control_state"] = control_state
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE task_control_actions SET {', '.join(fields)} WHERE id = :action_id",
+                params,
+            )
+
     @staticmethod
     def _task_label_invalid(text: str | None) -> bool:
         raw = (text or "").strip()
@@ -444,6 +661,7 @@ class MonitorStateStore:
                 "next_action": "none",
                 "contract": {"id": "single_agent", "required_receipts": []},
                 "missing_receipts": [],
+                "control_action": None,
                 "flags": {},
             }
 
@@ -687,6 +905,7 @@ class MonitorStateStore:
             "next_action": next_action,
             "contract": contract,
             "missing_receipts": missing_receipts,
+            "control_action": self.get_open_control_action(task_id),
             "flags": flags,
             "latest_receipt": latest_receipt,
         }
