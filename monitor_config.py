@@ -35,6 +35,15 @@ DEFAULT_CONFIG = {
     "CPU_THRESHOLD": 90,
     "MEMORY_THRESHOLD": 85,
     "ALERT_DEDUP_INTERVAL": 600,
+    "OPENCLAW_HOME": str(Path.home() / ".openclaw"),
+    "OPENCLAW_CODE": str(Path.home() / "openclaw-workspace" / "openclaw"),
+    "OPENCLAW_OFFICIAL_CODE": str(Path.home() / "openclaw-workspace" / "openclaw-official"),
+    "OPENCLAW_OFFICIAL_STATE": str(Path.home() / ".openclaw-official"),
+    "OPENCLAW_OFFICIAL_PORT": 19001,
+    "OPENCLAW_OFFICIAL_REF": "origin/main",
+    "OPENCLAW_OFFICIAL_AUTO_UPDATE": False,
+    "OPENCLAW_OFFICIAL_UPDATE_HOUR": 4,
+    "OPENCLAW_OFFICIAL_UPDATE_MINUTE": 30,
 }
 
 SECRET_KEYS = {"DINGTALK_WEBHOOK", "FEISHU_WEBHOOK"}

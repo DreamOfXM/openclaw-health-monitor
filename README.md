@@ -79,6 +79,16 @@ cd ~/openclaw-health-monitor
 ./stop.sh
 ```
 
+官方最新版并行验证：
+
+```bash
+cd ~/openclaw-health-monitor
+./manage_official_openclaw.sh prepare
+./manage_official_openclaw.sh start
+./manage_official_openclaw.sh status
+./manage_official_openclaw.sh stop
+```
+
 ### 方式二：桌面 App
 
 直接下载：
@@ -111,6 +121,15 @@ cd ~/openclaw-health-monitor
 ./start.sh
 ./status.sh
 ./stop.sh
+```
+
+如果你要在不动当前工作版本的前提下验证 OpenClaw 官方最新版，再记住这一组：
+
+```bash
+./manage_official_openclaw.sh prepare
+./manage_official_openclaw.sh start
+./manage_official_openclaw.sh status
+./manage_official_openclaw.sh stop
 ```
 
 ## 架构说明
@@ -158,6 +177,81 @@ cd ~/openclaw-health-monitor
 
 5. `./stop.sh`
    调用 `desktop_runtime.sh stop all`，停止整套本地运行面
+
+### 官方最新版并行验证
+
+Health Monitor 现在还可以托管一套“官方最新版 OpenClaw”的隔离验证环境，不需要直接改你当前在用的 OpenClaw 仓库，也不需要先切换生产环境。
+
+默认路径和端口：
+
+- 官方 worktree：
+  - `~/openclaw-workspace/openclaw-official`
+- 官方隔离状态目录：
+  - `~/.openclaw-official`
+- 官方验证端口：
+  - `19001`
+
+这套验证环境会：
+
+- 从你当前 OpenClaw 仓库拉出一个 `origin/main` worktree
+- 同步一份隔离的私有配置和 workspace
+- 在隔离目录中安装依赖并构建
+- 用独立端口拉起验证 Gateway
+
+核心命令：
+
+```bash
+cd ~/openclaw-health-monitor
+./manage_official_openclaw.sh prepare
+./manage_official_openclaw.sh start
+./manage_official_openclaw.sh status
+./manage_official_openclaw.sh stop
+```
+
+也支持 Makefile 入口：
+
+```bash
+make official-prepare
+make official-start
+make official-status
+make official-stop
+```
+
+### OpenClaw 自动更新
+
+这个项目现在支持“由守护助手托管 OpenClaw 官方最新版的更新”，不需要改 OpenClaw 源码。
+
+更新策略：
+
+- 每次更新都会先刷新官方 worktree
+- 再同步隔离配置
+- 然后重新安装依赖并构建
+- 默认不直接替换你当前正在用的工作版本
+
+安装定时更新：
+
+```bash
+cd ~/openclaw-health-monitor
+./manage_official_openclaw.sh install-schedule
+./manage_official_openclaw.sh schedule-status
+```
+
+默认会安装一个 `launchd` 任务：
+
+- Label:
+  - `ai.openclaw.official-update`
+- 默认时间：
+  - 每天 `04:30`
+
+这套自动更新默认只更新：
+
+- `~/openclaw-workspace/openclaw-official`
+- `~/.openclaw-official`
+
+不会直接覆盖你当前主用的：
+
+- `~/openclaw-workspace/openclaw`
+- `~/.openclaw`
 
 ## 运行验证
 
