@@ -602,6 +602,108 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(second[0]["type"], "blocked_notice")
             self.assertIn("任务当前已阻塞", messages[-1][1])
 
+    def test_enforce_task_registry_control_plane_sends_control_followup_for_weak_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-weak",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "做量化回测",
+                    "last_user_message": "做量化回测",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "completed_at": 3,
+                }
+            )
+            store.record_task_event("task-weak", "dispatch_started", {"question": "做量化回测"})
+            store.record_task_event("task-weak", "dispatch_complete", {"status": "completed"})
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "ENABLE_TASK_REGISTRY": True,
+                        "TASK_REGISTRY_RETENTION": 20,
+                        "TASK_CONTROL_RECEIPT_GRACE": 10,
+                        "TASK_CONTROL_FOLLOWUP_COOLDOWN": 60,
+                        "TASK_CONTROL_MAX_ATTEMPTS": 2,
+                        "TASK_CONTROL_BLOCK_TIMEOUT": 300,
+                    },
+                ), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+                mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "send_guardian_followup", return_value=(True, None)) as followup, \
+                mock.patch.object(guardian, "record_change_log"):
+                with mock.patch.object(guardian.time, "time", return_value=100):
+                    outcomes = guardian.enforce_task_registry_control_plane()
+
+            self.assertEqual(outcomes[0]["action"], "followup_sent")
+            self.assertEqual(followup.call_count, 1)
+            self.assertIn("GUARDIAN_TASK_CONTROL:", followup.call_args.args[1])
+            events = store.list_task_events("task-weak", limit=10)
+            self.assertTrue(any(item["event_type"] == "control_followup" for item in events))
+
+    def test_enforce_task_registry_control_plane_blocks_after_max_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-weak",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "做量化回测",
+                    "last_user_message": "做量化回测",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "completed_at": 3,
+                }
+            )
+            store.record_task_event("task-weak", "dispatch_started", {"question": "做量化回测"})
+            store.record_task_event("task-weak", "dispatch_complete", {"status": "completed"})
+            store.save_runtime_value(
+                "task_control_followup_state",
+                {"task-weak": {"attempts": 2, "last_followup_at": 0, "last_error": "unknown"}},
+            )
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "ENABLE_TASK_REGISTRY": True,
+                        "TASK_REGISTRY_RETENTION": 20,
+                        "TASK_CONTROL_RECEIPT_GRACE": 10,
+                        "TASK_CONTROL_FOLLOWUP_COOLDOWN": 60,
+                        "TASK_CONTROL_MAX_ATTEMPTS": 2,
+                        "TASK_CONTROL_BLOCK_TIMEOUT": 300,
+                    },
+                ), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+                mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "record_change_log"):
+                with mock.patch.object(guardian.time, "time", return_value=100):
+                    outcomes = guardian.enforce_task_registry_control_plane()
+
+            task = store.get_task("task-weak")
+            self.assertEqual(outcomes[0]["action"], "blocked")
+            self.assertEqual(task["status"], "blocked")
+            self.assertEqual(task["blocked_reason"], "missing_pipeline_receipt")
+
 
 if __name__ == "__main__":
     unittest.main()

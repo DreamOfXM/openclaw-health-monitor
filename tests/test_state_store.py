@@ -238,6 +238,31 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(strong["evidence_level"], "strong")
             self.assertEqual(strong["control_state"], "dev_running")
 
+    def test_derive_task_control_state_marks_missing_receipt_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-blocked",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "blocked",
+                    "current_stage": "等待结构化回执",
+                    "question": "任务A",
+                    "last_user_message": "任务A",
+                    "blocked_reason": "missing_pipeline_receipt",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            control = store.derive_task_control_state("task-blocked")
+            self.assertEqual(control["control_state"], "blocked_unverified")
+            self.assertEqual(control["next_action"], "manual_or_session_recovery")
+
 
 if __name__ == "__main__":
     unittest.main()

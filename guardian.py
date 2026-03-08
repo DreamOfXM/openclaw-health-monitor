@@ -640,6 +640,7 @@ def write_task_registry_snapshot() -> None:
             "approved_summary": (facts_current or {}).get("control", {}).get("approved_summary"),
             "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
             "control_state": (facts_current or {}).get("control", {}).get("control_state"),
+            "next_action": (facts_current or {}).get("control", {}).get("next_action"),
         },
     }
     data_dir = BASE_DIR / "data"
@@ -980,6 +981,23 @@ def trim_runtime_seen(seen: dict[str, int], keep: int = 2000) -> dict[str, int]:
     if len(seen) <= keep:
         return seen
     newest = sorted(seen.items(), key=lambda item: item[1], reverse=True)[:keep]
+    return dict(newest)
+
+
+def trim_runtime_state_map(state: dict[str, dict[str, Any]], keep: int = 500) -> dict[str, dict[str, Any]]:
+    """Bound runtime state maps keyed by task/session using their freshest timestamp."""
+    if len(state) <= keep:
+        return state
+    newest = sorted(
+        state.items(),
+        key=lambda item: max(
+            int((item[1] or {}).get("last_followup_at", 0)),
+            int((item[1] or {}).get("last_stage_push", 0)),
+            int((item[1] or {}).get("last_escalation_push", 0)),
+            int((item[1] or {}).get("last_blocked_notice", 0)),
+        ),
+        reverse=True,
+    )[:keep]
     return dict(newest)
 
 
@@ -1517,8 +1535,234 @@ def push_runtime_progress_updates() -> list[dict]:
             push_state.pop(push_key, None)
 
     if push_state:
-        STORE.save_runtime_value("runtime_progress_push_state", trim_runtime_seen(push_state, keep=500))
+        STORE.save_runtime_value("runtime_progress_push_state", trim_runtime_state_map(push_state, keep=500))
     return pushed
+
+
+def enforce_task_registry_control_plane() -> list[dict]:
+    """Promote weak registry states into explicit recovery or blocked states."""
+    if not CONFIG.get("ENABLE_TASK_REGISTRY", True):
+        return []
+
+    env_id = current_env_spec()["id"]
+    now = int(time.time())
+    grace = int(CONFIG.get("TASK_CONTROL_RECEIPT_GRACE", 180))
+    cooldown = int(CONFIG.get("TASK_CONTROL_FOLLOWUP_COOLDOWN", 300))
+    max_attempts = max(1, int(CONFIG.get("TASK_CONTROL_MAX_ATTEMPTS", 2)))
+    block_timeout = int(CONFIG.get("TASK_CONTROL_BLOCK_TIMEOUT", 900))
+    followup_state = STORE.load_runtime_value("task_control_followup_state", {})
+    outcomes: list[dict] = []
+
+    for task in STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100))):
+        if task.get("env_id") != env_id:
+            continue
+
+        control = STORE.derive_task_control_state(task["task_id"])
+        control_state = str(control.get("control_state") or "")
+        if control_state not in {"received_only", "planning_only", "progress_only"}:
+            followup_state.pop(task["task_id"], None)
+            continue
+
+        idle = max(0, now - int(task.get("last_progress_at") or task.get("updated_at") or now))
+        total = max(0, now - int(task.get("started_at") or now))
+        state = followup_state.get(task["task_id"], {})
+        attempts = int(state.get("attempts", 0))
+        last_followup_at = int(state.get("last_followup_at", 0))
+
+        if idle < grace:
+            if state:
+                followup_state[task["task_id"]] = state
+            continue
+
+        if task.get("status") == "blocked" and str(task.get("blocked_reason") or "") in {
+            "missing_pipeline_receipt",
+            "control_followup_failed",
+        }:
+            continue
+
+        should_block = attempts >= max_attempts or total >= block_timeout
+        if should_block:
+            blocked_reason = "missing_pipeline_receipt"
+            if attempts >= max_attempts and not task.get("session_key"):
+                blocked_reason = "control_followup_failed"
+            STORE.update_task_fields(
+                task["task_id"],
+                status="blocked",
+                current_stage="等待结构化回执",
+                blocked_reason=blocked_reason,
+                updated_at=now,
+            )
+            STORE.record_task_event(
+                task["task_id"],
+                "control_blocked",
+                {
+                    "reason": blocked_reason,
+                    "control_state": control_state,
+                    "idle": idle,
+                    "total": total,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            record_change_log(
+                "anomaly",
+                "守护控制面判定任务阻塞",
+                {
+                    "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                    "control_state": control_state,
+                    "idle": idle,
+                    "duration": total,
+                    "blocked_reason": blocked_reason,
+                    "task_id": task["task_id"],
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "blocked",
+                    "blocked_reason": blocked_reason,
+                    "control_state": control_state,
+                }
+            )
+            followup_state.pop(task["task_id"], None)
+            continue
+
+        if now - last_followup_at < cooldown:
+            followup_state[task["task_id"]] = state
+            continue
+
+        session_key = str(task.get("session_key") or "")
+        question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+        stage = str(task.get("current_stage") or "处理中")
+        if not session_key:
+            STORE.update_task_fields(
+                task["task_id"],
+                status="blocked",
+                current_stage="等待结构化回执",
+                blocked_reason="control_followup_failed",
+                updated_at=now,
+            )
+            STORE.record_task_event(
+                task["task_id"],
+                "control_blocked",
+                {
+                    "reason": "control_followup_failed",
+                    "control_state": control_state,
+                    "idle": idle,
+                    "total": total,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "blocked",
+                    "blocked_reason": "control_followup_failed",
+                    "control_state": control_state,
+                }
+            )
+            continue
+
+        control_message = (
+            "GUARDIAN_TASK_CONTROL: 这不是用户新需求。"
+            f"当前 task_id={task['task_id']}，守护控制面判定状态={control_state}，"
+            f"当前阶段={stage}，已静默={format_duration_label(idle)}，累计运行={format_duration_label(total)}。"
+            f"当前问题={question}。"
+            "请立即二选一："
+            "1) 若流水线确已继续，请补发一条结构化 PIPELINE_RECEIPT；"
+            "2) 若开发/精算/测试未真正启动或已卡住，请明确返回阻塞原因。"
+            "不要再口头宣称团队正在推进，也不要把这条控制消息当成新的用户需求。"
+        )
+        ok, error_kind = send_guardian_followup(session_key, control_message)
+        state["attempts"] = attempts + 1
+        state["last_followup_at"] = now
+        state["last_error"] = error_kind or ""
+        followup_state[task["task_id"]] = state
+        STORE.record_task_event(
+            task["task_id"],
+            "control_followup",
+            {
+                "control_state": control_state,
+                "attempt": state["attempts"],
+                "idle": idle,
+                "total": total,
+                "sent": ok,
+                "error_kind": error_kind or "",
+                "timestamp": datetime.now().isoformat(),
+            },
+        )
+        if ok:
+            record_change_log(
+                "pipeline",
+                "守护控制面发起结构化回执催办",
+                {
+                    "question": question,
+                    "task_id": task["task_id"],
+                    "control_state": control_state,
+                    "idle": idle,
+                    "duration": total,
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "followup_sent",
+                    "control_state": control_state,
+                }
+            )
+        elif state["attempts"] >= max_attempts or error_kind in {
+            "session_lock",
+            "model_auth",
+            "model_unavailable",
+            "model_pool_failed",
+            "unknown",
+        }:
+            STORE.update_task_fields(
+                task["task_id"],
+                status="blocked",
+                current_stage="等待结构化回执",
+                blocked_reason="control_followup_failed",
+                updated_at=now,
+            )
+            STORE.record_task_event(
+                task["task_id"],
+                "control_blocked",
+                {
+                    "reason": "control_followup_failed",
+                    "control_state": control_state,
+                    "error_kind": error_kind or "",
+                    "idle": idle,
+                    "total": total,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            record_change_log(
+                "anomaly",
+                "守护控制面催办失败，任务已标记阻塞",
+                {
+                    "question": question,
+                    "task_id": task["task_id"],
+                    "control_state": control_state,
+                    "blocked_reason": "control_followup_failed",
+                    "error_kind": error_kind or "",
+                    "idle": idle,
+                    "duration": total,
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "blocked",
+                    "blocked_reason": "control_followup_failed",
+                    "control_state": control_state,
+                }
+            )
+
+    if followup_state:
+        STORE.save_runtime_value("task_control_followup_state", trim_runtime_state_map(followup_state, keep=500))
+    else:
+        STORE.save_runtime_value("task_control_followup_state", {})
+    write_task_registry_snapshot()
+    return outcomes
 
 
 def has_config_changes() -> bool:
@@ -1902,6 +2146,7 @@ def main():
             scan_pipeline_progress_events()
             scan_runtime_anomalies()
             push_runtime_progress_updates()
+            enforce_task_registry_control_plane()
             
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:

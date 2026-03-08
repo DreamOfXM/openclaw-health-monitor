@@ -400,6 +400,7 @@ class MonitorStateStore:
                 "evidence_level": "none",
                 "control_state": "unknown",
                 "approved_summary": "任务不存在",
+                "next_action": "none",
                 "flags": {},
             }
 
@@ -472,39 +473,65 @@ class MonitorStateStore:
 
         control_state = "received_only"
         approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
+        next_action = "require_receipt_or_block"
 
-        if flags["test_completed"]:
+        blocked_reason = str(task.get("blocked_reason") or "")
+        blocked_state_locked = False
+        if blocked_reason == "missing_pipeline_receipt":
+            control_state = "blocked_unverified"
+            approved_summary = "任务缺少结构化流水线回执，守护系统已判定为阻塞。"
+            next_action = "manual_or_session_recovery"
+            blocked_state_locked = True
+        elif blocked_reason == "control_followup_failed":
+            control_state = "blocked_control_followup_failed"
+            approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
+            next_action = "manual_or_session_recovery"
+            blocked_state_locked = True
+
+        if blocked_state_locked:
+            pass
+        elif flags["test_completed"]:
             control_state = "completed_verified"
             approved_summary = "测试回执已完成，任务具备强证据完成状态。"
+            next_action = "none"
         elif flags["test_blocked"]:
             control_state = "test_blocked"
             approved_summary = "测试阶段已阻塞。"
+            next_action = "wait_for_test_recovery"
         elif flags["dev_blocked"]:
             control_state = "dev_blocked"
             approved_summary = "开发阶段已阻塞。"
+            next_action = "wait_for_dev_recovery"
         elif flags["dev_completed"] and not flags["test_started"]:
             control_state = "awaiting_test"
             approved_summary = "开发回执已完成，但测试尚未启动。"
+            next_action = "require_test_receipt"
         elif flags["dev_started"]:
             control_state = "dev_running"
             approved_summary = "开发阶段已启动，存在结构化执行证据。"
+            next_action = "await_dev_receipt"
         elif flags["pm_completed"]:
             control_state = "planning_only"
             approved_summary = "方案已完成，但开发尚未启动。"
+            next_action = "require_dev_receipt"
         elif flags["pipeline_progress"]:
             control_state = "progress_only"
             approved_summary = "存在阶段进展标记，但缺少结构化回执。"
+            next_action = "require_receipt_or_block"
         elif flags["dispatch_started"] and flags["dispatch_completed"]:
             control_state = "received_only"
             approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
+            next_action = "require_receipt_or_block"
 
         if task.get("status") == "completed" and flags["visible_completion"] and evidence_level == "weak":
             approved_summary = "任务已给出可见完成回复，但没有流水线级结构化证据。"
+            next_action = "require_receipt_or_block"
 
         return {
             "evidence_level": evidence_level,
             "control_state": control_state,
             "approved_summary": approved_summary,
+            "next_action": next_action,
             "flags": flags,
             "latest_receipt": latest_receipt,
         }
