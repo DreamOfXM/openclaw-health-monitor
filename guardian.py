@@ -711,6 +711,13 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
     open_dispatches: dict[str, dict[str, Any]] = {}
     touched_task_ids: set[str] = set()
 
+    def reconcile_task(task_id: str) -> None:
+        task = STORE.get_task(task_id)
+        if not task:
+            return
+        control = STORE.derive_task_control_state(task_id)
+        STORE.reconcile_task_control_action(task, control)
+
     def most_recent_key() -> str | None:
         if not open_dispatches:
             return None
@@ -789,6 +796,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "timestamp": ts_raw,
                 },
             )
+            reconcile_task(task_id)
             open_dispatches[session_key] = {
                 **task,
                 "timestamp": ts_raw,
@@ -824,6 +832,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "timestamp": ts_raw,
                 },
             )
+            reconcile_task(dispatch["task_id"])
             continue
 
         receipt = extract_pipeline_receipt(line)
@@ -866,6 +875,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "timestamp": ts_raw,
                 },
             )
+            reconcile_task(dispatch["task_id"])
             continue
 
         if is_visible_completion_message(line) and open_dispatches:
@@ -885,6 +895,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "visible_completion",
                     {"timestamp": ts_raw, "message": line.strip()},
                 )
+                reconcile_task(dispatch["task_id"])
             continue
 
         if "dispatch complete" in lower and open_dispatches:
@@ -915,8 +926,10 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "line": line.strip(),
                 },
             )
+            reconcile_task(dispatch["task_id"])
     for task_id in touched_task_ids:
         STORE.repair_task_identity(task_id)
+        reconcile_task(task_id)
     write_task_registry_snapshot()
 
 

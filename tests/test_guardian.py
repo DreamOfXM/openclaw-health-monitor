@@ -279,6 +279,28 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertTrue(summary_file.exists())
             self.assertTrue(facts_file.exists())
 
+    def test_sync_runtime_task_registry_creates_initial_control_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            lines = [
+                "2026-03-06T05:00:00 dm from tester: 做一轮量化回测\n",
+                "2026-03-06T05:00:01 dispatching to agent (session=agent:main:feishu:direct:ou_test)\n",
+            ]
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "CONFIG", {"ENABLE_TASK_REGISTRY": True}), \
+                mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}):
+                guardian.sync_runtime_task_registry(lines)
+
+            tasks = store.list_tasks(limit=10)
+            self.assertEqual(len(tasks), 1)
+            actions = store.list_task_control_actions(task_id=tasks[0]["task_id"], limit=5)
+            self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0]["action_type"], "require_calculator_start")
+            self.assertEqual(actions[0]["status"], "pending")
+
     def test_extract_runtime_question_strips_json_runtime_metadata(self):
         line = '{"0":"{\\"subsystem\\":\\"gateway/channels/feishu\\"}","1":"Feishu[default] DM from ou_test: 我再提个需求，就是做一个系统","_meta":{"runtime":"node"}}'
         self.assertEqual(

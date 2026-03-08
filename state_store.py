@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -89,6 +90,7 @@ class MonitorStateStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
+                    event_key TEXT NOT NULL DEFAULT '',
                     payload_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
@@ -120,6 +122,40 @@ class MonitorStateStore:
 
                 CREATE INDEX IF NOT EXISTS idx_task_control_actions_task_status
                 ON task_control_actions(task_id, status, updated_at DESC);
+                """
+            )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(task_events)").fetchall()
+            }
+            if "event_key" not in columns:
+                conn.execute("ALTER TABLE task_events ADD COLUMN event_key TEXT NOT NULL DEFAULT ''")
+            conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
+            rows = conn.execute(
+                "SELECT id, event_type, payload_json FROM task_events WHERE event_key = '' OR event_key IS NULL"
+            ).fetchall()
+            for row in rows:
+                event_key = hashlib.sha1(
+                    f"{row['event_type']}|{row['payload_json'] or '{}'}".encode("utf-8", errors="ignore")
+                ).hexdigest()
+                conn.execute(
+                    "UPDATE task_events SET event_key = ? WHERE id = ?",
+                    (event_key, row["id"]),
+                )
+            conn.execute(
+                """
+                DELETE FROM task_events
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM task_events
+                    GROUP BY task_id, event_type, event_key
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_dedupe
+                ON task_events(task_id, event_type, event_key)
                 """
             )
 
@@ -361,7 +397,7 @@ class MonitorStateStore:
         with self._connection() as conn:
             rows = conn.execute(
                 """
-                SELECT event_type, payload_json, created_at
+                SELECT event_type, event_key, payload_json, created_at
                 FROM task_events
                 WHERE task_id = ?
                 ORDER BY created_at DESC, id DESC
@@ -372,6 +408,7 @@ class MonitorStateStore:
         return [
             {
                 "event_type": row["event_type"],
+                "event_key": row["event_key"] or "",
                 "payload": json.loads(row["payload_json"] or "{}"),
                 "created_at": int(row["created_at"] or 0),
             }
@@ -974,31 +1011,26 @@ class MonitorStateStore:
             )
 
     def record_task_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> None:
-        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+        payload_json = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+        event_key = hashlib.sha1(f"{event_type}|{payload_json}".encode("utf-8", errors="ignore")).hexdigest()
         now = int(time.time())
         with self._connection() as conn:
-            existing = conn.execute(
-                """
-                SELECT 1 FROM task_events
-                WHERE task_id = ? AND event_type = ? AND payload_json = ? AND created_at = ?
-                LIMIT 1
-                """,
-                (task_id, event_type, payload_json, now),
-            ).fetchone()
-            if existing:
+            try:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO task_events(task_id, event_type, event_key, payload_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        event_type,
+                        event_key,
+                        payload_json,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
                 return
-            conn.execute(
-                """
-                INSERT INTO task_events(task_id, event_type, payload_json, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    event_type,
-                    payload_json,
-                    now,
-                ),
-            )
 
     def _row_to_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if not row:
