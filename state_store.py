@@ -350,6 +350,49 @@ class MonitorStateStore:
             for row in rows
         ]
 
+    @staticmethod
+    def _task_label_invalid(text: str | None) -> bool:
+        raw = (text or "").strip()
+        if not raw or raw == "未知任务":
+            return True
+        lower = raw.lower()
+        invalid_markers = (
+            "dispatching to agent",
+            "dispatch complete",
+            "received message from ",
+        )
+        return any(marker in lower for marker in invalid_markers)
+
+    def get_task_question_candidate(self, task_id: str) -> str | None:
+        events = self.list_task_events(task_id, limit=20)
+        for event in events:
+            if event.get("event_type") != "dispatch_started":
+                continue
+            payload = event.get("payload") or {}
+            candidate = str(payload.get("question") or "").strip()
+            if not self._task_label_invalid(candidate):
+                return candidate
+        return None
+
+    def repair_task_identity(self, task_id: str) -> bool:
+        task = self.get_task(task_id)
+        if not task:
+            return False
+        candidate = self.get_task_question_candidate(task_id)
+        if not candidate:
+            return False
+
+        fields: dict[str, Any] = {}
+        if self._task_label_invalid(task.get("question")):
+            fields["question"] = candidate
+        if self._task_label_invalid(task.get("last_user_message")):
+            fields["last_user_message"] = candidate
+        if not fields:
+            return False
+        fields["updated_at"] = max(int(task.get("updated_at") or 0), int(time.time()))
+        self.update_task_fields(task_id, **fields)
+        return True
+
     def get_current_task(self, *, env_id: str | None = None) -> dict[str, Any] | None:
         query = """
             SELECT * FROM managed_tasks
@@ -414,7 +457,19 @@ class MonitorStateStore:
             )
 
     def record_task_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+        now = int(time.time())
         with self._connection() as conn:
+            existing = conn.execute(
+                """
+                SELECT 1 FROM task_events
+                WHERE task_id = ? AND event_type = ? AND payload_json = ? AND created_at = ?
+                LIMIT 1
+                """,
+                (task_id, event_type, payload_json, now),
+            ).fetchone()
+            if existing:
+                return
             conn.execute(
                 """
                 INSERT INTO task_events(task_id, event_type, payload_json, created_at)
@@ -423,8 +478,8 @@ class MonitorStateStore:
                 (
                     task_id,
                     event_type,
-                    json.dumps(payload or {}, ensure_ascii=False),
-                    int(time.time()),
+                    payload_json,
+                    now,
                 ),
             )
 

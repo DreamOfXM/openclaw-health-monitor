@@ -404,6 +404,22 @@ def extract_runtime_question(line: str) -> str | None:
     return None
 
 
+def normalize_task_question(text: str | None) -> str:
+    """Normalize runtime question text into a user-visible task title."""
+    raw = (text or "").strip()
+    if not raw:
+        return "未知任务"
+    lower = raw.lower()
+    if "dispatching to agent" in lower or "dispatch complete" in lower:
+        return "未知任务"
+    if "received message from " in lower:
+        return "未知任务"
+    if "feishu[default] dm from " in lower and ": " in raw:
+        raw = raw.split(": ", 1)[1].strip()
+    raw = raw.split('","_meta"', 1)[0].strip()
+    return raw[:120] if raw else "未知任务"
+
+
 def extract_pipeline_marker(line: str) -> str | None:
     """Extract a pipeline progress marker from the runtime logs."""
     marker = "PIPELINE_PROGRESS:"
@@ -571,10 +587,10 @@ def infer_task_channel(session_key: str) -> str:
 
 
 def valid_task_question(text: str | None) -> bool:
-    candidate = (text or "").strip().lower()
-    if not candidate:
+    candidate = normalize_task_question(text)
+    if not candidate or candidate == "未知任务":
         return False
-    return "dispatching to agent" not in candidate
+    return True
 
 
 def write_task_registry_snapshot() -> None:
@@ -605,6 +621,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
     env_id = current_env_spec()["id"]
     question_candidates: list[tuple[int, str]] = []
     open_dispatches: dict[str, dict[str, Any]] = {}
+    touched_task_ids: set[str] = set()
 
     def most_recent_key() -> str | None:
         if not open_dispatches:
@@ -616,8 +633,8 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
         if ts is None:
             continue
 
-        question = extract_runtime_question(line)
-        if question:
+        question = normalize_task_question(extract_runtime_question(line))
+        if question and question != "未知任务":
             question_candidates.append((int(ts), question))
             question_candidates = question_candidates[-50:]
 
@@ -631,11 +648,11 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             requester_open_id = extract_requester_open_id(line)
             session_key = extract_runtime_session_key(line) or requester_open_id or f"dispatch:{ts_raw}"
             existing = STORE.get_latest_task_for_session(session_key)
-            question_text = (
-                nearest_question
-                if valid_task_question(nearest_question)
-                else (existing.get("question", "") if existing and valid_task_question(existing.get("question")) else "未知任务")
-            )
+            question_text = normalize_task_question(nearest_question)
+            if question_text == "未知任务" and existing:
+                question_text = normalize_task_question(
+                    existing.get("last_user_message") or existing.get("question", "")
+                )
             task_id = build_task_id(session_key, ts_raw)
             current_stage = "处理中"
             task = {
@@ -656,6 +673,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             if int(CONFIG.get("TASK_REGISTRY_MAX_ACTIVE", 1)) <= 1:
                 STORE.background_other_tasks_for_session(session_key, task_id)
             STORE.upsert_task(task)
+            touched_task_ids.add(task_id)
             STORE.record_task_event(
                 task_id,
                 "dispatch_started",
@@ -691,6 +709,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 last_progress_at=int(ts),
                 updated_at=int(ts),
             )
+            touched_task_ids.add(dispatch["task_id"])
             STORE.record_task_event(
                 dispatch["task_id"],
                 "stage_progress",
@@ -731,6 +750,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 blocked_reason=blocked_reason,
                 latest_receipt=receipt,
             )
+            touched_task_ids.add(dispatch["task_id"])
             STORE.record_task_event(
                 dispatch["task_id"],
                 "pipeline_receipt",
@@ -754,6 +774,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     updated_at=int(ts),
                     completed_at=int(ts),
                 )
+                touched_task_ids.add(dispatch["task_id"])
                 STORE.record_task_event(
                     dispatch["task_id"],
                     "visible_completion",
@@ -778,6 +799,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 updated_at=int(ts),
                 completed_at=int(ts),
             )
+            touched_task_ids.add(dispatch["task_id"])
             STORE.record_task_event(
                 dispatch["task_id"],
                 "dispatch_complete",
@@ -788,6 +810,8 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "line": line.strip(),
                 },
             )
+    for task_id in touched_task_ids:
+        STORE.repair_task_identity(task_id)
     write_task_registry_snapshot()
 
 

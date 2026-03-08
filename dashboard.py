@@ -191,6 +191,8 @@ def get_task_registry_payload(limit: int = 8) -> dict:
             return "未知任务"
         if "dispatching to agent" in lower:
             return "未知任务"
+        if "received message from " in lower:
+            return "未知任务"
         if " dm from " in lower or "feishu[default] dm from " in lower:
             if ": " in raw:
                 raw = raw.split(": ", 1)[1]
@@ -204,10 +206,18 @@ def get_task_registry_payload(limit: int = 8) -> dict:
         ts = int(task.get("last_progress_at") or 0)
         latest_receipt = task.get("latest_receipt") or {}
         timeline = STORE.list_task_events(task["task_id"], limit=6)
+        question = normalize_question(task.get("question", ""))
+        last_user_message = normalize_question(task.get("last_user_message", ""))
+        if question == "未知任务":
+            fallback = STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
+            question = normalize_question(fallback)
+        if last_user_message == "未知任务":
+            fallback = STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
+            last_user_message = normalize_question(fallback)
         return {
             **task,
-            "question": normalize_question(task.get("question", "")),
-            "last_user_message": normalize_question(task.get("last_user_message", "")),
+            "question": question,
+            "last_user_message": last_user_message,
             "last_progress_label": datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-",
             "receipt_summary": {
                 "agent": latest_receipt.get("agent", "-"),
@@ -231,6 +241,12 @@ def get_task_registry_payload(limit: int = 8) -> dict:
     for task in tasks:
         task["question"] = normalize_question(task.get("question", ""))
         task["last_user_message"] = normalize_question(task.get("last_user_message", ""))
+        if task["question"] == "未知任务":
+            task["question"] = normalize_question(STORE.get_task_question_candidate(task["task_id"]) or "未知任务")
+        if task["last_user_message"] == "未知任务":
+            task["last_user_message"] = normalize_question(
+                STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
+            )
         ts = int(task.get("last_progress_at") or 0)
         task["last_progress_label"] = (
             datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-"

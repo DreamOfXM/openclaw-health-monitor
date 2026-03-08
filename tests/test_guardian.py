@@ -284,6 +284,13 @@ class GuardianProgressPushTests(unittest.TestCase):
             "我再提个需求，就是做一个系统",
         )
 
+    def test_normalize_task_question_rejects_internal_lines(self):
+        self.assertEqual(guardian.normalize_task_question("dispatching to agent (session=abc)"), "未知任务")
+        self.assertEqual(
+            guardian.normalize_task_question("Feishu[default] DM from ou_test: 我再提个需求"),
+            "我再提个需求",
+        )
+
     def test_collect_open_runtime_dispatches_stops_after_visible_completion(self):
         lines = [
             "2026-03-06T05:00:00 dm from tester: 帮我继续处理\n",

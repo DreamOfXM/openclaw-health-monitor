@@ -121,6 +121,62 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(len(events), 2)
             self.assertEqual(events[0]["event_type"], "stage_progress")
 
+    def test_record_task_event_deduplicates_same_second_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "任务A",
+                    "last_user_message": "任务A",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            with unittest.mock.patch("time.time", return_value=100):
+                store.record_task_event("task-1", "dispatch_started", {"question": "任务A"})
+                store.record_task_event("task-1", "dispatch_started", {"question": "任务A"})
+            events = store.list_task_events("task-1", limit=10)
+            self.assertEqual(len(events), 1)
+
+    def test_repair_task_identity_uses_dispatch_started_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "dispatching to agent (session=abc)",
+                    "last_user_message": "dispatching to agent (session=abc)",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            with unittest.mock.patch("time.time", return_value=100):
+                store.record_task_event("task-1", "dispatch_started", {"question": "我再提个需求"})
+
+            repaired = store.repair_task_identity("task-1")
+            task = store.get_task("task-1")
+
+            self.assertTrue(repaired)
+            self.assertEqual(task["question"], "我再提个需求")
+            self.assertEqual(task["last_user_message"], "我再提个需求")
+
 
 if __name__ == "__main__":
     unittest.main()
