@@ -1456,6 +1456,8 @@ def main():
     
     while True:
         try:
+            load_config()
+
             # 系统指标
             metrics = get_system_metrics()
             
