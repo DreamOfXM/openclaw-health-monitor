@@ -180,6 +180,8 @@ def get_task_registry_payload(limit: int = 8) -> dict:
     """Return managed task registry data for dashboard/API consumers."""
     config = load_config()
     enabled = bool(config.get("ENABLE_TASK_REGISTRY", True))
+    selected_env = env_spec(active_env_id(config), config)
+    env_id = selected_env["id"]
     tasks = STORE.list_tasks(limit=limit) if enabled else []
 
     def normalize_question(text: str) -> str:
@@ -196,6 +198,36 @@ def get_task_registry_payload(limit: int = 8) -> dict:
             raw = raw.strip()
         return raw or "未知任务"
 
+    def summarize_task(task: dict | None) -> dict | None:
+        if not task:
+            return None
+        ts = int(task.get("last_progress_at") or 0)
+        latest_receipt = task.get("latest_receipt") or {}
+        timeline = STORE.list_task_events(task["task_id"], limit=6)
+        return {
+            **task,
+            "question": normalize_question(task.get("question", "")),
+            "last_user_message": normalize_question(task.get("last_user_message", "")),
+            "last_progress_label": datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-",
+            "receipt_summary": {
+                "agent": latest_receipt.get("agent", "-"),
+                "phase": latest_receipt.get("phase", "-"),
+                "action": latest_receipt.get("action", "-"),
+                "evidence": latest_receipt.get("evidence", "-"),
+            },
+            "timeline": [
+                {
+                    "event_type": item.get("event_type", ""),
+                    "created_at": item.get("created_at", 0),
+                    "created_label": datetime.fromtimestamp(int(item.get("created_at", 0))).strftime("%m-%d %H:%M:%S")
+                    if item.get("created_at")
+                    else "-",
+                    "payload": item.get("payload", {}),
+                }
+                for item in reversed(timeline)
+            ],
+        }
+
     for task in tasks:
         task["question"] = normalize_question(task.get("question", ""))
         task["last_user_message"] = normalize_question(task.get("last_user_message", ""))
@@ -204,9 +236,12 @@ def get_task_registry_payload(limit: int = 8) -> dict:
             datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-"
         )
     active = [task for task in tasks if task.get("status") in {"running", "blocked", "background"}]
+    current = summarize_task(STORE.get_current_task(env_id=env_id)) if enabled else None
+    summary = STORE.summarize_tasks(env_id=env_id) if enabled else {"total": 0}
     return {
         "enabled": enabled,
-        "current": active[0] if active else (tasks[0] if tasks else None),
+        "summary": summary,
+        "current": current or (summarize_task(active[0]) if active else (summarize_task(tasks[0]) if tasks else None)),
         "tasks": tasks,
     }
 
@@ -1525,14 +1560,21 @@ def index():
                     `;
                     taskListEl.innerHTML = '';
                 } else {
+                    const summary = taskRegistry.summary || {};
+                    const timeline = (currentTask && currentTask.timeline) || [];
+                    const receipt = (currentTask && currentTask.receipt_summary) || {};
                     taskSummaryEl.innerHTML = currentTask ? `
                         <div class="memory-box-title">当前活动任务</div>
                         <div class="memory-box-main">${currentTask.question || '未知任务'}</div>
                         <div class="memory-box-sub">状态: ${currentTask.status} | 阶段: ${currentTask.current_stage} | 会话: ${currentTask.session_key}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">任务总数: ${summary.total || 0} | 运行中: ${summary.running || 0} | 阻塞: ${summary.blocked || 0} | 后台: ${summary.background || 0}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">最近回执: ${receipt.agent || '-'} / ${receipt.phase || '-'} / ${receipt.action || '-'}${receipt.evidence && receipt.evidence !== '-' ? ` | ${receipt.evidence}` : ''}</div>
+                        ${timeline.length ? `<div class="memory-box-sub" style="margin-top:8px;">时间线: ${timeline.map(item => `${item.created_label} ${item.event_type}`).join(' → ')}</div>` : ''}
                     ` : `
                         <div class="memory-box-title">当前活动任务</div>
                         <div class="memory-box-main">暂无活动任务</div>
                         <div class="memory-box-sub">最近没有需要守护跟踪的复杂任务。</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">任务总数: ${summary.total || 0} | 已完成: ${summary.completed || 0} | 无可见回复: ${summary.no_reply || 0}</div>
                     `;
                     const tasks = taskRegistry.tasks || [];
                     taskListEl.innerHTML = tasks.length ? tasks.map(item => `
@@ -1880,6 +1922,16 @@ def api_status():
     return app.response_class(
         response=json.dumps(data, ensure_ascii=False),
         mimetype='application/json'
+    )
+
+
+@app.route("/api/task-registry")
+def api_task_registry():
+    """Return a focused task-registry payload for external consumers."""
+    payload = get_task_registry_payload(limit=20)
+    return app.response_class(
+        response=json.dumps(payload, ensure_ascii=False),
+        mimetype="application/json",
     )
 
 

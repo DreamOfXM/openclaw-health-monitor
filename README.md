@@ -134,6 +134,10 @@ cd ~/openclaw-health-monitor
 
 ## 架构说明
 
+完整架构图与任务状态流转图见：
+
+- [docs/architecture.md](./docs/architecture.md)
+
 ### 核心组件
 
 - `guardian.py`
@@ -300,8 +304,10 @@ Health Monitor 现在还提供一层外挂式任务注册表，不修改 OpenCla
 
 - 注册表属于守护层，不侵入 OpenClaw
 - 默认存储在 `data/monitor.db`
+- 每轮同步后还会额外生成 `data/task-registry-summary.json`
 - 默认开启，可通过 `ENABLE_TASK_REGISTRY` 关闭
-- 当前活动任务和最近任务会展示在 Dashboard 页面中
+- 当前活动任务、最近任务和时间线会展示在 Dashboard 页面中
+- 也可以通过 `/api/task-registry` 获取结构化摘要，而不是只从整包 `/api/status` 中手动拆字段
 
 当前可配置项：
 
@@ -516,6 +522,10 @@ If you only care about daily usage, these are the four commands that matter most
 
 ## Architecture
 
+For the full architecture and task-state diagrams, see:
+
+- [docs/architecture.md](./docs/architecture.md)
+
 ### Core Components
 
 - `guardian.py`
@@ -608,8 +618,10 @@ Key points:
 
 - the registry belongs to the guardian layer, not OpenClaw core
 - it is stored in `data/monitor.db`
+- each sync also writes a compact `data/task-registry-summary.json`
 - it is enabled by default and can be turned off with `ENABLE_TASK_REGISTRY`
-- the current active task and recent tasks are shown in the Dashboard
+- the current active task, recent tasks, and task timeline are shown in the Dashboard
+- external consumers can read `/api/task-registry` instead of scraping the full `/api/status` payload
 
 Current config knobs:
 

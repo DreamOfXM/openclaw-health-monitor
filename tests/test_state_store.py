@@ -69,6 +69,58 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(latest["task_id"], "task-1")
             self.assertEqual(tasks[0]["task_id"], "task-1")
 
+    def test_task_registry_summary_and_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+
+            store.upsert_task(
+                {
+                    "task_id": "task-running",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "DEV_IMPLEMENTING",
+                    "question": "做一个新系统",
+                    "last_user_message": "做一个新系统",
+                    "started_at": 10,
+                    "last_progress_at": 20,
+                    "created_at": 10,
+                    "updated_at": 20,
+                }
+            )
+            store.upsert_task(
+                {
+                    "task_id": "task-completed",
+                    "session_key": "session-b",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "补一个模块",
+                    "last_user_message": "补一个模块",
+                    "started_at": 30,
+                    "last_progress_at": 40,
+                    "created_at": 30,
+                    "updated_at": 40,
+                    "completed_at": 41,
+                }
+            )
+            store.record_task_event("task-running", "dispatch_started", {"question": "做一个新系统"})
+            store.record_task_event("task-running", "stage_progress", {"marker": "DEV_IMPLEMENTING"})
+
+            current = store.get_current_task(env_id="primary")
+            summary = store.summarize_tasks(env_id="primary")
+            events = store.list_task_events("task-running", limit=10)
+
+            self.assertEqual(current["task_id"], "task-running")
+            self.assertEqual(summary["running"], 1)
+            self.assertEqual(summary["completed"], 1)
+            self.assertEqual(summary["total"], 2)
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0]["event_type"], "stage_progress")
+
 
 if __name__ == "__main__":
     unittest.main()

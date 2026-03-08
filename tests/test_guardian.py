@@ -260,6 +260,7 @@ class GuardianProgressPushTests(unittest.TestCase):
 
             with mock.patch.object(guardian, "STORE", store), \
                 mock.patch.object(guardian, "CONFIG", {"ENABLE_TASK_REGISTRY": True}), \
+                mock.patch.object(guardian, "BASE_DIR", base), \
                 mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}):
                 guardian.sync_runtime_task_registry(lines)
 
@@ -269,6 +270,19 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertEqual(tasks[0]["latest_receipt"]["agent"], "dev")
             self.assertEqual(tasks[1]["status"], "completed")
             self.assertEqual(tasks[1]["current_stage"], "已完成")
+            events = store.list_task_events(tasks[0]["task_id"], limit=10)
+            self.assertTrue(any(item["event_type"] == "pipeline_receipt" for item in events))
+            completed_events = store.list_task_events(tasks[1]["task_id"], limit=10)
+            self.assertTrue(any(item["event_type"] == "dispatch_complete" for item in completed_events))
+            summary_file = base / "data" / "task-registry-summary.json"
+            self.assertTrue(summary_file.exists())
+
+    def test_extract_runtime_question_strips_json_runtime_metadata(self):
+        line = '{"0":"{\\"subsystem\\":\\"gateway/channels/feishu\\"}","1":"Feishu[default] DM from ou_test: 我再提个需求，就是做一个系统","_meta":{"runtime":"node"}}'
+        self.assertEqual(
+            guardian.extract_runtime_question(line),
+            "我再提个需求，就是做一个系统",
+        )
 
     def test_collect_open_runtime_dispatches_stops_after_visible_completion(self):
         lines = [

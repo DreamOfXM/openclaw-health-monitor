@@ -14,6 +14,7 @@ import subprocess
 import threading
 import resource
 import hashlib
+import re
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -365,6 +366,16 @@ def parse_runtime_timestamp(line: str) -> tuple[str, float | None]:
 
 def extract_runtime_question(line: str) -> str | None:
     """Extract a user-visible question from runtime logs when possible."""
+    sanitized = line
+    lower_line = line.lower()
+    if '"feishu[default] dm from ' in lower_line or '"feishu[default]:' in lower_line:
+        if "Feishu[default]" in line and ": " in line:
+            sanitized = line.split(": ", 1)[1]
+            sanitized = sanitized.split('","_meta"', 1)[0]
+            sanitized = sanitized.split('"}', 1)[0]
+            sanitized = sanitized.strip()
+            if sanitized:
+                return sanitized[:80]
     lower = line.lower()
     ignore = (
         "dispatching to agent",
@@ -377,18 +388,19 @@ def extract_runtime_question(line: str) -> str | None:
     )
     if any(marker in lower for marker in ignore):
         return None
-    if " dm from " in lower and ": " in line:
-        idx = line.find(": ")
+    sanitized_lower = sanitized.lower()
+    if " dm from " in sanitized_lower and ": " in sanitized:
+        idx = sanitized.find(": ")
         if idx > 0:
-            return line[idx + 2 :].strip()[:80]
-    if "message in" in lower and ": " in line:
-        idx = line.find(": ")
+            return sanitized[idx + 2 :].strip()[:80]
+    if "message in" in sanitized_lower and ": " in sanitized:
+        idx = sanitized.find(": ")
         if idx > 0:
-            return line[idx + 2 :].strip()[:80]
-    if "feishu[default]:" in lower and ": " in line:
-        idx = line.find(": ")
+            return sanitized[idx + 2 :].strip()[:80]
+    if "feishu[default]:" in sanitized_lower and ": " in sanitized:
+        idx = sanitized.find(": ")
         if idx > 0:
-            return line[idx + 2 :].strip()[:80]
+            return sanitized[idx + 2 :].strip()[:80]
     return None
 
 
@@ -565,6 +577,26 @@ def valid_task_question(text: str | None) -> bool:
     return "dispatching to agent" not in candidate
 
 
+def write_task_registry_snapshot() -> None:
+    """Persist a compact task-registry summary for external consumers."""
+    if not CONFIG.get("ENABLE_TASK_REGISTRY", True):
+        return
+    env_id = current_env_spec()["id"]
+    current = STORE.get_current_task(env_id=env_id)
+    tasks = STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100)))
+    filtered = [task for task in tasks if task.get("env_id") == env_id]
+    payload = {
+        "generated_at": int(time.time()),
+        "env_id": env_id,
+        "summary": STORE.summarize_tasks(env_id=env_id),
+        "current": current,
+        "tasks": filtered[:20],
+    }
+    output = BASE_DIR / "data" / "task-registry-summary.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def sync_runtime_task_registry(lines: list[str]) -> None:
     """Project runtime log activity into a persistent task registry."""
     if not CONFIG.get("ENABLE_TASK_REGISTRY", True):
@@ -624,6 +656,17 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             if int(CONFIG.get("TASK_REGISTRY_MAX_ACTIVE", 1)) <= 1:
                 STORE.background_other_tasks_for_session(session_key, task_id)
             STORE.upsert_task(task)
+            STORE.record_task_event(
+                task_id,
+                "dispatch_started",
+                {
+                    "session_key": session_key,
+                    "question": question_text,
+                    "channel": task["channel"],
+                    "timestamp": ts_raw,
+                    "env_id": env_id,
+                },
+            )
             open_dispatches[session_key] = {
                 **task,
                 "timestamp": ts_raw,
@@ -647,6 +690,15 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 current_stage=dispatch["current_stage"],
                 last_progress_at=int(ts),
                 updated_at=int(ts),
+            )
+            STORE.record_task_event(
+                dispatch["task_id"],
+                "stage_progress",
+                {
+                    "marker": marker,
+                    "stage": dispatch["current_stage"],
+                    "timestamp": ts_raw,
+                },
             )
             continue
 
@@ -679,6 +731,16 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 blocked_reason=blocked_reason,
                 latest_receipt=receipt,
             )
+            STORE.record_task_event(
+                dispatch["task_id"],
+                "pipeline_receipt",
+                {
+                    "receipt": receipt,
+                    "status": status,
+                    "stage": dispatch["current_stage"],
+                    "timestamp": ts_raw,
+                },
+            )
             continue
 
         if is_visible_completion_message(line) and open_dispatches:
@@ -691,6 +753,11 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     current_stage="已完成",
                     updated_at=int(ts),
                     completed_at=int(ts),
+                )
+                STORE.record_task_event(
+                    dispatch["task_id"],
+                    "visible_completion",
+                    {"timestamp": ts_raw, "message": line.strip()},
                 )
             continue
 
@@ -711,6 +778,17 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 updated_at=int(ts),
                 completed_at=int(ts),
             )
+            STORE.record_task_event(
+                dispatch["task_id"],
+                "dispatch_complete",
+                {
+                    "timestamp": ts_raw,
+                    "status": status,
+                    "stage": stage,
+                    "line": line.strip(),
+                },
+            )
+    write_task_registry_snapshot()
 
 
 

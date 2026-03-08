@@ -329,6 +329,78 @@ class MonitorStateStore:
     def list_active_tasks(self, *, limit: int = 10) -> list[dict[str, Any]]:
         return self.list_tasks(limit=limit, statuses=["running", "blocked", "background"])
 
+    def list_task_events(self, task_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_type, payload_json, created_at
+                FROM task_events
+                WHERE task_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (task_id, limit),
+            ).fetchall()
+        return [
+            {
+                "event_type": row["event_type"],
+                "payload": json.loads(row["payload_json"] or "{}"),
+                "created_at": int(row["created_at"] or 0),
+            }
+            for row in rows
+        ]
+
+    def get_current_task(self, *, env_id: str | None = None) -> dict[str, Any] | None:
+        query = """
+            SELECT * FROM managed_tasks
+            WHERE status IN ('running', 'blocked', 'background')
+        """
+        params: list[Any] = []
+        if env_id:
+            query += " AND env_id = ?"
+            params.append(env_id)
+        query += """
+            ORDER BY
+                CASE status
+                    WHEN 'running' THEN 0
+                    WHEN 'blocked' THEN 1
+                    WHEN 'background' THEN 2
+                    ELSE 3
+                END,
+                updated_at DESC,
+                created_at DESC
+            LIMIT 1
+        """
+        with self._connection() as conn:
+            row = conn.execute(query, params).fetchone()
+        return self._row_to_task(row)
+
+    def summarize_tasks(self, *, env_id: str | None = None) -> dict[str, Any]:
+        query = """
+            SELECT status, COUNT(*) AS cnt
+            FROM managed_tasks
+        """
+        params: list[Any] = []
+        if env_id:
+            query += " WHERE env_id = ?"
+            params.append(env_id)
+        query += " GROUP BY status"
+        counts = {
+            "running": 0,
+            "blocked": 0,
+            "background": 0,
+            "completed": 0,
+            "no_reply": 0,
+        }
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        for row in rows:
+            status = str(row["status"] or "")
+            if status in counts:
+                counts[status] = int(row["cnt"] or 0)
+        counts["total"] = sum(counts.values())
+        return counts
+
     def background_other_tasks_for_session(self, session_key: str, keep_task_id: str) -> None:
         now = int(time.time())
         with self._connection() as conn:

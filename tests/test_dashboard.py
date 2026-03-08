@@ -1,8 +1,10 @@
 import unittest
 from unittest import mock
 from pathlib import Path
+import tempfile
 
 import dashboard
+from state_store import MonitorStateStore
 
 
 class DashboardMemoryTests(unittest.TestCase):
@@ -90,6 +92,42 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(envs[1]["id"], "official")
         self.assertFalse(envs[1]["active"])
         self.assertFalse(envs[1]["running"])
+
+    def test_get_task_registry_payload_includes_summary_and_timeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(Path(base))
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "DEV_IMPLEMENTING",
+                    "question": "帮我做一个系统",
+                    "last_user_message": "帮我做一个系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "latest_receipt": {"agent": "dev", "phase": "implementation", "action": "started"},
+                }
+            )
+            store.record_task_event("task-1", "dispatch_started", {"question": "帮我做一个系统"})
+            store.record_task_event("task-1", "stage_progress", {"marker": "DEV_IMPLEMENTING"})
+
+            with mock.patch.object(dashboard, "STORE", store), \
+                mock.patch.object(dashboard, "load_config", return_value={"ENABLE_TASK_REGISTRY": True}), \
+                mock.patch.object(dashboard, "active_env_id", return_value="primary"), \
+                mock.patch.object(dashboard, "env_spec", return_value={"id": "primary"}):
+                payload = dashboard.get_task_registry_payload(limit=5)
+
+            self.assertTrue(payload["enabled"])
+            self.assertEqual(payload["summary"]["running"], 1)
+            self.assertEqual(payload["current"]["task_id"], "task-1")
+            self.assertEqual(payload["current"]["receipt_summary"]["agent"], "dev")
+            self.assertEqual(len(payload["current"]["timeline"]), 2)
 
 
 if __name__ == "__main__":
