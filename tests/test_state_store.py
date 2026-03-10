@@ -358,6 +358,10 @@ class StateStoreTests(unittest.TestCase):
             strong = store.derive_task_control_state("task-strong")
             self.assertEqual(strong["evidence_level"], "strong")
             self.assertEqual(strong["control_state"], "dev_running")
+            self.assertIn("protocol", strong)
+            self.assertEqual(strong["protocol"]["request"], "seen")
+            self.assertEqual(strong["protocol"]["confirmed"], "seen")
+            self.assertIn("evidence_summary", strong)
 
     def test_derive_task_control_state_marks_missing_receipt_block(self):
         with tempfile.TemporaryDirectory() as tmp:

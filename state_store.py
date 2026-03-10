@@ -1069,14 +1069,29 @@ class MonitorStateStore:
         contract_id = str(contract.get("id") or "single_agent")
         phase_statuses = self._build_contract_phase_statuses(contract_id, flags, seen_receipts)
         claim_level = self._summarize_claim_level(control_state, evidence_level, missing_receipts)
+        protocol_status = {
+            "request": "seen" if (flags["dispatch_started"] or flags["dispatch_completed"] or bool(task.get("question"))) else "missing",
+            "confirmed": "seen" if (flags["pipeline_progress"] or flags["pipeline_receipt"] or bool(latest_receipt)) else "missing",
+            "final": "seen" if control_state == "completed_verified" or flags["visible_completion"] else "missing",
+            "blocked": "seen" if control_state.startswith("blocked") or control_state.endswith("_blocked") else "missing",
+            "ack_id": str((latest_receipt or {}).get("ack_id") or task.get("task_id") or ""),
+        }
+        evidence_summary = (
+            f"evidence={evidence_level}; claim={claim_level}; missing_receipts={','.join(missing_receipts) if missing_receipts else 'none'}; "
+            f"next_actor={next_actor or '-'}; action={next_action}"
+        )
+        action_reason = approved_summary
 
         return {
             "evidence_level": evidence_level,
+            "evidence_summary": evidence_summary,
             "control_state": control_state,
             "approved_summary": approved_summary,
             "next_action": next_action,
             "next_actor": next_actor,
+            "action_reason": action_reason,
             "claim_level": claim_level,
+            "protocol": protocol_status,
             "contract": contract,
             "missing_receipts": missing_receipts,
             "control_action": self.get_open_control_action(task_id),

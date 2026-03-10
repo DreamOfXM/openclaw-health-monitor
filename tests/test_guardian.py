@@ -126,6 +126,57 @@ class GuardianProgressPushTests(unittest.TestCase):
             "model_unavailable",
         )
 
+    def test_restart_gateway_official_stops_primary_and_official_before_start(self):
+        calls = []
+
+        def fake_run_args(args, timeout=None):
+            calls.append((list(args), timeout))
+            if args[0] == str(guardian.OFFICIAL_MANAGER) and args[1] == "start":
+                return (0, "started", "")
+            return (0, "", "")
+
+        with mock.patch.object(guardian, "current_env_spec", return_value={"id": "official"}), \
+            mock.patch.object(guardian, "run_args", side_effect=fake_run_args), \
+            mock.patch.object(guardian, "check_gateway_health", return_value=True), \
+            mock.patch.object(guardian, "log"):
+            ok = guardian.restart_gateway()
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            [call[0] for call in calls[:3]],
+            [
+                [str(guardian.DESKTOP_RUNTIME), "stop", "gateway"],
+                [str(guardian.OFFICIAL_MANAGER), "stop"],
+                [str(guardian.OFFICIAL_MANAGER), "start"],
+            ],
+        )
+
+    def test_restart_gateway_primary_stops_official_before_starting_active_gateway(self):
+        calls = []
+
+        def fake_run_args(args, timeout=None):
+            calls.append((list(args), timeout))
+            if args[0] == str(guardian.DESKTOP_RUNTIME) and args[1:] == ["start", "gateway"]:
+                return (0, "started", "")
+            return (0, "", "")
+
+        with mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+            mock.patch.object(guardian, "run_args", side_effect=fake_run_args), \
+            mock.patch.object(guardian, "check_gateway_health", return_value=True), \
+            mock.patch.object(guardian.time, "sleep"), \
+            mock.patch.object(guardian, "log"):
+            ok = guardian.restart_gateway()
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            [call[0] for call in calls[:3]],
+            [
+                [str(guardian.OFFICIAL_MANAGER), "stop"],
+                [str(guardian.DESKTOP_RUNTIME), "stop", "gateway"],
+                [str(guardian.DESKTOP_RUNTIME), "start", "gateway"],
+            ],
+        )
+
     def test_push_runtime_progress_updates_prefers_guardian_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -842,6 +893,56 @@ class GuardianProgressPushTests(unittest.TestCase):
             learning = store.get_learning("lk-1")
             self.assertEqual(learning["status"], "promoted")
             self.assertEqual(learning["promoted_target"], "contract")
+
+    def test_write_task_registry_snapshot_exports_shared_state_and_memory_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "DEV_IMPLEMENTING",
+                    "question": "做一个系统",
+                    "last_user_message": "做一个系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "latest_receipt": {"agent": "dev", "phase": "implementation", "action": "started", "ack_id": "ack-1"},
+                }
+            )
+            store.upsert_task_contract(
+                "task-1",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"],
+                },
+            )
+            store.record_task_event("task-1", "dispatch_started", {"question": "做一个系统"})
+            store.record_task_event("task-1", "pipeline_receipt", {"receipt": {"agent": "dev", "phase": "implementation", "action": "started", "ack_id": "ack-1"}})
+            store.upsert_learning(
+                learning_key="lk-export",
+                env_id="primary",
+                task_id="task-1",
+                category="control_plane",
+                title="缺少回执",
+                detail="task missing ack",
+                evidence={"task_id": "task-1"},
+            )
+            with mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+                mock.patch.object(guardian, "get_system_metrics", return_value={"cpu": 1.0, "mem_used": 1.0, "mem_total": 8.0}), \
+                mock.patch.object(guardian, "check_process_running", return_value=True), \
+                mock.patch.object(guardian, "check_gateway_health", return_value=True):
+                guardian.write_task_registry_snapshot()
+            self.assertTrue((base / "data" / "shared-state" / "runtime-health.json").exists())
+            self.assertTrue((base / ".learnings" / "ERRORS.md").exists())
+            self.assertTrue((base / "MEMORY.md").exists())
 
 
 if __name__ == "__main__":

@@ -565,7 +565,7 @@ case "${1:-}" in
         ;;
     start)
         case "${2:-}" in
-            gateway) start_gateway ;;
+            gateway) start_active_gateway ;;
             guardian) start_guardian ;;
             dashboard) start_dashboard ;;
             all) start_all ;;

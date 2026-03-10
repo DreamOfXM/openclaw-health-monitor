@@ -135,6 +135,4 @@ def infer_task_contract(
 
     if best:
         return best[1]
-    if existing_contract_id:
-        return get_contract_by_id(catalog, existing_contract_id)
     return get_contract_by_id(catalog, None)

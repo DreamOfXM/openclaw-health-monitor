@@ -14,6 +14,7 @@ import subprocess
 import threading
 import resource
 import hashlib
+import shlex
 import re
 import urllib.request
 from datetime import datetime
@@ -86,6 +87,15 @@ def current_env_spec() -> dict[str, Any]:
     }
 
 
+def snapshot_targets() -> list[tuple[str, SnapshotManager]]:
+    primary_home = Path(str(CONFIG.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
+    official_home = Path(str(CONFIG.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official"))))
+    return [
+        ("primary", SnapshotManager(BASE_DIR, primary_home)),
+        ("official", SnapshotManager(BASE_DIR, official_home)),
+    ]
+
+
 def current_gateway_log() -> Path:
     return current_env_spec()["home"] / "logs" / "gateway.log"
 
@@ -139,15 +149,33 @@ def run_cmd(cmd: str) -> tuple:
         return -1, "", str(e)
 
 
-def run_args(args: list[str], timeout: int = 30) -> tuple[int, str, str]:
+def run_args(
+    args: list[str], timeout: int = 30, env: Optional[Dict[str, str]] = None
+) -> tuple[int, str, str]:
     """Run a subprocess without going through a shell."""
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
         return -1, "", "timeout"
     except Exception as e:
         return -1, "", str(e)
+
+
+def openclaw_runtime_env() -> Dict[str, str]:
+    """Build a subprocess env pinned to the active OpenClaw environment."""
+    spec = current_env_spec()
+    env = os.environ.copy()
+    env["OPENCLAW_STATE_DIR"] = str(spec["home"])
+    env["OPENCLAW_CONFIG_PATH"] = str(spec["home"] / "openclaw.json")
+    env["OPENCLAW_GATEWAY_PORT"] = str(spec["port"])
+    return env
 
 
 def get_process_info(name: str) -> Optional[Dict]:
@@ -687,10 +715,13 @@ def write_task_registry_snapshot() -> None:
             "current_stage": facts_current.get("current_stage") if facts_current else None,
             "approved_summary": (facts_current or {}).get("control", {}).get("approved_summary"),
             "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
+            "evidence_summary": (facts_current or {}).get("control", {}).get("evidence_summary"),
             "control_state": (facts_current or {}).get("control", {}).get("control_state"),
             "next_action": (facts_current or {}).get("control", {}).get("next_action"),
             "next_actor": (facts_current or {}).get("control", {}).get("next_actor"),
+            "action_reason": (facts_current or {}).get("control", {}).get("action_reason"),
             "claim_level": (facts_current or {}).get("control", {}).get("claim_level"),
+            "protocol": (facts_current or {}).get("control", {}).get("protocol") or {},
             "contract_id": ((facts_current or {}).get("control", {}).get("contract") or {}).get("id"),
             "missing_receipts": (facts_current or {}).get("control", {}).get("missing_receipts") or [],
             "control_action": (facts_current or {}).get("control", {}).get("control_action"),
@@ -706,6 +737,72 @@ def write_task_registry_snapshot() -> None:
     )
     (data_dir / "current-task-facts.json").write_text(
         json.dumps(facts_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    shared_dir = data_dir / "shared-state"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    control_plane = STORE.summarize_control_plane(env_id=env_id)
+    try:
+        gateway_running = check_process_running()
+    except Exception:
+        gateway_running = False
+    try:
+        gateway_healthy = check_gateway_health()
+    except Exception:
+        gateway_healthy = False
+    runtime_health = {
+        "generated_at": int(time.time()),
+        "env_id": env_id,
+        "metrics": get_system_metrics(),
+        "gateway_running": gateway_running,
+        "gateway_healthy": gateway_healthy,
+    }
+    learning_backlog = {
+        "generated_at": int(time.time()),
+        "summary": STORE.summarize_learnings(),
+        "learnings": STORE.list_learnings(statuses=["pending", "reviewed", "promoted"], limit=50),
+        "reflections": STORE.list_reflection_runs(limit=20),
+    }
+    (shared_dir / "task-registry-snapshot.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "control-action-queue.json").write_text(
+        json.dumps(payload.get("control_queue") or [], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "runtime-health.json").write_text(
+        json.dumps(runtime_health, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "learning-backlog.json").write_text(
+        json.dumps(learning_backlog, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "control-plane-summary.json").write_text(
+        json.dumps(control_plane, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    learnings_dir = BASE_DIR / ".learnings"
+    learnings_dir.mkdir(parents=True, exist_ok=True)
+    learnings = STORE.list_learnings(limit=200)
+    errors_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("status")) != "promoted"]
+    promoted_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("status")) == "promoted"]
+    feature_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("category")) == "feature_request"]
+    (learnings_dir / "ERRORS.md").write_text("# Errors\n\n" + ("\n".join(errors_lines) if errors_lines else "- 暂无待处理错误模式\n"), encoding="utf-8")
+    (learnings_dir / "LEARNINGS.md").write_text("# Learnings\n\n" + ("\n".join(promoted_lines or errors_lines[:20]) if (promoted_lines or errors_lines) else "- 暂无学习记录\n"), encoding="utf-8")
+    (learnings_dir / "FEATURE_REQUESTS.md").write_text("# Feature Requests\n\n" + ("\n".join(feature_lines) if feature_lines else "- 暂无 feature requests\n"), encoding="utf-8")
+    memory_dir = BASE_DIR / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    memory_body = "# Daily Memory\n\n" + json.dumps({"reflection_runs": learning_backlog["reflections"][:5], "summary": learning_backlog["summary"]}, ensure_ascii=False, indent=2)
+    (memory_dir / f"{today}.md").write_text(memory_body + "\n", encoding="utf-8")
+    (BASE_DIR / "MEMORY.md").write_text(
+        "# Monitor Memory\n\n"
+        f"- env: {env_id}\n"
+        f"- current_task: {(facts_payload.get('current_task') or {}).get('task_id') or '-'}\n"
+        f"- learning_total: {learning_backlog['summary'].get('total', 0)}\n"
+        f"- promoted: {learning_backlog['summary'].get('promoted', 0)}\n",
         encoding="utf-8",
     )
 
@@ -1094,7 +1191,7 @@ def send_guardian_followup(
         args.append("--deliver")
 
     timeout = int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120)) + 30
-    code, stdout, stderr = run_args(args, timeout=timeout)
+    code, stdout, stderr = run_args(args, timeout=timeout, env=openclaw_runtime_env())
     if code == 0:
         log(f"守护追问已发送到会话 {session_key}: {message}")
         return True, None
@@ -1112,8 +1209,10 @@ def send_feishu_progress_push(open_id: str, message: str) -> bool:
     if not open_id:
         return False
     target = open_id if ":" in open_id else f"user:{open_id}"
+    quoted_target = json.dumps(target, ensure_ascii=False)
+    quoted_message = json.dumps(message, ensure_ascii=False)
     code, _, stderr = run_cmd(
-        f'openclaw message send --channel feishu --target "{target}" --message "{message.replace(chr(34), chr(39))}"'
+        f"openclaw message send --channel feishu --target {quoted_target} --message {quoted_message}"
     )
     if code == 0:
         log(f"进度推送已发送到 {target}: {message}")
@@ -2071,6 +2170,8 @@ def restart_gateway():
     log(f"尝试重启 Gateway ({spec['id']})...")
 
     if spec["id"] == "official":
+        run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+        run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
         code, stdout, stderr = run_args([str(OFFICIAL_MANAGER), "start"], timeout=300)
         if code == 0 and check_gateway_health():
             log("官方验证版 Gateway 重启成功")
@@ -2078,6 +2179,7 @@ def restart_gateway():
         log(f"官方验证版 Gateway 重启失败: {(stderr or stdout).strip()}", "ERROR")
         return False
 
+    run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
     run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
     code, stdout, stderr = run_args([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
@@ -2201,15 +2303,19 @@ def save_stable_version():
 
 
 def capture_snapshot(label: str) -> bool:
-    """为当前 OpenClaw 关键配置创建快照。"""
+    """为 primary/official OpenClaw 关键配置创建快照。"""
     if not CONFIG.get("ENABLE_SNAPSHOT_RECOVERY", True):
         return False
-    snapshot_dir = SNAPSHOTS.create_snapshot(label)
-    if snapshot_dir is None:
-        return False
+    created: list[str] = []
     keep = int(CONFIG.get("SNAPSHOT_RETENTION", 10))
-    SNAPSHOTS.prune(keep)
-    record_change_log("snapshot", f"创建配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
+    for env_id, manager in snapshot_targets():
+        snapshot_dir = manager.create_snapshot(f"{label}-{env_id}")
+        manager.prune(keep)
+        if snapshot_dir is not None:
+            created.append(snapshot_dir.name)
+    if not created:
+        return False
+    record_change_log("snapshot", "创建配置快照", {"snapshots": created})
     return True
 
 

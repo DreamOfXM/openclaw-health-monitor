@@ -209,3 +209,8 @@ Health Monitor is responsible for:
 - operator visibility
 
 This separation is what allows Health Monitor to remain robust while OpenClaw itself continues to upgrade upstream.
+
+## 11. Related Design Docs
+
+- `docs/architecture-official-promotion.md`
+  - controlled promotion of validated `official` into stable `primary`

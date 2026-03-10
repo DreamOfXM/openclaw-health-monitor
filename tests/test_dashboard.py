@@ -108,9 +108,48 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertTrue(envs[0]["running"])
         self.assertTrue(envs[0]["healthy"])
         self.assertTrue(envs[0]["control_ui_ready"])
+        self.assertEqual(envs[0]["listener_pid"], 1111)
         self.assertEqual(envs[1]["id"], "official")
         self.assertFalse(envs[1]["active"])
         self.assertFalse(envs[1]["running"])
+
+    def test_detect_environment_inconsistencies_reports_dual_listener(self):
+        envs = [
+            {"id": "primary", "active": True, "running": True},
+            {"id": "official", "active": False, "running": True},
+        ]
+        issues = dashboard.detect_environment_inconsistencies(envs, "primary")
+        codes = {item["code"] for item in issues}
+        self.assertIn("dual_listener", codes)
+        self.assertIn("official_running_while_primary_active", codes)
+
+    def test_build_model_failure_summary_classifies_auth_failure(self):
+        summary = dashboard.build_model_failure_summary(
+            [{"time": "11:00:00", "message": "provider 401 oauth token refresh failed"}],
+            [],
+        )
+        self.assertEqual(summary["primary_type"], "auth_failure")
+
+    def test_build_context_lifecycle_readiness_reports_missing_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / ".openclaw"
+            code = Path(tmp) / "code"
+            home.mkdir(parents=True)
+            code.mkdir(parents=True)
+            (home / "openclaw.json").write_text(json.dumps({"session": {"resetOnExit": False}}), encoding="utf-8")
+            readiness = dashboard.build_context_lifecycle_readiness(
+                {
+                    "ACTIVE_OPENCLAW_ENV": "primary",
+                    "OPENCLAW_HOME": str(home),
+                    "OPENCLAW_CODE": str(code),
+                    "GATEWAY_PORT": 18789,
+                    "OPENCLAW_OFFICIAL_STATE": str(home.parent / ".openclaw-official"),
+                    "OPENCLAW_OFFICIAL_CODE": str(code.parent / "official-code"),
+                    "OPENCLAW_OFFICIAL_PORT": 19021,
+                }
+            )
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(len(readiness["checks"]), 4)
 
     @mock.patch("dashboard.check_gateway_health_for_env")
     @mock.patch("dashboard.env_has_control_ui_assets")
@@ -360,6 +399,14 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["reflections"][0]["summary"]["promoted"], 1)
             self.assertEqual(payload["suggestions"][0]["title"], "缺少回执")
 
+    def test_api_shared_state_exposes_normalized_objects(self):
+        with mock.patch.object(dashboard, "build_shared_state_snapshot", return_value={"runtime_health": {}, "learning_backlog": {}}):
+            with dashboard.app.test_client() as client:
+                response = client.get("/api/shared-state")
+        payload = response.get_json()
+        self.assertIn("runtime_health", payload)
+        self.assertIn("learning_backlog", payload)
+
     def test_get_control_plane_overview_reports_recoverable_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -464,6 +511,125 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(message, "started")
         self.assertEqual(save_config.call_count, 1)
         self.assertEqual(store.save_runtime_value.call_args.args[1]["env_id"], "primary")
+
+    @mock.patch("dashboard.wait_for_env_listener")
+    @mock.patch("dashboard.run_script")
+    @mock.patch("dashboard.get_listener_pid")
+    def test_restart_active_openclaw_environment_restarts_official_only(
+        self,
+        get_listener_pid,
+        run_script,
+        wait_for_env_listener,
+    ):
+        run_script.side_effect = [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "official started", ""),
+        ]
+        get_listener_pid.side_effect = [2222, 3333]
+        wait_for_env_listener.return_value = True
+
+        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "official"}):
+            ok, message, old_pid, new_pid, env_id = dashboard.restart_active_openclaw_environment()
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "official started")
+        self.assertEqual(old_pid, "2222")
+        self.assertEqual(new_pid, "3333")
+        self.assertEqual(env_id, "official")
+        self.assertEqual(
+            [call.args[0] for call in run_script.call_args_list],
+            [
+                [str(dashboard.OFFICIAL_MANAGER), "stop"],
+                [str(dashboard.DESKTOP_RUNTIME), "stop", "gateway"],
+                [str(dashboard.OFFICIAL_MANAGER), "start"],
+            ],
+        )
+        wait_for_env_listener.assert_called_once_with("official")
+
+    @mock.patch("dashboard.wait_for_env_listener")
+    @mock.patch("dashboard.run_script")
+    @mock.patch("dashboard.get_listener_pid")
+    def test_restart_active_openclaw_environment_restarts_primary_only(
+        self,
+        get_listener_pid,
+        run_script,
+        wait_for_env_listener,
+    ):
+        run_script.side_effect = [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "primary started", ""),
+        ]
+        get_listener_pid.side_effect = [1111, 4444]
+        wait_for_env_listener.return_value = True
+
+        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"}):
+            ok, message, old_pid, new_pid, env_id = dashboard.restart_active_openclaw_environment()
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "primary started")
+        self.assertEqual(old_pid, "1111")
+        self.assertEqual(new_pid, "4444")
+        self.assertEqual(env_id, "primary")
+        self.assertEqual(
+            [call.args[0] for call in run_script.call_args_list],
+            [
+                [str(dashboard.OFFICIAL_MANAGER), "stop"],
+                [str(dashboard.DESKTOP_RUNTIME), "stop", "gateway"],
+                [str(dashboard.DESKTOP_RUNTIME), "start", "gateway"],
+            ],
+        )
+        wait_for_env_listener.assert_called_once_with("primary")
+
+    @mock.patch("dashboard.record_change")
+    @mock.patch("dashboard.PromotionController")
+    @mock.patch("dashboard.get_task_registry_payload")
+    @mock.patch("dashboard.list_openclaw_environments")
+    @mock.patch("dashboard.load_config")
+    def test_execute_official_promotion_records_success(
+        self,
+        load_config,
+        list_openclaw_environments,
+        get_task_registry_payload,
+        promotion_controller,
+        record_change,
+    ):
+        load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "official"}
+        list_openclaw_environments.return_value = [{"id": "primary"}, {"id": "official"}]
+        get_task_registry_payload.return_value = {"summary": {"blocked": 0}}
+        controller = promotion_controller.return_value
+        controller.run.return_value = {
+            "status": "promoted",
+            "preflight": {"primary_git_head": "aaa111", "official_git_head": "bbb222"},
+            "backups": {"primary": "snap-a", "official": "snap-b"},
+        }
+
+        result = dashboard.execute_official_promotion()
+
+        self.assertEqual(result["status"], "promoted")
+        record_change.assert_called_once()
+        self.assertIn("官方验证版晋升为当前主用版", record_change.call_args.args[1])
+
+    @mock.patch("dashboard.execute_official_promotion")
+    def test_api_promote_environment_returns_preflight_failure_message(self, execute_official_promotion):
+        execute_official_promotion.return_value = {
+            "status": "failed_preflight",
+            "preflight": {
+                "checks": [
+                    {"name": "official_running", "ok": False, "detail": "官方验证环境未运行"},
+                    {"name": "blocked_tasks", "ok": True, "detail": "没有阻塞任务"},
+                ]
+            },
+        }
+
+        with dashboard.app.test_client() as client:
+            response = client.post("/api/environments/promote", json={"source_env": "official", "target_env": "primary"})
+
+        payload = response.get_json()
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["status"], "failed_preflight")
+        self.assertIn("官方验证环境未运行", payload["message"])
 
 
 if __name__ == "__main__":

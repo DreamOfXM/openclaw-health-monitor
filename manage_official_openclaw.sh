@@ -317,7 +317,7 @@ prepare_official() {
 }
 
 start_official() {
-    local repo state port pid node_bin
+    local repo state port pid node_bin shell_cmd
     bootstrap_env
     repo="$(official_code)"
     state="$(official_state)"
@@ -343,6 +343,7 @@ start_official() {
 
     : > "$OFFICIAL_LOG_FILE"
     mkdir -p "$HOME/Library/LaunchAgents"
+    shell_cmd="set -a; if [ -f '${state}/.env' ]; then . '${state}/.env'; fi; set +a; exec '${node_bin:-node}' '${repo}/openclaw.mjs' gateway --bind loopback --port '${port}'"
     cat > "$OFFICIAL_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -352,13 +353,9 @@ start_official() {
   <string>${OFFICIAL_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${node_bin:-node}</string>
-    <string>${repo}/openclaw.mjs</string>
-    <string>gateway</string>
-    <string>--bind</string>
-    <string>loopback</string>
-    <string>--port</string>
-    <string>${port}</string>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>${shell_cmd}</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${repo}</string>
