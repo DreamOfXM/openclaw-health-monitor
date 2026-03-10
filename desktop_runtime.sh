@@ -9,6 +9,7 @@ DASHBOARD_PID_FILE="$LOG_DIR/dashboard.pid"
 GATEWAY_PID_FILE="$LOG_DIR/gateway.pid"
 TRACKED_CONFIG="$BASE_DIR/config.conf"
 LOCAL_CONFIG="$BASE_DIR/config.local.conf"
+OFFICIAL_MANAGER="$BASE_DIR/manage_official_openclaw.sh"
 LAUNCH_DOMAIN="gui/$(id -u)"
 GUARDIAN_LABEL="ai.openclaw.guardian"
 DASHBOARD_LABEL="ai.openclaw.dashboard"
@@ -212,6 +213,16 @@ gateway_workdir() {
     local value
     value="$(config_value OPENCLAW_CODE)"
     printf '%s\n' "${value:-$HOME/openclaw-workspace/openclaw}"
+}
+
+active_openclaw_env() {
+    local value
+    value="$(config_value ACTIVE_OPENCLAW_ENV)"
+    value="${value:-primary}"
+    if [ "$value" != "official" ]; then
+        value="primary"
+    fi
+    printf '%s\n' "$value"
 }
 
 listener_pid() {
@@ -500,10 +511,36 @@ stop_gateway() {
     rm -f "$GATEWAY_PID_FILE"
 }
 
+start_active_gateway() {
+    local active_env
+    active_env="$(active_openclaw_env)"
+    if [ "$active_env" = "official" ]; then
+        stop_gateway || true
+        if [ -x "$OFFICIAL_MANAGER" ]; then
+            "$OFFICIAL_MANAGER" start >/dev/null
+            return 0
+        fi
+        echo "Missing official manager: $OFFICIAL_MANAGER" >&2
+        return 1
+    fi
+
+    if [ -x "$OFFICIAL_MANAGER" ]; then
+        "$OFFICIAL_MANAGER" stop >/dev/null 2>&1 || true
+    fi
+    start_gateway >/dev/null
+}
+
+stop_all_gateways() {
+    stop_gateway || true
+    if [ -x "$OFFICIAL_MANAGER" ]; then
+        "$OFFICIAL_MANAGER" stop >/dev/null 2>&1 || true
+    fi
+}
+
 start_all() {
     bootstrap_env
     raise_nofile_limit
-    start_gateway >/dev/null
+    start_active_gateway
     start_guardian >/dev/null
     start_dashboard >/dev/null
 }
@@ -511,7 +548,7 @@ start_all() {
 stop_all() {
     stop_dashboard || true
     stop_guardian || true
-    stop_gateway || true
+    stop_all_gateways
 }
 
 status_json() {

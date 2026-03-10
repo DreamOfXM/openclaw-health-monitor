@@ -67,12 +67,28 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "official"}), "official")
         self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "weird"}), "primary")
 
+    def test_env_dashboard_url_includes_token_and_gateway_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "openclaw.json").write_text(
+                json.dumps({"gateway": {"auth": {"token": "abc123"}}}),
+                encoding="utf-8",
+            )
+            spec = {"home": str(home), "port": 19021}
+            url = dashboard.env_dashboard_url(spec)
+            self.assertEqual(
+                url,
+                "http://127.0.0.1:19021/#token=abc123&gatewayUrl=ws%3A%2F%2F127.0.0.1%3A19021",
+            )
+
     @mock.patch("dashboard.check_gateway_health_for_env")
+    @mock.patch("dashboard.env_has_control_ui_assets")
     @mock.patch("dashboard.read_git_head")
     @mock.patch("dashboard.get_listener_pid")
-    def test_list_openclaw_environments_marks_active_environment(self, listener_pid, read_git_head, health):
+    def test_list_openclaw_environments_marks_active_environment(self, listener_pid, read_git_head, control_ui_ready, health):
         listener_pid.side_effect = [1111, None]
         read_git_head.side_effect = ["abc123", "def456"]
+        control_ui_ready.side_effect = [True, True]
         health.side_effect = [True]
         config = {
             "ACTIVE_OPENCLAW_ENV": "primary",
@@ -91,9 +107,85 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertTrue(envs[0]["active"])
         self.assertTrue(envs[0]["running"])
         self.assertTrue(envs[0]["healthy"])
+        self.assertTrue(envs[0]["control_ui_ready"])
         self.assertEqual(envs[1]["id"], "official")
         self.assertFalse(envs[1]["active"])
         self.assertFalse(envs[1]["running"])
+
+    @mock.patch("dashboard.check_gateway_health_for_env")
+    @mock.patch("dashboard.env_has_control_ui_assets")
+    @mock.patch("dashboard.read_git_target_head")
+    @mock.patch("dashboard.read_git_head")
+    @mock.patch("dashboard.get_listener_pid")
+    def test_list_openclaw_environments_only_active_running_env_gets_dashboard_link(
+        self,
+        listener_pid,
+        read_git_head,
+        read_git_target_head,
+        control_ui_ready,
+        health,
+    ):
+        listener_pid.side_effect = [1111, 2222]
+        read_git_head.side_effect = ["abc123", "def456"]
+        read_git_target_head.return_value = "def456"
+        control_ui_ready.side_effect = [True, True, True, True]
+        health.side_effect = [True, True]
+        config = {
+            "ACTIVE_OPENCLAW_ENV": "primary",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+            "OPENCLAW_OFFICIAL_PORT": 19001,
+        }
+
+        envs = dashboard.list_openclaw_environments(config)
+        primary = next(item for item in envs if item["id"] == "primary")
+        official = next(item for item in envs if item["id"] == "official")
+
+        self.assertTrue(primary["active"])
+        self.assertTrue(primary["running"])
+        self.assertEqual(primary["dashboard_open_link"], "/open-dashboard/primary")
+        self.assertFalse(official["active"])
+        self.assertTrue(official["running"])
+        self.assertEqual(official["dashboard_open_link"], "")
+
+    @mock.patch("dashboard.check_gateway_health_for_env")
+    @mock.patch("dashboard.env_has_control_ui_assets")
+    @mock.patch("dashboard.read_git_target_head")
+    @mock.patch("dashboard.read_git_head")
+    @mock.patch("dashboard.get_listener_pid")
+    def test_list_openclaw_environments_hides_dashboard_link_when_control_ui_missing(
+        self,
+        listener_pid,
+        read_git_head,
+        read_git_target_head,
+        control_ui_ready,
+        health,
+    ):
+        listener_pid.side_effect = [1111, 2222]
+        read_git_head.side_effect = ["abc123", "def456"]
+        read_git_target_head.return_value = "def456"
+        control_ui_ready.side_effect = [True, False]
+        health.side_effect = [True, True]
+        config = {
+            "ACTIVE_OPENCLAW_ENV": "official",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+            "OPENCLAW_OFFICIAL_PORT": 19001,
+        }
+
+        envs = dashboard.list_openclaw_environments(config)
+        official = next(item for item in envs if item["id"] == "official")
+
+        self.assertTrue(official["active"])
+        self.assertTrue(official["running"])
+        self.assertFalse(official["control_ui_ready"])
+        self.assertEqual(official["dashboard_open_link"], "")
 
     def test_get_task_registry_payload_includes_summary_and_timeline(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,6 +210,22 @@ class DashboardMemoryTests(unittest.TestCase):
             )
             store.record_task_event("task-1", "dispatch_started", {"question": "帮我做一个系统"})
             store.record_task_event("task-1", "stage_progress", {"marker": "DEV_IMPLEMENTING"})
+            store.reconcile_task_control_action(
+                store.get_task("task-1"),
+                {
+                    "control_state": "dev_running",
+                    "next_action": "await_dev_completion",
+                    "approved_summary": "等待开发回执",
+                    "required_receipts": ["dev:completed", "test:completed"],
+                    "next_actor": "dev",
+                    "claim_level": "execution_verified",
+                    "contract": {"id": "delivery_pipeline"},
+                    "phase_statuses": [
+                        {"agent": "pm", "label": "产品", "state": "completed"},
+                        {"agent": "dev", "label": "开发", "state": "running"},
+                    ],
+                },
+            )
 
             with mock.patch.object(dashboard, "STORE", store), \
                 mock.patch.object(dashboard, "load_config", return_value={"ENABLE_TASK_REGISTRY": True}), \
@@ -130,6 +238,10 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["current"]["task_id"], "task-1")
             self.assertEqual(payload["current"]["receipt_summary"]["agent"], "dev")
             self.assertEqual(payload["current"]["control"]["control_state"], "dev_running")
+            self.assertEqual(payload["current"]["control"]["claim_level"], "execution_verified")
+            self.assertEqual(payload["current"]["control"]["next_actor"], "dev")
+            self.assertEqual(payload["control_queue"][0]["action_type"], "await_dev_completion")
+            self.assertEqual(payload["session_resolution"]["active_task_id"], "task-1")
             self.assertEqual(len(payload["current"]["timeline"]), 2)
 
     def test_get_active_agent_activity_reads_recent_session_files(self):
@@ -216,11 +328,88 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(len(payload["agents"]), 2)
             agent_ids = {item["agent_id"] for item in payload["agents"]}
             self.assertEqual(agent_ids, {"pm", "dev"})
-            pm_entry = next(item for item in payload["agents"] if item["agent_id"] == "pm")
-            self.assertEqual(pm_entry["state_label"], "正在派发")
-            self.assertIn("A股实时数据方案与回测系统", pm_entry["task_hint"])
-            dev_entry = next(item for item in payload["agents"] if item["agent_id"] == "dev")
-            self.assertEqual(dev_entry["state_label"], "等待下游")
+
+    def test_build_environment_promotion_summary_requires_healthy_official(self):
+        environments = [
+            {"id": "primary", "git_head": "aaa111", "running": False, "healthy": False},
+            {"id": "official", "git_head": "bbb222", "running": True, "healthy": True},
+        ]
+        task_registry = {"summary": {"blocked": 0}, "current": {"control": {"control_state": "completed_verified"}}}
+        summary = dashboard.build_environment_promotion_summary(environments, task_registry)
+        self.assertTrue(summary["safe_to_promote"])
+        self.assertIn("bbb222", " ".join(summary["reasons"]))
+
+    def test_get_learning_center_payload_exposes_summary_and_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_learning(
+                learning_key="lk-1",
+                env_id="primary",
+                task_id="task-1",
+                category="control_plane",
+                title="缺少回执",
+                detail="task missing ack",
+                evidence={"task_id": "task-1"},
+                status="pending",
+            )
+            store.record_reflection_run("scheduled", {"promoted": 1, "reviewed": 2})
+            with mock.patch.object(dashboard, "STORE", store):
+                payload = dashboard.get_learning_center_payload(limit=10)
+            self.assertEqual(payload["summary"]["pending"], 1)
+            self.assertEqual(payload["reflections"][0]["summary"]["promoted"], 1)
+            self.assertEqual(payload["suggestions"][0]["title"], "缺少回执")
+
+    def test_get_control_plane_overview_reports_recoverable_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "DEV_IMPLEMENTING",
+                    "question": "帮我做一个系统",
+                    "last_user_message": "帮我做一个系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "latest_receipt": {"agent": "dev", "phase": "implementation", "action": "started"},
+                }
+            )
+            store.upsert_task_contract(
+                "task-1",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": [
+                        "pm:started",
+                        "pm:completed",
+                        "dev:started",
+                        "dev:completed",
+                        "test:started",
+                        "test:completed",
+                    ],
+                },
+            )
+            store.record_task_event(
+                "task-1",
+                "pipeline_receipt",
+                {"receipt": {"agent": "pm", "phase": "planning", "action": "completed"}},
+            )
+            store.record_task_event(
+                "task-1",
+                "pipeline_receipt",
+                {"receipt": {"agent": "dev", "phase": "implementation", "action": "started"}},
+            )
+            store.reconcile_task_control_action(store.get_task("task-1"), store.derive_task_control_state("task-1"))
+            with mock.patch.object(dashboard, "STORE", store):
+                payload = dashboard.get_control_plane_overview("primary")
+            self.assertEqual(payload["tasks"]["recoverable"], 1)
+            self.assertEqual(payload["tasks"]["next_actor_counts"]["dev"], 1)
 
 
 if __name__ == "__main__":

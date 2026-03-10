@@ -177,6 +177,127 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(task["question"], "我再提个需求")
             self.assertEqual(task["last_user_message"], "我再提个需求")
 
+    def test_derive_session_resolution_detects_late_completed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-running",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "新任务",
+                    "last_user_message": "新任务",
+                    "started_at": 10,
+                    "last_progress_at": 20,
+                    "created_at": 10,
+                    "updated_at": 20,
+                }
+            )
+            store.upsert_task(
+                {
+                    "task_id": "task-old",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "旧任务",
+                    "last_user_message": "旧任务",
+                    "started_at": 1,
+                    "last_progress_at": 18,
+                    "created_at": 1,
+                    "updated_at": 21,
+                    "completed_at": 21,
+                }
+            )
+            resolution = store.derive_session_resolution("session-a")
+            self.assertEqual(resolution["active_task_id"], "task-running")
+            self.assertEqual(resolution["stale_results"], 1)
+            self.assertIn("隔离", resolution["summary"])
+
+    def test_learning_round_trip_and_reflection_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            learning = store.upsert_learning(
+                learning_key="abc",
+                env_id="primary",
+                task_id="task-1",
+                category="control_plane",
+                title="缺少回执",
+                detail="task missing ack",
+                evidence={"task_id": "task-1"},
+            )
+            learning = store.upsert_learning(
+                learning_key="abc",
+                env_id="primary",
+                task_id="task-1",
+                category="control_plane",
+                title="缺少回执",
+                detail="task missing ack",
+                evidence={"task_id": "task-1"},
+                status="reviewed",
+            )
+            self.assertEqual(learning["occurrences"], 2)
+            self.assertEqual(store.summarize_learnings()["reviewed"], 1)
+            store.record_reflection_run("scheduled", {"promoted": 1})
+            runs = store.list_reflection_runs(limit=5)
+            self.assertEqual(runs[0]["summary"]["promoted"], 1)
+
+    def test_summarize_control_plane_reports_ack_and_next_actor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-ctrl",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "DEV_IMPLEMENTING",
+                    "question": "构建量化系统",
+                    "last_user_message": "构建量化系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "latest_receipt": {"agent": "dev", "phase": "implementation", "action": "started"},
+                }
+            )
+            store.upsert_task_contract(
+                "task-ctrl",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": [
+                        "pm:started",
+                        "pm:completed",
+                        "dev:started",
+                        "dev:completed",
+                        "test:started",
+                        "test:completed",
+                    ],
+                },
+            )
+            store.record_task_event(
+                "task-ctrl",
+                "pipeline_receipt",
+                {"receipt": {"agent": "pm", "phase": "planning", "action": "completed"}},
+            )
+            store.record_task_event(
+                "task-ctrl",
+                "pipeline_receipt",
+                {"receipt": {"agent": "dev", "phase": "implementation", "action": "started"}},
+            )
+            store.reconcile_task_control_action(store.get_task("task-ctrl"), store.derive_task_control_state("task-ctrl"))
+            summary = store.summarize_control_plane(env_id="primary")
+            self.assertEqual(summary["tasks"]["recoverable"], 1)
+            self.assertEqual(summary["tasks"]["next_actor_counts"]["dev"], 1)
+
     def test_derive_task_control_state_distinguishes_weak_and_strong_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -307,7 +428,11 @@ class StateStoreTests(unittest.TestCase):
             control = store.derive_task_control_state("task-pipeline")
             self.assertEqual(control["control_state"], "planning_only")
             self.assertEqual(control["next_action"], "require_dev_receipt")
+            self.assertEqual(control["next_actor"], "dev")
+            self.assertEqual(control["claim_level"], "phase_verified")
             self.assertIn("dev:started", control["missing_receipts"])
+            self.assertEqual(control["phase_statuses"][0]["state"], "completed")
+            self.assertEqual(control["phase_statuses"][1]["state"], "pending")
 
     def test_quant_contract_requires_verifier_after_calculator_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -350,7 +475,10 @@ class StateStoreTests(unittest.TestCase):
             control = store.derive_task_control_state("task-quant")
             self.assertEqual(control["control_state"], "awaiting_verifier")
             self.assertEqual(control["next_action"], "require_verifier_receipt")
+            self.assertEqual(control["next_actor"], "verifier")
             self.assertIn("verifier:completed", control["missing_receipts"])
+            self.assertEqual(control["phase_statuses"][0]["state"], "completed")
+            self.assertEqual(control["phase_statuses"][1]["state"], "pending")
 
     def test_reconcile_task_control_action_creates_pending_action(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,6 +14,7 @@ import subprocess
 import threading
 import resource
 import html
+import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request, redirect
@@ -269,9 +270,21 @@ def get_task_registry_payload(limit: int = 8) -> dict:
     active = [task for task in tasks if task.get("status") in {"running", "blocked", "background"}]
     current = summarize_task(STORE.get_current_task(env_id=env_id)) if enabled else None
     summary = STORE.summarize_tasks(env_id=env_id) if enabled else {"total": 0}
+    control_queue = (
+        STORE.list_task_control_actions(env_id=env_id, statuses=["pending", "sent", "blocked"], limit=12)
+        if enabled
+        else []
+    )
+    session_resolution = (
+        STORE.derive_session_resolution(str((current or {}).get("session_key") or ""))
+        if enabled and (current or active or tasks)
+        else {}
+    )
     return {
         "enabled": enabled,
         "summary": summary,
+        "control_queue": control_queue,
+        "session_resolution": session_resolution,
         "current": current or (summarize_task(active[0]) if active else (summarize_task(tasks[0]) if tasks else None)),
         "tasks": tasks,
     }
@@ -655,7 +668,34 @@ def env_dashboard_url(spec: dict) -> str:
     except Exception:
         token = ""
     base = f"http://127.0.0.1:{spec['port']}/"
-    return f"{base}#token={token}" if token else base
+    gateway_url = f"ws://127.0.0.1:{spec['port']}"
+    params = []
+    if token:
+        params.append(f"token={urllib.parse.quote(token)}")
+    params.append(f"gatewayUrl={urllib.parse.quote(gateway_url, safe='')}")
+    return f"{base}#{'&'.join(params)}" if params else base
+
+
+def env_has_control_ui_assets(spec: dict) -> bool:
+    config_path = Path(spec["home"]) / "openclaw.json"
+    root_path: Optional[str] = None
+    try:
+        root_path = (
+            json.loads(config_path.read_text(encoding="utf-8"))
+            .get("gateway", {})
+            .get("controlUi", {})
+            .get("root")
+        )
+    except Exception:
+        root_path = None
+
+    if root_path:
+        root = Path(root_path).expanduser()
+        if not root.is_absolute():
+            root = Path(spec["code"]) / root
+    else:
+        root = Path(spec["code"]) / "dist" / "control-ui"
+    return (root / "index.html").exists()
 
 
 def env_open_link(spec: dict) -> str:
@@ -735,6 +775,7 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
         active = item["id"] == current
         git_head = read_git_head(Path(item["code"]))
         target_head = read_git_target_head(Path(item["code"]), official_ref) if item["id"] == "official" else git_head
+        control_ui_ready = env_has_control_ui_assets(item)
         environments.append(
             {
                 "id": item["id"],
@@ -747,8 +788,9 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "target_head": target_head,
                 "running": running,
                 "healthy": check_gateway_health_for_env(item) if running else False,
+                "control_ui_ready": control_ui_ready,
                 "dashboard_url": env_dashboard_url(item),
-                "dashboard_open_link": env_open_link(item) if active and running else "",
+                "dashboard_open_link": env_open_link(item) if active and running and control_ui_ready else "",
                 "active": active,
                 "auto_update_enabled": official_schedule_plist.exists() if item["id"] == "official" else False,
                 "update_hour": cfg.get("OPENCLAW_OFFICIAL_UPDATE_HOUR", 4) if item["id"] == "official" else None,
@@ -756,6 +798,88 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
             }
         )
     return environments
+
+
+def build_environment_promotion_summary(environments: list[dict], task_registry: dict) -> dict:
+    primary = next((item for item in environments if item["id"] == "primary"), {})
+    official = next((item for item in environments if item["id"] == "official"), {})
+    current = task_registry.get("current") or {}
+    current_control = current.get("control") or {}
+    blocked_tasks = int((task_registry.get("summary") or {}).get("blocked", 0) or 0)
+
+    summary = {
+        "candidate_env": official.get("id"),
+        "safe_to_promote": False,
+        "headline": "官方验证版尚未达到切换条件",
+        "reasons": [],
+        "recommended_action": "先保持当前主用版，继续验证官方版。",
+    }
+
+    if not official:
+        summary["reasons"].append("未找到官方验证版环境。")
+        return summary
+    if not official.get("running"):
+        summary["reasons"].append("官方验证版未运行。")
+    if official.get("running") and not official.get("healthy"):
+        summary["reasons"].append("官方验证版未通过健康检查。")
+    if blocked_tasks:
+        summary["reasons"].append(f"当前存在 {blocked_tasks} 个阻塞任务。")
+    if current and current_control.get("control_state") in {"blocked_unverified", "blocked_control_followup_failed", "dev_blocked", "test_blocked", "analysis_blocked"}:
+        summary["reasons"].append("当前活动任务仍处于阻塞态。")
+
+    if official.get("running") and official.get("healthy") and not summary["reasons"]:
+        summary["safe_to_promote"] = True
+        summary["headline"] = "官方验证版已满足切换条件"
+        summary["recommended_action"] = "可将官方验证版切换为当前主用版。"
+        if official.get("git_head") and primary.get("git_head") and official.get("git_head") != primary.get("git_head"):
+            summary["reasons"].append(
+                f"将从 {primary.get('git_head')} 切到 {official.get('git_head')}"
+            )
+    return summary
+
+
+def get_learning_center_payload(limit: int = 10) -> dict:
+    learnings = STORE.list_learnings(limit=limit)
+    reflections = STORE.list_reflection_runs(limit=6)
+    suggestions: list[dict[str, str]] = []
+    for item in learnings[:5]:
+        status = str(item.get("status") or "")
+        occurrences = int(item.get("occurrences") or 0)
+        category = str(item.get("category") or "misc")
+        title = str(item.get("title") or "未命名 learning")
+        if status == "pending":
+            action = "继续观察并收集重复证据"
+        elif status == "reviewed":
+            action = "可考虑提升为 contract / rule"
+        else:
+            action = "已升级，关注实际效果"
+        suggestions.append(
+            {
+                "title": title,
+                "category": category,
+                "status": status,
+                "occurrences": str(occurrences),
+                "action": action,
+            }
+        )
+    return {
+        "summary": STORE.summarize_learnings(),
+        "suggestions": suggestions,
+        "learnings": learnings,
+        "reflections": [
+            {
+                **item,
+                "created_label": datetime.fromtimestamp(int(item.get("created_at") or 0)).strftime("%m-%d %H:%M:%S")
+                if item.get("created_at")
+                else "-",
+            }
+            for item in reflections
+        ],
+    }
+
+
+def get_control_plane_overview(env_id: str) -> dict:
+    return STORE.summarize_control_plane(env_id=env_id)
 
 
 def backup_change_logs():
@@ -1347,6 +1471,18 @@ def index():
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
         th { color: #888; font-weight: normal; }
         .event-list { display: grid; gap: 10px; }
+        .is-hidden { display: none !important; }
+        .list-expander {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.04);
+            color: #dbeafe;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .list-expander:hover { background: rgba(59,130,246,0.12); }
         .event-item {
             padding: 12px 14px; border-radius: 10px; background: rgba(255,255,255,0.04);
             border: 1px solid rgba(255,255,255,0.08);
@@ -1428,6 +1564,20 @@ def index():
             padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05);
             border: 1px solid rgba(255,255,255,0.08);
         }
+        .workflow-collapsible {
+            border-radius: 12px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            overflow: hidden;
+        }
+        .workflow-collapsible summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 14px;
+        }
+        .workflow-collapsible summary::-webkit-details-marker { display: none; }
+        .workflow-collapsible[open] summary { border-bottom: 1px solid rgba(255,255,255,0.08); }
+        .workflow-collapsible-body { padding: 12px 14px 14px; }
         .workflow-title { font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
         .workflow-main { font-size: 15px; font-weight: 700; line-height: 1.35; }
         .workflow-sub { font-size: 12px; color: #d1d5db; line-height: 1.6; margin-top: 8px; }
@@ -1524,6 +1674,28 @@ def index():
             color: #9ca3af;
             font-size: 13px;
         }
+        .phase-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .phase-pill {
+            padding: 6px 9px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            background: rgba(148,163,184,0.14);
+            color: #cbd5e1;
+        }
+        .phase-pill.completed { background: rgba(34,197,94,0.18); color: #dcfce7; }
+        .phase-pill.running { background: rgba(59,130,246,0.18); color: #dbeafe; }
+        .phase-pill.blocked { background: rgba(248,113,113,0.18); color: #fee2e2; }
+        .phase-pill.pending { background: rgba(148,163,184,0.14); color: #cbd5e1; }
+        .control-queue { display: grid; gap: 8px; margin-top: 12px; }
+        .control-queue-item {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.045);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .control-queue-title { font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+        .control-queue-meta { font-size: 11px; color: #9ca3af; line-height: 1.5; }
         
         .diagnose-item { 
             display: flex; align-items: center; gap: 15px; padding: 15px; 
@@ -1682,6 +1854,10 @@ def index():
                             <div id="active-agents-list" class="agent-grid"></div>
                         </div>
                         <div class="panel-shell">
+                            <h2>🧪 控制面健康</h2>
+                            <div id="control-plane-summary" class="memory-box"></div>
+                        </div>
+                        <div class="panel-shell">
                             <h2>🗂️ 任务注册表</h2>
                             <div id="task-registry-summary" class="memory-box" style="margin-bottom:14px;"></div>
                             <div id="task-registry-list" class="event-list"></div>
@@ -1722,12 +1898,23 @@ def index():
                     <h2>🧭 版本环境</h2>
                     <div id="environment-summary" class="memory-box" style="margin-bottom:14px;"></div>
                     <div id="environment-workflow" class="workflow-board"></div>
+                    <div id="promotion-summary" class="memory-box" style="margin-bottom:14px;"></div>
                     <div id="environment-cards" class="env-grid"></div>
                 </div>
 
                 <div class="section">
                     <h2>🚨 最近异常 / 进度</h2>
                     <div id="recent-events" class="event-list"></div>
+                </div>
+
+                <div class="section">
+                    <h2>🎛️ 控制队列</h2>
+                    <div id="control-queue-board" class="event-list"></div>
+                </div>
+
+                <div class="section">
+                    <h2>🧭 会话裁决</h2>
+                    <div id="session-resolution" class="memory-box"></div>
                 </div>
 
                 <div class="section">
@@ -1741,6 +1928,12 @@ def index():
                 <div class="section">
                     <h2>🛠️ 诊断 & 建议</h2>
                     <div id="diagnoses"></div>
+                </div>
+
+                <div class="section">
+                    <h2>🧪 反思与自进化</h2>
+                    <div id="learning-summary" class="memory-box" style="margin-bottom:14px;"></div>
+                    <div id="learning-list" class="event-list"></div>
                 </div>
 
                 <div class="section">
@@ -1817,6 +2010,31 @@ def index():
     
     <script>
         let currentData = null;
+
+        function makeExpandableList(items, renderItem, emptyHtml, options = {}) {
+            const limit = options.limit || 4;
+            const buttonLabel = options.buttonLabel || '展开更多';
+            const collapseLabel = options.collapseLabel || '收起';
+            if (!items || !items.length) return emptyHtml;
+            const visible = items.slice(0, limit).map(renderItem).join('');
+            const hiddenItems = items.slice(limit).map(renderItem).join('');
+            if (items.length <= limit) return visible;
+            const hiddenId = `expand-${Math.random().toString(36).slice(2, 10)}`;
+            return `
+                ${visible}
+                <div id="${hiddenId}" class="is-hidden">${hiddenItems}</div>
+                <button class="list-expander" data-expanded="false" onclick="toggleExpandableList('${hiddenId}', this, '${buttonLabel}', '${collapseLabel}')">${buttonLabel}（${items.length - limit}）</button>
+            `;
+        }
+
+        function toggleExpandableList(hiddenId, button, expandLabel, collapseLabel) {
+            const hidden = document.getElementById(hiddenId);
+            if (!hidden) return;
+            const expanded = button.dataset.expanded === 'true';
+            hidden.classList.toggle('is-hidden', expanded);
+            button.dataset.expanded = expanded ? 'false' : 'true';
+            button.textContent = expanded ? expandLabel : collapseLabel;
+        }
         
         async function loadData() {
             try {
@@ -1870,11 +2088,13 @@ def index():
                 // 版本环境
                 const envSummaryEl = document.getElementById('environment-summary');
                 const envWorkflowEl = document.getElementById('environment-workflow');
+                const promotionSummaryEl = document.getElementById('promotion-summary');
                 const envCardsEl = document.getElementById('environment-cards');
                 const envs = data.environments || [];
                 const activeEnv = envs.find(item => item.active) || null;
                 const primaryEnv = envs.find(item => item.id === 'primary') || null;
                 const officialEnv = envs.find(item => item.id === 'official') || null;
+                const promotionSummary = data.promotion_summary || {};
                 envSummaryEl.innerHTML = activeEnv ? `
                     <div class="memory-box-title">当前守护目标</div>
                     <div class="memory-box-main">${activeEnv.name} · ${activeEnv.healthy ? '健康' : (activeEnv.running ? '运行中但健康检查失败' : '未运行')}</div>
@@ -1885,17 +2105,21 @@ def index():
                     <div class="memory-box-sub">请检查版本环境配置。</div>
                 `;
                 envWorkflowEl.innerHTML = officialEnv ? `
-                    <div class="workflow-box">
-                        <div class="workflow-title">更新与验证流程</div>
-                        <div class="workflow-main">${officialEnv.auto_update_enabled ? '官方验证版会自动更新' : '官方验证版尚未启用自动更新'}</div>
-                        <div class="workflow-sub">自动更新只作用于官方验证版，不会直接覆盖当前主用版。每天 ${String(officialEnv.update_hour ?? 4).padStart(2, '0')}:${String(officialEnv.update_minute ?? 30).padStart(2, '0')} 检查并更新官方验证版代码。</div>
-                        <div class="workflow-steps">
-                            <div class="workflow-step"><strong>1. 更新官方验证版</strong><br/>点击“更新官方验证版”，守护者会拉最新代码、同步隔离配置并重新构建。</div>
-                            <div class="workflow-step"><strong>2. 启动并验证</strong><br/>启动官方验证版后，只让它跑在隔离端口上，先看 Dashboard、任务注册表和活跃代理是否正常。</div>
-                            <div class="workflow-step"><strong>3. 切换为当前使用环境</strong><br/>验证通过后，点击“切换到这里”，守护目标就会切到官方验证版；原主用版会停止，不会双开。</div>
-                            <div class="workflow-step"><strong>4. 长期稳定后再回收旧主用版</strong><br/>当前页面不会自动覆盖旧主用版代码，避免你在没验证完之前误升级生产环境。</div>
+                    <details class="workflow-collapsible">
+                        <summary>
+                            <div class="workflow-title">更新与验证流程</div>
+                            <div class="workflow-main">${officialEnv.auto_update_enabled ? '官方验证版会自动更新' : '官方验证版尚未启用自动更新'}</div>
+                            <div class="workflow-sub">自动更新只作用于官方验证版，不会直接覆盖当前主用版。每天 ${String(officialEnv.update_hour ?? 4).padStart(2, '0')}:${String(officialEnv.update_minute ?? 30).padStart(2, '0')} 检查并更新官方验证版代码。</div>
+                        </summary>
+                        <div class="workflow-collapsible-body">
+                            <div class="workflow-steps">
+                                <div class="workflow-step"><strong>1. 更新官方验证版</strong><br/>点击“更新官方验证版”，守护者会拉最新代码、同步隔离配置并重新构建。</div>
+                                <div class="workflow-step"><strong>2. 启动并验证</strong><br/>启动官方验证版后，只让它跑在隔离端口上，先看 Dashboard、任务注册表和活跃代理是否正常。</div>
+                                <div class="workflow-step"><strong>3. 切换为当前使用环境</strong><br/>验证通过后，点击“切换到这里”，守护目标就会切到官方验证版；原主用版会停止，不会双开。</div>
+                                <div class="workflow-step"><strong>4. 长期稳定后再回收旧主用版</strong><br/>当前页面不会自动覆盖旧主用版代码，避免你在没验证完之前误升级生产环境。</div>
+                            </div>
                         </div>
-                    </div>
+                    </details>
                     <div class="workflow-box">
                         <div class="workflow-title">当前判断</div>
                         <div class="workflow-main">${activeEnv && activeEnv.id === 'official' ? '你当前正在使用官方验证版' : '你当前仍在使用主用版'}</div>
@@ -1906,11 +2130,24 @@ def index():
                         </div>
                     </div>
                 ` : '';
+                promotionSummaryEl.innerHTML = `
+                    <div class="memory-box-title">版本晋升摘要</div>
+                    <div class="memory-box-main">${promotionSummary.headline || '暂无版本晋升判断'}</div>
+                    <div class="memory-box-sub">${promotionSummary.recommended_action || '-'}</div>
+                    <div class="memory-box-sub" style="margin-top:6px;">${(promotionSummary.reasons || []).length ? (promotionSummary.reasons || []).join(' | ') : '当前没有额外阻断条件。'}</div>
+                `;
                 envCardsEl.innerHTML = envs.map(item => {
                     const switchBtn = `<button class="btn ${item.active ? 'btn-current' : 'btn-primary'}" ${item.active ? 'disabled' : ''} onclick="switchEnvironment('${item.id}')">${item.active ? '当前使用中' : '切换到这里'}</button>`;
-                    const dashboardLink = item.running
-                        ? `<a class="env-link" href="${item.dashboard_open_link}" target="_blank" rel="noopener">打开 Dashboard</a>`
-                        : '<a class="env-link disabled" href="javascript:void(0)" aria-disabled="true">打开 Dashboard</a>';
+                    let dashboardLink = '';
+                    if (item.dashboard_open_link) {
+                        dashboardLink = `<a class="env-link" href="${item.dashboard_open_link}" target="_blank" rel="noopener">打开 Dashboard</a>`;
+                    } else if (item.running && !item.control_ui_ready) {
+                        dashboardLink = '<a class="env-link disabled" href="javascript:void(0)" aria-disabled="true" title="目标环境的 Control UI 静态资源尚未构建">Control UI 未构建</a>';
+                    } else if (item.running) {
+                        dashboardLink = '<a class="env-link disabled" href="javascript:void(0)" aria-disabled="true" title="只有当前激活环境可以打开 Dashboard">仅当前激活环境可打开</a>';
+                    } else {
+                        dashboardLink = '<a class="env-link disabled" href="javascript:void(0)" aria-disabled="true" title="环境未运行，无法打开 Dashboard">环境未运行</a>';
+                    }
                     const officialExtra = item.id === 'official'
                         ? `
                             <button class="btn" onclick="manageOfficial('update')">更新官方验证版</button>
@@ -2028,7 +2265,11 @@ def index():
                 const taskRegistry = data.task_registry || {};
                 const taskSummaryEl = document.getElementById('task-registry-summary');
                 const taskListEl = document.getElementById('task-registry-list');
+                const controlPlaneSummaryEl = document.getElementById('control-plane-summary');
+                const controlQueueBoardEl = document.getElementById('control-queue-board');
+                const sessionResolutionEl = document.getElementById('session-resolution');
                 const currentTask = taskRegistry.current || null;
+                const controlPlane = data.control_plane || {};
                 if (!taskRegistry.enabled) {
                     taskSummaryEl.innerHTML = `
                         <div class="memory-box-title">当前活动任务</div>
@@ -2036,21 +2277,48 @@ def index():
                         <div class="memory-box-sub">可通过 ENABLE_TASK_REGISTRY 打开任务注册表。</div>
                     `;
                     taskListEl.innerHTML = '';
+                    controlQueueBoardEl.innerHTML = '<div class="event-empty">任务注册表未启用</div>';
+                    sessionResolutionEl.innerHTML = `
+                        <div class="memory-box-title">当前会话</div>
+                        <div class="memory-box-main">未启用</div>
+                        <div class="memory-box-sub">会话裁决依赖任务注册表。</div>
+                    `;
                 } else {
                     const summary = taskRegistry.summary || {};
                     const timeline = (currentTask && currentTask.timeline) || [];
                     const receipt = (currentTask && currentTask.receipt_summary) || {};
                     const control = (currentTask && currentTask.control) || {};
                     const controlAction = (control && control.control_action) || null;
+                    const controlQueue = taskRegistry.control_queue || [];
+                    const sessionResolution = taskRegistry.session_resolution || {};
+                    const renderPhaseStrip = (phases) => {
+                        const items = phases || [];
+                        if (!items.length) return '';
+                        return `<div class="phase-strip">${items.map(item => `
+                            <div class="phase-pill ${item.state || 'pending'}">${item.label || item.agent}: ${item.state || 'pending'}</div>
+                        `).join('')}</div>`;
+                    };
                     taskSummaryEl.innerHTML = currentTask ? `
                         <div class="memory-box-title">当前活动任务</div>
                         <div class="memory-box-main">${currentTask.question || '未知任务'}</div>
                         <div class="memory-box-sub">状态: ${currentTask.status} | 阶段: ${currentTask.current_stage} | 会话: ${currentTask.session_key}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">任务总数: ${summary.total || 0} | 运行中: ${summary.running || 0} | 阻塞: ${summary.blocked || 0} | 后台: ${summary.background || 0}</div>
-                        <div class="memory-box-sub" style="margin-top:6px;">控制裁决: ${control.approved_summary || '-'} | 证据: ${control.evidence_level || '-'} | 合同: ${(control.contract || {}).id || '-'}</div>
-                        <div class="memory-box-sub" style="margin-top:6px;">缺失回执: ${(control.missing_receipts || []).join(', ') || '无'}${controlAction ? ` | 控制动作: ${controlAction.action_type} (${controlAction.status}, attempts=${controlAction.attempts})` : ''}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">控制裁决: ${control.approved_summary || '-'} | 证据: ${control.evidence_level || '-'} | 合同: ${(control.contract || {}).id || '-'} | 对外口径: ${control.claim_level || '-'}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">下一执行人: ${control.next_actor || '-'} | 缺失回执: ${(control.missing_receipts || []).join(', ') || '无'}${controlAction ? ` | 控制动作: ${controlAction.action_type} (${controlAction.status}, attempts=${controlAction.attempts})` : ''}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">最近回执: ${receipt.agent || '-'} / ${receipt.phase || '-'} / ${receipt.action || '-'}${receipt.evidence && receipt.evidence !== '-' ? ` | ${receipt.evidence}` : ''}</div>
+                        ${renderPhaseStrip(control.phase_statuses)}
                         ${timeline.length ? `<div class="memory-box-sub" style="margin-top:8px;">时间线: ${timeline.map(item => `${item.created_label} ${item.event_type}`).join(' → ')}</div>` : ''}
+                        ${controlQueue.length ? `
+                            <div class="control-queue">
+                                ${controlQueue.slice(0, 3).map(item => `
+                                    <div class="control-queue-item">
+                                        <div class="control-queue-title">${item.action_type} · ${item.status}</div>
+                                        <div class="control-queue-meta">task_id=${item.task_id} | state=${item.control_state} | attempts=${item.attempts}</div>
+                                        <div class="control-queue-meta">${item.summary || '-'}</div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        ` : ''}
                     ` : `
                         <div class="memory-box-title">当前活动任务</div>
                         <div class="memory-box-main">暂无活动任务</div>
@@ -2058,7 +2326,7 @@ def index():
                         <div class="memory-box-sub" style="margin-top:6px;">任务总数: ${summary.total || 0} | 已完成: ${summary.completed || 0} | 无可见回复: ${summary.no_reply || 0}</div>
                     `;
                     const tasks = taskRegistry.tasks || [];
-                    taskListEl.innerHTML = tasks.length ? tasks.map(item => `
+                    taskListEl.innerHTML = makeExpandableList(tasks, item => `
                         <div class="event-item ${item.status === 'completed' ? 'info' : (item.status === 'blocked' ? 'warning' : 'error')}">
                             <div class="event-header">
                                 <div class="event-title">${item.question || '未知任务'}</div>
@@ -2067,10 +2335,39 @@ def index():
                             <div class="event-details">
                                 task_id=${item.task_id} | session=${item.session_key}<br/>
                                 最近进展时间: ${item.last_progress_label || '-'}<br/>
-                                控制: ${(item.control || {}).control_state || '-'} | 证据: ${(item.control || {}).evidence_level || '-'}${(item.control || {}).missing_receipts?.length ? `<br/>缺失回执: ${(item.control || {}).missing_receipts.join(', ')}` : ''}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
+                                控制: ${(item.control || {}).control_state || '-'} | 证据: ${(item.control || {}).evidence_level || '-'} | 口径: ${(item.control || {}).claim_level || '-'}${(item.control || {}).missing_receipts?.length ? `<br/>缺失回执: ${(item.control || {}).missing_receipts.join(', ')}` : ''}${(item.control || {}).next_actor ? `<br/>下一执行人: ${(item.control || {}).next_actor}` : ''}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
+                                ${renderPhaseStrip((item.control || {}).phase_statuses)}
                             </div>
                         </div>
-                    `).join('') : '<div class="event-empty">暂无任务记录</div>';
+                    `, '<div class="event-empty">暂无任务记录</div>', { limit: 3, buttonLabel: '展开更多任务', collapseLabel: '收起任务' });
+                    const actionStats = controlPlane.actions || {};
+                    const taskStats = controlPlane.tasks || {};
+                    controlPlaneSummaryEl.innerHTML = `
+                        <div class="memory-box-title">控制面裁决</div>
+                        <div class="memory-box-main">${controlPlane.headline || '暂无控制面摘要'}</div>
+                        <div class="memory-box-sub">ACK 成功率: ${controlPlane.ack_success_rate || 0}% | 已验证任务: ${taskStats.verified || 0} | 待恢复: ${taskStats.recoverable || 0} | 阻塞: ${taskStats.blocked || 0}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">动作队列: pending=${actionStats.pending || 0} · sent=${actionStats.sent || 0} · blocked=${actionStats.blocked || 0} · resolved=${actionStats.resolved || 0}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">下一执行人分布: ${Object.entries(taskStats.next_actor_counts || {}).map(([k, v]) => `${k}:${v}`).join(' · ') || '暂无'}</div>
+                    `;
+                    controlQueueBoardEl.innerHTML = makeExpandableList(controlQueue, item => `
+                        <div class="event-item ${item.status === 'blocked' ? 'warning' : (item.status === 'sent' ? 'info' : 'anomaly')}">
+                            <div class="event-header">
+                                <div class="event-title">${item.action_type || '-'}</div>
+                                <div class="event-time">${item.status || '-'} · attempts=${item.attempts || 0}</div>
+                            </div>
+                            <div class="event-details">
+                                task_id=${item.task_id || '-'} | state=${item.control_state || '-'}<br/>
+                                ${(item.required_receipts || []).length ? `required=${item.required_receipts.join(', ')}<br/>` : ''}
+                                ${(item.summary || '-')}${item.last_error ? `<br/>last_error=${item.last_error}` : ''}
+                            </div>
+                        </div>
+                    `, '<div class="event-empty">当前没有待执行的控制动作</div>', { limit: 3, buttonLabel: '展开更多控制动作', collapseLabel: '收起控制动作' });
+                    sessionResolutionEl.innerHTML = `
+                        <div class="memory-box-title">当前会话</div>
+                        <div class="memory-box-main">${sessionResolution.active_task_id || '暂无活动任务'}</div>
+                        <div class="memory-box-sub">状态: ${sessionResolution.active_task_status || '-'} | 后台任务: ${sessionResolution.background_tasks || 0} | 迟到结果: ${sessionResolution.stale_results || 0}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">${sessionResolution.summary || '当前没有需要会话裁决的复杂任务。'}</div>
+                    `;
                 }
 
                 // 活跃代理
@@ -2109,12 +2406,49 @@ def index():
                     `).join('');
                 }
 
+                // 反思与自进化
+                const learningCenter = data.learning_center || {};
+                const learningSummaryEl = document.getElementById('learning-summary');
+                const learningListEl = document.getElementById('learning-list');
+                const learningSummary = learningCenter.summary || {};
+                const learnings = learningCenter.learnings || [];
+                const suggestions = learningCenter.suggestions || [];
+                const reflections = learningCenter.reflections || [];
+                learningSummaryEl.innerHTML = `
+                    <div class="memory-box-title">Evolution Center</div>
+                    <div class="memory-box-main">待验证: ${learningSummary.pending || 0} · 已审阅: ${learningSummary.reviewed || 0} · 已升级: ${learningSummary.promoted || 0}</div>
+                    <div class="memory-box-sub">最近反思: ${reflections[0] ? `${reflections[0].created_label} · promoted=${(reflections[0].summary || {}).promoted || 0}` : '暂无反思运行记录'}</div>
+                `;
+                const suggestionMarkup = suggestions.length ? `
+                    <div class="event-item info">
+                        <div class="event-header">
+                            <div class="event-title">当前升级建议</div>
+                            <div class="event-time">Top ${suggestions.length}</div>
+                        </div>
+                        <div class="event-details">
+                            ${suggestions.map(item => `${item.title} · ${item.status} · x${item.occurrences} · ${item.action}`).join('<br/>')}
+                        </div>
+                    </div>
+                ` : '';
+                learningListEl.innerHTML = `${suggestionMarkup}${makeExpandableList(learnings, item => `
+                    <div class="event-item ${item.status === 'promoted' ? 'info' : 'warning'}">
+                        <div class="event-header">
+                            <div class="event-title">${item.title || '未命名 learning'}</div>
+                            <div class="event-time">${item.status} · occurrences=${item.occurrences || 0}</div>
+                        </div>
+                        <div class="event-details">
+                            ${item.detail || '-'}<br/>
+                            category=${item.category || '-'} | env=${item.env_id || '-'}${item.promoted_target ? ` | promote=${item.promoted_target}` : ''}
+                        </div>
+                    </div>
+                `, '<div class="event-empty">暂无 learnings</div>', { limit: 3, buttonLabel: '展开更多 learnings', collapseLabel: '收起 learnings' })}`;
+
                 // 最近异常 / 进度
                 const eventsEl = document.getElementById('recent-events');
                 if (!data.recent_events || data.recent_events.length === 0) {
                     eventsEl.innerHTML = '<div class="event-item"><div class="event-title">暂无最近异常</div><div class="event-details">Guardian 已启动，但最近没有记录到异常或阶段事件。</div></div>';
                 } else {
-                    eventsEl.innerHTML = data.recent_events.map(item => {
+                    eventsEl.innerHTML = makeExpandableList(data.recent_events, item => {
                         const details = formatChangeDetails(item);
                         const typeLabel = item.type === 'anomaly' ? '异常' : '进度';
                         const stamp = `${item.date || ''} ${item.time || ''}`.trim();
@@ -2125,7 +2459,7 @@ def index():
                                 <div class="event-details">${details}</div>
                             </div>
                         `;
-                    }).join('');
+                    }, '<div class="event-item"><div class="event-title">暂无最近异常</div><div class="event-details">Guardian 已启动，但最近没有记录到异常或阶段事件。</div></div>', { limit: 4, buttonLabel: '展开更多事件', collapseLabel: '收起事件' });
                 }
                 
                 // 错误日志
@@ -2443,6 +2777,9 @@ def api_status():
     environments = list_openclaw_environments(config)
     task_registry = get_task_registry_payload(limit=8)
     active_agents = get_active_agent_activity(selected_env, config)
+    learning_center = get_learning_center_payload(limit=10)
+    promotion_summary = build_environment_promotion_summary(environments, task_registry)
+    control_plane = get_control_plane_overview(selected_env["id"])
     
     data = {
         "active_environment": selected_env["id"],
@@ -2462,6 +2799,9 @@ def api_status():
         "memory_summary": memory_summary,
         "task_registry": task_registry,
         "active_agents": active_agents,
+        "learning_center": learning_center,
+        "control_plane": control_plane,
+        "promotion_summary": promotion_summary,
     }
     return app.response_class(
         response=json.dumps(data, ensure_ascii=False),
@@ -2473,6 +2813,15 @@ def api_status():
 def api_task_registry():
     """Return a focused task-registry payload for external consumers."""
     payload = get_task_registry_payload(limit=20)
+    return app.response_class(
+        response=json.dumps(payload, ensure_ascii=False),
+        mimetype="application/json",
+    )
+
+
+@app.route("/api/learnings")
+def api_learnings():
+    payload = get_learning_center_payload(limit=20)
     return app.response_class(
         response=json.dumps(payload, ensure_ascii=False),
         mimetype="application/json",
@@ -2518,6 +2867,8 @@ def open_dashboard(env_id: str):
         return "Environment is not active", 409
     if get_listener_pid(int(spec["port"])) is None:
         return "Environment is not running", 409
+    if not env_has_control_ui_assets(spec):
+        return "Control UI assets are not built for this environment", 409
     return redirect(env_dashboard_url(spec), code=302)
 
 

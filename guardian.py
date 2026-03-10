@@ -15,7 +15,7 @@ import threading
 import resource
 import hashlib
 import re
-import requests
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -188,13 +188,10 @@ def check_gateway_health() -> bool:
     spec = current_env_spec()
     if spec["id"] == "official":
         try:
-            response = requests.get(
-                f"http://127.0.0.1:{spec['port']}/health",
-                timeout=5,
-                proxies={"http": None, "https": None},
-            )
-            payload = response.json()
-            return response.ok and bool(payload.get("ok"))
+            req = urllib.request.Request(f"http://127.0.0.1:{spec['port']}/health")
+            with urllib.request.urlopen(req, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+            return bool(payload.get("ok"))
         except Exception:
             return False
 
@@ -586,6 +583,8 @@ def build_control_plane_followup(
     stage = str(task.get("current_stage") or "处理中")
     control_state = str(control.get("control_state") or "unknown")
     next_action = str(control.get("next_action") or "require_receipt_or_block")
+    next_actor = str(control.get("next_actor") or "guardian")
+    claim_level = str(control.get("claim_level") or "received_only")
     contract = control.get("contract") or {}
     contract_id = str(contract.get("id") or "single_agent")
     missing = ", ".join(control.get("missing_receipts") or []) or "none"
@@ -607,6 +606,7 @@ def build_control_plane_followup(
     return (
         "GUARDIAN_TASK_CONTROL: 这不是用户新需求。"
         f"当前 task_id={task['task_id']}，任务合同={contract_id}，控制状态={control_state}，"
+        f"对外可宣称级别={claim_level}，下一执行责任人={next_actor}，"
         f"当前阶段={stage}，已静默={format_duration_label(idle)}，累计运行={format_duration_label(total)}，"
         f"缺失回执={missing}。当前问题={question}。"
         f"{action_instruction}"
@@ -664,12 +664,18 @@ def write_task_registry_snapshot() -> None:
     current_payload = enrich_task(current)
     tasks_payload = [task for task in (enrich_task(item) for item in filtered[:20]) if task]
     facts_current = current_payload or (tasks_payload[0] if tasks_payload else None)
+    session_resolution = (
+        STORE.derive_session_resolution(str((facts_current or {}).get("session_key") or ""))
+        if facts_current and facts_current.get("session_key")
+        else None
+    )
     payload = {
         "generated_at": int(time.time()),
         "env_id": env_id,
         "summary": STORE.summarize_tasks(env_id=env_id),
         "current": current_payload,
         "tasks": tasks_payload,
+        "session_resolution": session_resolution,
     }
     facts_payload = {
         "generated_at": payload["generated_at"],
@@ -683,10 +689,14 @@ def write_task_registry_snapshot() -> None:
             "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
             "control_state": (facts_current or {}).get("control", {}).get("control_state"),
             "next_action": (facts_current or {}).get("control", {}).get("next_action"),
+            "next_actor": (facts_current or {}).get("control", {}).get("next_actor"),
+            "claim_level": (facts_current or {}).get("control", {}).get("claim_level"),
             "contract_id": ((facts_current or {}).get("control", {}).get("contract") or {}).get("id"),
             "missing_receipts": (facts_current or {}).get("control", {}).get("missing_receipts") or [],
             "control_action": (facts_current or {}).get("control", {}).get("control_action"),
+            "phase_statuses": (facts_current or {}).get("control", {}).get("phase_statuses") or [],
         },
+        "session_resolution": session_resolution,
     }
     data_dir = BASE_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -698,6 +708,99 @@ def write_task_registry_snapshot() -> None:
         json.dumps(facts_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def derive_learning_key(*parts: str) -> str:
+    joined = "|".join(part.strip() for part in parts if part is not None)
+    return hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
+def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
+    """Convert repeated blocked/follow-up outcomes into pending learnings."""
+    if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
+        return []
+    env_id = current_env_spec()["id"]
+    captured: list[dict] = []
+    for outcome in outcomes:
+        task_id = str(outcome.get("task_id") or "")
+        if not task_id:
+            continue
+        action = str(outcome.get("action") or "")
+        if action not in {"blocked", "followup_sent"}:
+            continue
+        blocked_reason = str(outcome.get("blocked_reason") or "")
+        control_state = str(outcome.get("control_state") or "")
+        task = STORE.get_task(task_id) or {}
+        title = "任务控制面发现可改进项"
+        detail = f"task={task_id} control={control_state} action={action} blocked_reason={blocked_reason or '-'}"
+        if action == "blocked":
+            title = "任务因缺少结构化回执而阻塞"
+        learning_key = derive_learning_key("control", env_id, control_state, blocked_reason or action)
+        learning = STORE.upsert_learning(
+            learning_key=learning_key,
+            env_id=env_id,
+            task_id=task_id,
+            category="control_plane",
+            title=title,
+            detail=detail,
+            evidence={
+                "task_id": task_id,
+                "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                "control_state": control_state,
+                "blocked_reason": blocked_reason,
+                "action": action,
+            },
+        )
+        captured.append(learning)
+    return captured
+
+
+def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
+    """Promote repeated learnings into reviewed/promoted hypotheses."""
+    if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
+        return {"status": "disabled", "promoted": 0, "reviewed": 0}
+    now = int(time.time())
+    interval = int(CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600))
+    last_run = int(STORE.load_runtime_value("reflection_last_run_at", 0) or 0)
+    if not force and last_run and now - last_run < interval:
+        return {"status": "skipped", "promoted": 0, "reviewed": 0}
+
+    threshold = max(2, int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3)))
+    learnings = STORE.list_learnings(limit=100)
+    promoted = 0
+    reviewed = 0
+    for learning in learnings:
+        if learning.get("status") == "promoted":
+            continue
+        reviewed += 1
+        next_status = "reviewed"
+        promoted_target = ""
+        if int(learning.get("occurrences") or 0) >= threshold:
+            next_status = "promoted"
+            category = str(learning.get("category") or "")
+            promoted_target = "contract" if category == "control_plane" else "rule"
+            promoted += 1
+        STORE.upsert_learning(
+            learning_key=str(learning.get("learning_key") or ""),
+            env_id=str(learning.get("env_id") or current_env_spec()["id"]),
+            task_id=str(learning.get("task_id") or ""),
+            category=str(learning.get("category") or "misc"),
+            title=str(learning.get("title") or ""),
+            detail=str(learning.get("detail") or ""),
+            evidence=learning.get("evidence") or {},
+            status=next_status,
+            promoted_target=promoted_target,
+        )
+    summary = {
+        "status": "ok",
+        "reviewed": reviewed,
+        "promoted": promoted,
+        "threshold": threshold,
+        "generated_at": now,
+    }
+    STORE.record_reflection_run("scheduled", summary)
+    STORE.save_runtime_value("reflection_last_run_at", now)
+    return summary
 
 
 def sync_runtime_task_registry(lines: list[str]) -> None:
@@ -1866,6 +1969,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     summary="守护控制面催办失败，任务已阻塞。",
                     control_state=control_state,
                 )
+    capture_control_plane_learnings(outcomes)
     write_task_registry_snapshot()
     return outcomes
 
@@ -1920,17 +2024,26 @@ def notify(title: str, message: str, level: str = "info"):
     """发送通知"""
     emoji = {"info": "ℹ️", "warning": "⚠️", "error": "❌", "success": "✅"}.get(level, "ℹ️")
     text = f"## {emoji} OpenClaw Guardian\n\n**{title}**\n\n{message}"
+
+    def post_json(url: str, payload: dict[str, Any]) -> None:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            return
     
     # 钉钉
     if CONFIG.get("DINGTALK_WEBHOOK"):
         try:
-            requests.post(
+            post_json(
                 CONFIG["DINGTALK_WEBHOOK"],
-                json={
+                {
                     "msgtype": "markdown",
                     "markdown": {"title": title, "text": text}
                 },
-                timeout=10
             )
             log(f"钉钉通知已发送: {title}")
         except Exception as e:
@@ -1939,10 +2052,9 @@ def notify(title: str, message: str, level: str = "info"):
     # 飞书
     if CONFIG.get("FEISHU_WEBHOOK"):
         try:
-            requests.post(
+            post_json(
                 CONFIG["FEISHU_WEBHOOK"],
-                json={"msg_type": "text", "content": f"{title}\n{message}"},
-                timeout=10
+                {"msg_type": "text", "content": f"{title}\n{message}"},
             )
             log(f"飞书通知已发送: {title}")
         except Exception as e:
@@ -2252,6 +2364,7 @@ def main():
             scan_runtime_anomalies()
             push_runtime_progress_updates()
             enforce_task_registry_control_plane()
+            run_reflection_cycle()
             
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:

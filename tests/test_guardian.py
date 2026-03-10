@@ -774,6 +774,75 @@ class GuardianProgressPushTests(unittest.TestCase):
         self.assertIn("dev", message)
         self.assertIn("缺失回执=dev:started, dev:completed, test:started, test:completed", message)
 
+    def test_capture_control_plane_learnings_records_blocked_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "blocked",
+                    "current_stage": "等待结构化回执",
+                    "question": "做一个系统",
+                    "last_user_message": "做一个系统",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "blocked_reason": "missing_pipeline_receipt",
+                }
+            )
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "CONFIG", {"ENABLE_EVOLUTION_PLANE": True}), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}):
+                learnings = guardian.capture_control_plane_learnings(
+                    [{"task_id": "task-1", "action": "blocked", "blocked_reason": "missing_pipeline_receipt", "control_state": "blocked_unverified"}]
+                )
+            self.assertEqual(learnings[0]["category"], "control_plane")
+            self.assertEqual(store.summarize_learnings()["pending"], 1)
+
+    def test_run_reflection_cycle_promotes_repeated_learning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_learning(
+                learning_key="lk-1",
+                env_id="primary",
+                task_id="task-1",
+                category="control_plane",
+                title="缺少回执",
+                detail="missing ack",
+                evidence={"task_id": "task-1"},
+            )
+            store.upsert_learning(
+                learning_key="lk-1",
+                env_id="primary",
+                task_id="task-1",
+                category="control_plane",
+                title="缺少回执",
+                detail="missing ack",
+                evidence={"task_id": "task-1"},
+            )
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "ENABLE_EVOLUTION_PLANE": True,
+                        "LEARNING_PROMOTION_THRESHOLD": 2,
+                        "REFLECTION_INTERVAL_SECONDS": 3600,
+                    },
+                ), \
+                mock.patch.object(guardian.time, "time", return_value=100):
+                summary = guardian.run_reflection_cycle(force=True)
+            self.assertEqual(summary["promoted"], 1)
+            learning = store.get_learning("lk-1")
+            self.assertEqual(learning["status"], "promoted")
+            self.assertEqual(learning["promoted_target"], "contract")
+
 
 if __name__ == "__main__":
     unittest.main()

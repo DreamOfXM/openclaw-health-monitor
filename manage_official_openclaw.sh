@@ -233,7 +233,7 @@ build_official_repo() {
 }
 
 dashboard_url() {
-    local state port token
+    local state port token gateway_url gateway_url_encoded
     state="$(official_state)"
     port="$(official_port)"
     token="$(python3 - <<PY
@@ -247,10 +247,16 @@ except Exception:
     print("")
 PY
 )"
+    gateway_url="ws://127.0.0.1:$port"
+    gateway_url_encoded="$(python3 - <<PY
+import urllib.parse
+print(urllib.parse.quote("$gateway_url", safe=""))
+PY
+)"
     if [ -n "$token" ]; then
-        printf 'http://127.0.0.1:%s/#token=%s\n' "$port" "$token"
+        printf 'http://127.0.0.1:%s/#token=%s&gatewayUrl=%s\n' "$port" "$token" "$gateway_url_encoded"
     else
-        printf 'http://127.0.0.1:%s/\n' "$port"
+        printf 'http://127.0.0.1:%s/#gatewayUrl=%s\n' "$port" "$gateway_url_encoded"
     fi
 }
 
@@ -271,6 +277,24 @@ read_pid_file() {
 
 listener_pid() {
     lsof -ti "tcp:$(official_port)" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+}
+
+kill_listener_pid() {
+    local pid="$1"
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+stop_listener() {
+    local pid
+    pid="$(listener_pid)"
+    kill_listener_pid "$pid"
 }
 
 official_pid() {
@@ -315,6 +339,7 @@ start_official() {
     if [ -n "$pid" ]; then
         stop_official >/dev/null 2>&1 || true
     fi
+    stop_listener
 
     : > "$OFFICIAL_LOG_FILE"
     mkdir -p "$HOME/Library/LaunchAgents"
@@ -330,6 +355,8 @@ start_official() {
     <string>${node_bin:-node}</string>
     <string>${repo}/openclaw.mjs</string>
     <string>gateway</string>
+    <string>--bind</string>
+    <string>loopback</string>
     <string>--port</string>
     <string>${port}</string>
   </array>
@@ -369,7 +396,10 @@ EOF
 
     for _ in $(seq 1 40); do
         if health_check; then
-            pid="$(official_pid || true)"
+            pid="$(listener_pid || true)"
+            if [ -z "$pid" ]; then
+                pid="$(official_pid || true)"
+            fi
             if [ -n "$pid" ]; then
                 echo "$pid" > "$OFFICIAL_PID_FILE"
             fi
@@ -389,15 +419,13 @@ EOF
 }
 
 stop_official() {
-    local pid
+    local pid listener
     launchd_bootout "$OFFICIAL_LABEL" "$OFFICIAL_PLIST"
     pid="$(official_pid || true)"
-    if [ -n "$pid" ]; then
-        kill "$pid" 2>/dev/null || true
-        sleep 1
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
+    kill_listener_pid "$pid"
+    listener="$(listener_pid)"
+    if [ -n "$listener" ] && [ "$listener" != "$pid" ]; then
+        kill_listener_pid "$listener"
     fi
     rm -f "$OFFICIAL_PID_FILE"
     echo "Stopped official OpenClaw validation gateway."

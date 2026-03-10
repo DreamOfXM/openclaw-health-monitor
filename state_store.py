@@ -122,6 +122,33 @@ class MonitorStateStore:
 
                 CREATE INDEX IF NOT EXISTS idx_task_control_actions_task_status
                 ON task_control_actions(task_id, status, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS learnings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    learning_key TEXT NOT NULL UNIQUE,
+                    env_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    occurrences INTEGER NOT NULL DEFAULT 1,
+                    promoted_target TEXT NOT NULL DEFAULT '',
+                    first_seen_at INTEGER NOT NULL,
+                    last_seen_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_learnings_status_updated
+                ON learnings(status, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS reflection_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_type TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
                 """
             )
             columns = {
@@ -132,15 +159,28 @@ class MonitorStateStore:
                 conn.execute("ALTER TABLE task_events ADD COLUMN event_key TEXT NOT NULL DEFAULT ''")
             conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
             rows = conn.execute(
-                "SELECT id, event_type, payload_json FROM task_events WHERE event_key = '' OR event_key IS NULL"
+                "SELECT id, task_id, event_type, payload_json FROM task_events WHERE event_key = '' OR event_key IS NULL"
             ).fetchall()
+            dedupe_map: dict[tuple[str, str, str], int] = {}
+            duplicate_ids: list[int] = []
             for row in rows:
                 event_key = hashlib.sha1(
                     f"{row['event_type']}|{row['payload_json'] or '{}'}".encode("utf-8", errors="ignore")
                 ).hexdigest()
+                marker = (str(row["task_id"] or ""), str(row["event_type"] or ""), event_key)
+                if marker in dedupe_map:
+                    duplicate_ids.append(int(row["id"]))
+                    continue
+                dedupe_map[marker] = int(row["id"])
                 conn.execute(
                     "UPDATE task_events SET event_key = ? WHERE id = ?",
                     (event_key, row["id"]),
+                )
+            if duplicate_ids:
+                placeholders = ",".join("?" for _ in duplicate_ids)
+                conn.execute(
+                    f"DELETE FROM task_events WHERE id IN ({placeholders})",
+                    duplicate_ids,
                 )
             conn.execute(
                 """
@@ -508,6 +548,73 @@ class MonitorStateStore:
         )
         return actions[0] if actions else None
 
+    @staticmethod
+    def _build_contract_phase_statuses(
+        contract_id: str,
+        flags: dict[str, bool],
+        seen_receipts: set[str],
+    ) -> list[dict[str, Any]]:
+        if contract_id == "delivery_pipeline":
+            steps = [
+                ("pm", "产品", "planning"),
+                ("dev", "开发", "implementation"),
+                ("test", "测试", "testing"),
+            ]
+        elif contract_id == "quant_guarded":
+            steps = [
+                ("calculator", "精算", "analysis"),
+                ("verifier", "复核", "review"),
+                ("risk", "风险", "risk"),
+            ]
+        else:
+            steps = [
+                ("main", "主任务", "execution"),
+            ]
+
+        phase_statuses: list[dict[str, Any]] = []
+        for agent, label, phase in steps:
+            started = f"{agent}:started" in seen_receipts
+            completed = f"{agent}:completed" in seen_receipts
+            blocked = f"{agent}:blocked" in seen_receipts or flags.get(f"{agent}_blocked", False)
+            if blocked:
+                state = "blocked"
+            elif completed:
+                state = "completed"
+            elif started:
+                state = "running"
+            else:
+                state = "pending"
+            phase_statuses.append(
+                {
+                    "agent": agent,
+                    "label": label,
+                    "phase": phase,
+                    "state": state,
+                    "started": started,
+                    "completed": completed,
+                    "blocked": blocked,
+                }
+            )
+        return phase_statuses
+
+    @staticmethod
+    def _summarize_claim_level(
+        control_state: str,
+        evidence_level: str,
+        missing_receipts: list[str],
+    ) -> str:
+        if control_state in {"completed_verified"}:
+            return "completed_verified"
+        if control_state in {"blocked_unverified", "blocked_control_followup_failed", "dev_blocked", "test_blocked", "analysis_blocked"}:
+            return "blocked"
+        if evidence_level == "strong" and not missing_receipts:
+            return "execution_verified"
+        if evidence_level == "strong":
+            return "phase_verified"
+        if evidence_level == "moderate":
+            return "progress_only"
+        return "received_only"
+
     def reconcile_task_control_action(
         self,
         task: dict[str, Any],
@@ -520,6 +627,13 @@ class MonitorStateStore:
         summary = str(control.get("approved_summary") or "")
         missing = list(control.get("missing_receipts") or [])
         control_state = str(control.get("control_state") or "unknown")
+        details_payload = {
+            "contract_id": ((control.get("contract") or {}).get("id") or "single_agent"),
+            "next_action": next_action,
+            "next_actor": control.get("next_actor") or "",
+            "claim_level": control.get("claim_level") or "received_only",
+            "phase_statuses": control.get("phase_statuses") or [],
+        }
         existing = self.list_task_control_actions(
             task_id=task_id,
             statuses=["pending", "sent", "blocked"],
@@ -564,13 +678,7 @@ class MonitorStateStore:
                         control_state,
                         json.dumps(missing, ensure_ascii=False),
                         summary,
-                        json.dumps(
-                            {
-                                "contract_id": ((control.get("contract") or {}).get("id") or "single_agent"),
-                                "next_action": next_action,
-                            },
-                            ensure_ascii=False,
-                        ),
+                        json.dumps(details_payload, ensure_ascii=False),
                         now,
                         current["id"],
                     ),
@@ -592,13 +700,7 @@ class MonitorStateStore:
                         control_state,
                         json.dumps(missing, ensure_ascii=False),
                         summary,
-                        json.dumps(
-                            {
-                                "contract_id": ((control.get("contract") or {}).get("id") or "single_agent"),
-                                "next_action": next_action,
-                            },
-                            ensure_ascii=False,
-                        ),
+                        json.dumps(details_payload, ensure_ascii=False),
                         now,
                         now,
                     ),
@@ -696,9 +798,12 @@ class MonitorStateStore:
                 "control_state": "unknown",
                 "approved_summary": "任务不存在",
                 "next_action": "none",
+                "next_actor": "",
+                "claim_level": "received_only",
                 "contract": {"id": "single_agent", "required_receipts": []},
                 "missing_receipts": [],
                 "control_action": None,
+                "phase_statuses": [],
                 "flags": {},
             }
 
@@ -821,6 +926,7 @@ class MonitorStateStore:
         control_state = "received_only"
         approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
         next_action = "require_receipt_or_block"
+        next_actor = ""
 
         blocked_reason = str(task.get("blocked_reason") or "")
         blocked_state_locked = False
@@ -828,11 +934,13 @@ class MonitorStateStore:
             control_state = "blocked_unverified"
             approved_summary = "任务缺少结构化流水线回执，守护系统已判定为阻塞。"
             next_action = "manual_or_session_recovery"
+            next_actor = "guardian"
             blocked_state_locked = True
         elif blocked_reason == "control_followup_failed":
             control_state = "blocked_control_followup_failed"
             approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
             next_action = "manual_or_session_recovery"
+            next_actor = "guardian"
             blocked_state_locked = True
 
         required_receipts = list(contract.get("required_receipts") or [])
@@ -845,104 +953,134 @@ class MonitorStateStore:
                 control_state = "completed_verified"
                 approved_summary = "量化/精算任务已收到完整结构化回执。"
                 next_action = "none"
+                next_actor = ""
             elif flags["calculator_blocked"] or flags["verifier_blocked"] or flags["risk_blocked"]:
                 control_state = "analysis_blocked"
                 approved_summary = "精算/复核链路已阻塞。"
                 next_action = "manual_or_session_recovery"
+                next_actor = "guardian"
             elif "calculator:started" in missing_receipts:
                 control_state = "received_only"
                 approved_summary = "任务已接收，但精算节点尚未启动。"
                 next_action = "require_calculator_start"
+                next_actor = "calculator"
             elif "calculator:completed" in missing_receipts:
                 control_state = "calculator_running"
                 approved_summary = "精算节点已启动，等待结构化计算结果。"
                 next_action = "await_calculator_receipt"
+                next_actor = "calculator"
             elif "verifier:completed" in missing_receipts:
                 control_state = "awaiting_verifier"
                 approved_summary = "精算结果已返回，但复核尚未完成。"
                 next_action = "require_verifier_receipt"
+                next_actor = "verifier"
         elif contract.get("id") == "delivery_pipeline":
             if not missing_receipts and flags["dispatch_completed"]:
                 control_state = "completed_verified"
                 approved_summary = "产品、开发、测试链路都已收到结构化回执。"
                 next_action = "none"
+                next_actor = ""
             elif flags["test_blocked"]:
                 control_state = "test_blocked"
                 approved_summary = "测试阶段已阻塞。"
                 next_action = "wait_for_test_recovery"
+                next_actor = "test"
             elif flags["dev_blocked"]:
                 control_state = "dev_blocked"
                 approved_summary = "开发阶段已阻塞。"
                 next_action = "wait_for_dev_recovery"
+                next_actor = "dev"
             elif "pm:started" in missing_receipts:
                 control_state = "received_only"
                 approved_summary = "任务已接收，但产品梳理尚未开始。"
                 next_action = "require_pm_receipt"
+                next_actor = "pm"
             elif "pm:completed" in missing_receipts:
                 control_state = "planning_only"
                 approved_summary = "产品阶段已启动，等待方案回执。"
                 next_action = "await_pm_receipt"
+                next_actor = "pm"
             elif "dev:started" in missing_receipts:
                 control_state = "planning_only"
                 approved_summary = "方案已完成，但开发尚未启动。"
                 next_action = "require_dev_receipt"
+                next_actor = "dev"
             elif "dev:completed" in missing_receipts:
                 control_state = "dev_running"
                 approved_summary = "开发阶段已启动，存在结构化执行证据。"
                 next_action = "await_dev_receipt"
+                next_actor = "dev"
             elif "test:started" in missing_receipts:
                 control_state = "awaiting_test"
                 approved_summary = "开发回执已完成，但测试尚未启动。"
                 next_action = "require_test_receipt"
+                next_actor = "test"
             elif "test:completed" in missing_receipts:
                 control_state = "test_running"
                 approved_summary = "测试阶段已启动，等待最终测试回执。"
                 next_action = "await_test_receipt"
+                next_actor = "test"
         elif flags["test_completed"]:
             control_state = "completed_verified"
             approved_summary = "测试回执已完成，任务具备强证据完成状态。"
             next_action = "none"
+            next_actor = ""
         elif flags["test_blocked"]:
             control_state = "test_blocked"
             approved_summary = "测试阶段已阻塞。"
             next_action = "wait_for_test_recovery"
+            next_actor = "test"
         elif flags["dev_blocked"]:
             control_state = "dev_blocked"
             approved_summary = "开发阶段已阻塞。"
             next_action = "wait_for_dev_recovery"
+            next_actor = "dev"
         elif flags["dev_completed"] and not flags["test_started"]:
             control_state = "awaiting_test"
             approved_summary = "开发回执已完成，但测试尚未启动。"
             next_action = "require_test_receipt"
+            next_actor = "test"
         elif flags["dev_started"]:
             control_state = "dev_running"
             approved_summary = "开发阶段已启动，存在结构化执行证据。"
             next_action = "await_dev_receipt"
+            next_actor = "dev"
         elif flags["pm_completed"]:
             control_state = "planning_only"
             approved_summary = "方案已完成，但开发尚未启动。"
             next_action = "require_dev_receipt"
+            next_actor = "dev"
         elif flags["pipeline_progress"]:
             control_state = "progress_only"
             approved_summary = "存在阶段进展标记，但缺少结构化回执。"
             next_action = "require_receipt_or_block"
+            next_actor = "guardian"
         elif flags["dispatch_started"] and flags["dispatch_completed"]:
             control_state = "received_only"
             approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
             next_action = "require_receipt_or_block"
+            next_actor = "guardian"
 
         if task.get("status") == "completed" and flags["visible_completion"] and evidence_level == "weak":
             approved_summary = "任务已给出可见完成回复，但没有流水线级结构化证据。"
             next_action = "require_receipt_or_block"
+            next_actor = "guardian"
+
+        contract_id = str(contract.get("id") or "single_agent")
+        phase_statuses = self._build_contract_phase_statuses(contract_id, flags, seen_receipts)
+        claim_level = self._summarize_claim_level(control_state, evidence_level, missing_receipts)
 
         return {
             "evidence_level": evidence_level,
             "control_state": control_state,
             "approved_summary": approved_summary,
             "next_action": next_action,
+            "next_actor": next_actor,
+            "claim_level": claim_level,
             "contract": contract,
             "missing_receipts": missing_receipts,
             "control_action": self.get_open_control_action(task_id),
+            "phase_statuses": phase_statuses,
             "flags": flags,
             "latest_receipt": latest_receipt,
         }
@@ -998,6 +1136,133 @@ class MonitorStateStore:
         counts["total"] = sum(counts.values())
         return counts
 
+    def summarize_control_plane(self, *, env_id: str | None = None, recent_limit: int = 50) -> dict[str, Any]:
+        actions = self.list_task_control_actions(env_id=env_id, limit=recent_limit)
+        status_counts = {"pending": 0, "sent": 0, "blocked": 0, "resolved": 0}
+        for item in actions:
+            status = str(item.get("status") or "")
+            if status in status_counts:
+                status_counts[status] += 1
+
+        tasks = self.list_tasks(limit=recent_limit)
+        if env_id:
+            tasks = [task for task in tasks if task.get("env_id") == env_id]
+
+        claim_counts = {
+            "received_only": 0,
+            "progress_only": 0,
+            "phase_verified": 0,
+            "execution_verified": 0,
+            "completed_verified": 0,
+            "blocked": 0,
+        }
+        next_actor_counts: dict[str, int] = {}
+        recoverable = 0
+        blocked = 0
+        verified = 0
+        for task in tasks:
+            control = self.derive_task_control_state(task["task_id"])
+            claim = str(control.get("claim_level") or "received_only")
+            if claim in claim_counts:
+                claim_counts[claim] += 1
+            next_actor = str(control.get("next_actor") or "")
+            if next_actor:
+                next_actor_counts[next_actor] = next_actor_counts.get(next_actor, 0) + 1
+            control_state = str(control.get("control_state") or "")
+            if control_state.startswith("blocked") or control_state.endswith("_blocked"):
+                blocked += 1
+            elif str(control.get("next_action") or "") not in {"none", "manual_or_session_recovery"}:
+                recoverable += 1
+            if claim in {"execution_verified", "completed_verified"}:
+                verified += 1
+
+        sent = status_counts["sent"] + status_counts["resolved"]
+        blocked_or_pending = status_counts["blocked"] + status_counts["pending"]
+        success_rate = round((status_counts["resolved"] / sent) * 100, 1) if sent else 0.0
+        return {
+            "actions": status_counts,
+            "tasks": {
+                "total": len(tasks),
+                "verified": verified,
+                "recoverable": recoverable,
+                "blocked": blocked,
+                "claim_counts": claim_counts,
+                "next_actor_counts": next_actor_counts,
+            },
+            "ack_success_rate": success_rate,
+            "headline": (
+                "控制面稳定" if blocked_or_pending == 0
+                else f"存在 {blocked_or_pending} 个待处理控制动作"
+            ),
+        }
+
+    def list_tasks_for_session(self, session_key: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM managed_tasks
+                WHERE session_key = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (session_key, limit),
+            ).fetchall()
+        return [task for row in rows if (task := self._row_to_task(row))]
+
+    def derive_session_resolution(self, session_key: str) -> dict[str, Any]:
+        tasks = self.list_tasks_for_session(session_key, limit=20)
+        if not tasks:
+            return {
+                "session_key": session_key,
+                "active_task_id": None,
+                "active_task_status": "none",
+                "background_tasks": 0,
+                "stale_results": 0,
+                "late_completed_tasks": [],
+                "summary": "当前会话没有已登记任务。",
+            }
+
+        active = next(
+            (
+                task
+                for task in tasks
+                if task.get("status") in {"running", "blocked", "background"}
+            ),
+            tasks[0],
+        )
+        active_updated = int(active.get("updated_at") or 0)
+        late_completed = [
+            {
+                "task_id": task["task_id"],
+                "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                "completed_at": int(task.get("completed_at") or 0),
+            }
+            for task in tasks
+            if task.get("status") == "completed"
+            and int(task.get("completed_at") or 0) >= active_updated
+            and task["task_id"] != active["task_id"]
+        ]
+        background_tasks = sum(1 for task in tasks if task.get("status") == "background")
+        stale_results = len(late_completed)
+
+        summary = "当前会话以最新任务为主。"
+        if late_completed:
+            summary = "存在旧任务迟到结果，需要与当前任务隔离展示。"
+        elif active.get("status") == "blocked":
+            summary = "当前会话任务已阻塞，后续追问应优先返回阻塞事实。"
+        elif background_tasks:
+            summary = "当前会话存在后台任务，新的追问应优先绑定当前活动任务。"
+
+        return {
+            "session_key": session_key,
+            "active_task_id": active["task_id"],
+            "active_task_status": active.get("status") or "unknown",
+            "background_tasks": background_tasks,
+            "stale_results": stale_results,
+            "late_completed_tasks": late_completed[:5],
+            "summary": summary,
+        }
+
     def background_other_tasks_for_session(self, session_key: str, keep_task_id: str) -> None:
         now = int(time.time())
         with self._connection() as conn:
@@ -1032,9 +1297,159 @@ class MonitorStateStore:
             except sqlite3.IntegrityError:
                 return
 
+    def upsert_learning(
+        self,
+        *,
+        learning_key: str,
+        env_id: str,
+        task_id: str,
+        category: str,
+        title: str,
+        detail: str,
+        evidence: dict[str, Any] | None = None,
+        status: str = "pending",
+        promoted_target: str = "",
+    ) -> dict[str, Any]:
+        now = int(time.time())
+        evidence_payload = json.dumps(evidence or {}, ensure_ascii=False)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id, occurrences, first_seen_at FROM learnings WHERE learning_key = ?",
+                (learning_key,),
+            ).fetchone()
+            if row:
+                occurrences = int(row["occurrences"] or 0) + 1
+                first_seen_at = int(row["first_seen_at"] or now)
+                conn.execute(
+                    """
+                    UPDATE learnings
+                    SET env_id = ?, task_id = ?, category = ?, title = ?, detail = ?, status = ?,
+                        evidence_json = ?, occurrences = ?, promoted_target = ?, last_seen_at = ?, updated_at = ?
+                    WHERE learning_key = ?
+                    """,
+                    (
+                        env_id,
+                        task_id,
+                        category,
+                        title,
+                        detail,
+                        status,
+                        evidence_payload,
+                        occurrences,
+                        promoted_target,
+                        now,
+                        now,
+                        learning_key,
+                    ),
+                )
+            else:
+                occurrences = 1
+                first_seen_at = now
+                conn.execute(
+                    """
+                    INSERT INTO learnings(
+                        learning_key, env_id, task_id, category, title, detail, status,
+                        evidence_json, occurrences, promoted_target, first_seen_at, last_seen_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        learning_key,
+                        env_id,
+                        task_id,
+                        category,
+                        title,
+                        detail,
+                        status,
+                        evidence_payload,
+                        occurrences,
+                        promoted_target,
+                        first_seen_at,
+                        now,
+                        now,
+                    ),
+                )
+        return self.get_learning(learning_key) or {}
+
+    def get_learning(self, learning_key: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM learnings WHERE learning_key = ?",
+                (learning_key,),
+            ).fetchone()
+        return self._row_to_learning(row)
+
+    def list_learnings(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM learnings"
+        params: list[Any] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            query += f" WHERE status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [learning for row in rows if (learning := self._row_to_learning(row))]
+
+    def summarize_learnings(self) -> dict[str, Any]:
+        summary = {"pending": 0, "promoted": 0, "reviewed": 0, "total": 0}
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS cnt FROM learnings GROUP BY status"
+            ).fetchall()
+        for row in rows:
+            status = str(row["status"] or "")
+            if status in summary:
+                summary[status] = int(row["cnt"] or 0)
+        summary["total"] = sum(v for k, v in summary.items() if k != "total")
+        return summary
+
+    def record_reflection_run(self, run_type: str, summary: dict[str, Any]) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO reflection_runs(run_type, summary_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (run_type, json.dumps(summary, ensure_ascii=False), int(time.time())),
+            )
+
+    def list_reflection_runs(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_type, summary_json, created_at
+                FROM reflection_runs
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "run_type": row["run_type"],
+                "summary": json.loads(row["summary_json"] or "{}"),
+                "created_at": int(row["created_at"] or 0),
+            }
+            for row in rows
+        ]
+
     def _row_to_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if not row:
             return None
         task = dict(row)
         task["latest_receipt"] = json.loads(task.pop("latest_receipt_json") or "{}")
         return task
+
+    def _row_to_learning(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        learning = dict(row)
+        learning["evidence"] = json.loads(learning.pop("evidence_json") or "{}")
+        return learning
