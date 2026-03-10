@@ -1380,10 +1380,24 @@ def run_script(args: list[str], timeout: int = 180) -> tuple[int, str, str]:
         return -1, "", str(exc)
 
 
+def wait_for_env_listener(env_id: str, timeout: float = 15.0, interval: float = 0.5) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            spec = get_env_specs(load_config()).get(env_id)
+        except Exception:
+            spec = None
+        if spec and get_listener_pid(int(spec["port"])) is not None:
+            return True
+        time.sleep(interval)
+    return False
+
+
 def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env not in {"primary", "official"}:
         return False, "未知环境"
 
+    previous_env = active_env_id(load_config())
     if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
         return False, "保存 ACTIVE_OPENCLAW_ENV 失败"
     STORE.save_runtime_value("active_openclaw_env", {"env_id": target_env, "updated_at": int(time.time())})
@@ -1397,12 +1411,28 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env == "official":
         code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
         if code != 0:
+            if previous_env != target_env:
+                save_config("ACTIVE_OPENCLAW_ENV", previous_env)
+                STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
             return False, (stderr or stdout or "官方验证版启动失败").strip()
+        if not wait_for_env_listener("official"):
+            if previous_env != target_env:
+                save_config("ACTIVE_OPENCLAW_ENV", previous_env)
+                STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
+            return False, "官方验证版切换失败：Gateway 未成功启动"
         return True, stdout.strip() or "已切换到官方验证版"
 
     code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
+        if previous_env != target_env:
+            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
+            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
         return False, (stderr or stdout or "主用版启动失败").strip()
+    if not wait_for_env_listener("primary"):
+        if previous_env != target_env:
+            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
+            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
+        return False, "当前主用版切换失败：Gateway 未成功启动"
     return True, stdout.strip() or "已切换到当前主用版"
 
 

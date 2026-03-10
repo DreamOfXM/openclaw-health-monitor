@@ -411,6 +411,60 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["tasks"]["recoverable"], 1)
             self.assertEqual(payload["tasks"]["next_actor_counts"]["dev"], 1)
 
+    @mock.patch("dashboard.wait_for_env_listener")
+    @mock.patch("dashboard.run_script")
+    @mock.patch("dashboard.save_config")
+    def test_switch_openclaw_environment_rolls_back_when_primary_does_not_start(
+        self,
+        save_config,
+        run_script,
+        wait_for_env_listener,
+    ):
+        save_config.return_value = True
+        run_script.side_effect = [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "started", ""),
+        ]
+        wait_for_env_listener.return_value = False
+
+        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "official"}), \
+            mock.patch.object(dashboard, "STORE") as store:
+            ok, message = dashboard.switch_openclaw_environment("primary")
+
+        self.assertFalse(ok)
+        self.assertIn("Gateway 未成功启动", message)
+        self.assertEqual(save_config.call_args_list[0].args, ("ACTIVE_OPENCLAW_ENV", "primary"))
+        self.assertEqual(save_config.call_args_list[1].args, ("ACTIVE_OPENCLAW_ENV", "official"))
+        self.assertEqual(store.save_runtime_value.call_args_list[0].args[1]["env_id"], "primary")
+        self.assertEqual(store.save_runtime_value.call_args_list[1].args[1]["env_id"], "official")
+
+    @mock.patch("dashboard.wait_for_env_listener")
+    @mock.patch("dashboard.run_script")
+    @mock.patch("dashboard.save_config")
+    def test_switch_openclaw_environment_succeeds_when_primary_listener_is_ready(
+        self,
+        save_config,
+        run_script,
+        wait_for_env_listener,
+    ):
+        save_config.return_value = True
+        run_script.side_effect = [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "started", ""),
+        ]
+        wait_for_env_listener.return_value = True
+
+        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "official"}), \
+            mock.patch.object(dashboard, "STORE") as store:
+            ok, message = dashboard.switch_openclaw_environment("primary")
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "started")
+        self.assertEqual(save_config.call_count, 1)
+        self.assertEqual(store.save_runtime_value.call_args.args[1]["env_id"], "primary")
+
 
 if __name__ == "__main__":
     unittest.main()
