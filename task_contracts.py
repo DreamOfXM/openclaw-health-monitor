@@ -13,6 +13,7 @@ DEFAULT_TASK_CONTRACTS = {
     "contracts": [
         {
             "id": "quant_guarded",
+            "protocol_version": "hm.v1",
             "description": "Quant / financial / numerical work that should be backed by calculator and verifier receipts.",
             "keywords": [
                 "量化",
@@ -40,9 +41,11 @@ DEFAULT_TASK_CONTRACTS = {
                 "calculator:completed",
                 "verifier:completed",
             ],
+            "terminal_receipts": ["verifier:completed", "calculator:blocked", "verifier:blocked", "risk:blocked"],
         },
         {
             "id": "delivery_pipeline",
+            "protocol_version": "hm.v1",
             "description": "Product / implementation work that should continue through pm -> dev -> test.",
             "keywords": [
                 "需求",
@@ -71,12 +74,15 @@ DEFAULT_TASK_CONTRACTS = {
                 "test:started",
                 "test:completed",
             ],
+            "terminal_receipts": ["test:completed", "dev:blocked", "test:blocked"],
         },
         {
             "id": "single_agent",
+            "protocol_version": "hm.v1",
             "description": "Ad-hoc work that does not require a multi-agent pipeline contract.",
             "keywords": [],
             "required_receipts": [],
+            "terminal_receipts": ["main:completed", "main:blocked"],
         },
     ],
 }

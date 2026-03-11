@@ -388,6 +388,11 @@ start_gateway() {
     sleep 3
     pid="$(gateway_pid || true)"
     if [ -z "$pid" ]; then
+        run_gateway_service_cmd start >> "$LOG_DIR/gateway.log" 2>&1 || true
+        sleep 3
+        pid="$(gateway_pid || true)"
+    fi
+    if [ -z "$pid" ]; then
         echo "Gateway failed to start" >&2
         return 1
     fi

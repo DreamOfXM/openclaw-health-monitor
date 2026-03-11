@@ -221,6 +221,43 @@
 
 - 操作员能看懂每个 action 为什么存在
 
+### HM-105 流水线失联恢复
+
+优先级：`P1`
+
+问题：
+
+- 已出现真实案例：主任务已经成功派发 `pm -> dev`，但没有任何结构化回执回到主链路
+- 这类任务最后只会停在 `received_only / missing_pipeline_receipt / blocked_unverified`
+- 守护系统目前已经能识别并告警，但还不能把这类“半启动半失联”的流水线自动收口
+
+范围：
+
+- 明确识别“已派发子任务但无 receipts 返回”的失联场景
+- 为失联任务增加恢复策略：
+  - session recovery
+  - manual recovery hint
+  - stale subagent detection
+  - rebind active task
+- 区分：
+  - 根本未启动
+  - 已启动但未回执
+  - 已完成但未回传
+- 将 `manual_or_session_recovery` 从状态名提升为明确的恢复流程
+
+涉及文件：
+
+- [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
+- [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
+- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+
+验收标准：
+
+- 对“子任务已派发但 receipts 缺失”的任务，Dashboard 能明确显示为“流水线失联”
+- 能输出具体恢复建议，而不是只显示 blocked
+- 同类任务不再只能靠人工翻 session jsonl 才知道卡在哪
+- 至少对 `pm -> dev -> test` 流水线提供可执行恢复动作或恢复指引
+
 ---
 
 ## Epic 2：模型失败边界

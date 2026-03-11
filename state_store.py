@@ -533,6 +533,8 @@ class MonitorStateStore:
                 "last_followup_at": int(row["last_followup_at"] or 0),
                 "last_error": row["last_error"] or "",
                 "details": json.loads(row["details_json"] or "{}"),
+                "reason": (json.loads(row["details_json"] or "{}").get("reason") if (row["details_json"] or "") else ""),
+                "ack_id": (json.loads(row["details_json"] or "{}").get("ack_id") if (row["details_json"] or "") else ""),
                 "created_at": int(row["created_at"] or 0),
                 "updated_at": int(row["updated_at"] or 0),
                 "resolved_at": int(row["resolved_at"] or 0),
@@ -615,6 +617,79 @@ class MonitorStateStore:
             return "progress_only"
         return "received_only"
 
+    @staticmethod
+    def _infer_pipeline_recovery(
+        contract_id: str,
+        flags: dict[str, bool],
+        missing_receipts: list[str],
+        *,
+        latest_receipt: dict[str, Any],
+        current_stage: str,
+        task_status: str,
+    ) -> dict[str, Any]:
+        if contract_id != "delivery_pipeline":
+            return {}
+        current_lower = (current_stage or "").lower()
+        last_agent = str(latest_receipt.get("agent") or "")
+        if not last_agent:
+            if "planning" in current_lower:
+                last_agent = "pm"
+            elif "implementation" in current_lower or "dev" in current_lower:
+                last_agent = "dev"
+            elif "test" in current_lower:
+                last_agent = "test"
+        recovery_kind = ""
+        recovery_hint = ""
+        stale_subagent = ""
+        rebind_target = ""
+        if "pm:started" in missing_receipts:
+            recovery_kind = "not_started"
+            recovery_hint = "主任务已接收，但产品阶段尚未启动，应先确认 pm 是否收到调度。"
+            rebind_target = "pm"
+        elif flags["pm_started"] and "pm:completed" in missing_receipts:
+            recovery_kind = "started_no_receipt"
+            recovery_hint = "pm 已启动但没有结构化回执，建议做 session recovery 并确认规划结果是否已丢失。"
+            stale_subagent = "pm"
+            rebind_target = "pm"
+        elif flags["pm_completed"] and "dev:started" in missing_receipts:
+            recovery_kind = "handoff_lost"
+            recovery_hint = "pm 已完成，但 dev 未回执，需检查 dev 是否接到派发或主链路是否丢失 handoff。"
+            stale_subagent = last_agent or "dev"
+            rebind_target = "dev"
+        elif (flags["dev_started"] or "implementation" in current_lower) and "dev:completed" in missing_receipts:
+            recovery_kind = "pipeline_detached"
+            recovery_hint = "开发阶段看起来已启动，但主链路没有拿到 dev 结构化回执，应优先做 stale subagent detection 和 active task rebind。"
+            stale_subagent = last_agent or "dev"
+            rebind_target = "dev"
+        elif flags["dev_completed"] and "test:started" in missing_receipts:
+            recovery_kind = "handoff_lost"
+            recovery_hint = "dev 已完成，但 test 未启动，需恢复 dev -> test 的流水线接力。"
+            stale_subagent = last_agent or "test"
+            rebind_target = "test"
+        elif (flags["test_started"] or "test" in current_lower) and "test:completed" in missing_receipts:
+            recovery_kind = "started_no_receipt"
+            recovery_hint = "测试阶段已启动但最终回执缺失，应检查 test 子代理是否失联。"
+            stale_subagent = last_agent or "test"
+            rebind_target = "test"
+        elif task_status == "no_reply":
+            recovery_kind = "completed_not_returned"
+            recovery_hint = "任务可能已完成但结果未回传，应确认 final 输出是否丢失并执行 active task rebind。"
+            stale_subagent = last_agent or "main"
+            rebind_target = last_agent or "main"
+        if not recovery_kind:
+            return {}
+        return {
+            "kind": recovery_kind,
+            "last_dispatched_agent": last_agent or "unknown",
+            "missing_receipts": missing_receipts,
+            "stale_subagent": stale_subagent or "unknown",
+            "rebind_target": rebind_target or "guardian",
+            "manual_recovery_hint": recovery_hint,
+            "session_recovery": True,
+            "stale_subagent_detection": bool(stale_subagent),
+            "active_task_rebind": bool(rebind_target),
+        }
+
     def reconcile_task_control_action(
         self,
         task: dict[str, Any],
@@ -629,10 +704,13 @@ class MonitorStateStore:
         control_state = str(control.get("control_state") or "unknown")
         details_payload = {
             "contract_id": ((control.get("contract") or {}).get("id") or "single_agent"),
+            "protocol_version": ((control.get("contract") or {}).get("protocol_version") or "hm.v1"),
             "next_action": next_action,
             "next_actor": control.get("next_actor") or "",
             "claim_level": control.get("claim_level") or "received_only",
             "phase_statuses": control.get("phase_statuses") or [],
+            "reason": control.get("action_reason") or control.get("approved_summary") or "",
+            "ack_id": ((control.get("protocol") or {}).get("ack_id") or ""),
         }
         existing = self.list_task_control_actions(
             task_id=task_id,
@@ -1067,6 +1145,24 @@ class MonitorStateStore:
             next_actor = "guardian"
 
         contract_id = str(contract.get("id") or "single_agent")
+        pipeline_recovery = self._infer_pipeline_recovery(
+            contract_id,
+            flags,
+            missing_receipts,
+            latest_receipt=latest_receipt,
+            current_stage=str(task.get("current_stage") or ""),
+            task_status=str(task.get("status") or ""),
+        )
+        if pipeline_recovery and (
+            str(task.get("status") or "") in {"blocked", "no_reply", "background"}
+            or control_state in {"blocked_unverified", "blocked_control_followup_failed"}
+        ):
+            if control_state in {"blocked_unverified", "blocked_control_followup_failed"}:
+                approved_summary = "流水线已失联，守护系统已将任务切换到恢复流程。"
+            else:
+                approved_summary = "流水线已派发但主链路未收到关键回执，任务进入失联恢复视图。"
+            next_action = "manual_or_session_recovery"
+            next_actor = str(pipeline_recovery.get("rebind_target") or "guardian")
         phase_statuses = self._build_contract_phase_statuses(contract_id, flags, seen_receipts)
         claim_level = self._summarize_claim_level(control_state, evidence_level, missing_receipts)
         protocol_status = {
@@ -1098,6 +1194,7 @@ class MonitorStateStore:
             "phase_statuses": phase_statuses,
             "flags": flags,
             "latest_receipt": latest_receipt,
+            "pipeline_recovery": pipeline_recovery,
         }
 
     def get_current_task(self, *, env_id: str | None = None) -> dict[str, Any] | None:
@@ -1245,7 +1342,7 @@ class MonitorStateStore:
             ),
             tasks[0],
         )
-        active_updated = int(active.get("updated_at") or 0)
+        active_started = max(int(active.get("created_at") or 0), int(active.get("started_at") or 0))
         late_completed = [
             {
                 "task_id": task["task_id"],
@@ -1254,7 +1351,7 @@ class MonitorStateStore:
             }
             for task in tasks
             if task.get("status") == "completed"
-            and int(task.get("completed_at") or 0) >= active_updated
+            and int(task.get("completed_at") or 0) >= active_started
             and task["task_id"] != active["task_id"]
         ]
         background_tasks = sum(1 for task in tasks if task.get("status") == "background")

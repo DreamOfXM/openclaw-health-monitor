@@ -577,26 +577,52 @@ def summarize_memory_usage(metrics: dict, top_processes: list[dict]) -> dict:
 
 def list_snapshots(limit: int = 20) -> list[dict]:
     """列出最近的配置快照。"""
+    cfg = load_config()
     snapshots = []
-    for snapshot_dir in SNAPSHOTS.list_snapshots()[:limit]:
-        manifest_file = snapshot_dir / "manifest.json"
-        item = {
-            "name": snapshot_dir.name,
-            "created_at": "",
-            "label": "",
-            "file_count": 0,
-        }
-        if manifest_file.exists():
-            try:
-                with open(manifest_file) as handle:
-                    manifest = json.load(handle)
-                item["created_at"] = manifest.get("created_at", "")
-                item["label"] = manifest.get("label", "")
-                item["file_count"] = len(manifest.get("files", []))
-            except Exception:
-                pass
-        snapshots.append(item)
-    return snapshots
+    for env_id, spec in get_env_specs(cfg).items():
+        manager = SnapshotManager(BASE_DIR, Path(spec["home"]))
+        for snapshot_dir in manager.list_snapshots()[:limit]:
+            manifest_file = snapshot_dir / "manifest.json"
+            item = {
+                "name": snapshot_dir.name,
+                "created_at": "",
+                "label": "",
+                "file_count": 0,
+                "env_id": env_id,
+            }
+            if manifest_file.exists():
+                try:
+                    with open(manifest_file) as handle:
+                        manifest = json.load(handle)
+                    item["created_at"] = manifest.get("created_at", "")
+                    item["label"] = manifest.get("label", "")
+                    item["file_count"] = len(manifest.get("files", []))
+                except Exception:
+                    pass
+            snapshots.append(item)
+    snapshots.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return snapshots[:limit]
+
+
+def snapshot_env_id(snapshot_name: str) -> str:
+    if snapshot_name.endswith("-official") or "-official-" in snapshot_name:
+        return "official"
+    return "primary"
+
+
+def restore_snapshot_and_restart(snapshot_name: str) -> tuple[bool, str]:
+    cfg = load_config()
+    env_id = snapshot_env_id(snapshot_name)
+    spec = env_spec(env_id, cfg)
+    manager = SnapshotManager(BASE_DIR, Path(spec["home"]))
+    snapshot_dir = manager.snapshot_root / snapshot_name
+    if not snapshot_dir.exists() or not snapshot_dir.is_dir():
+        return False, "快照不存在"
+    manager.restore_snapshot(snapshot_dir)
+    if env_id == active_env_id(cfg):
+        success, message, _, _, _ = restart_active_openclaw_environment()
+        return success, message if success else f"快照已恢复，但重启失败：{message}"
+    return True, f"已恢复 {env_id} 配置快照，未切换当前活动环境"
 
 
 def load_config() -> dict:
@@ -793,14 +819,20 @@ def build_model_failure_summary(errors: list[dict], recent_events: list[dict]) -
         ).lower()
         for category, needles in categories.items():
             if any(needle in text for needle in needles):
-                observed.setdefault(category, {"count": 0, "sample": str(item.get("message") or "")})
+                observed.setdefault(category, {"count": 0, "sample": str(item.get("message") or ""), "provider": "", "model": "", "status": "", "message": str(item.get("message") or "")})
                 observed[category]["count"] += 1
     for item in errors or []:
         text = str(item.get("message") or "").lower()
         for category, needles in categories.items():
             if any(needle in text for needle in needles):
-                observed.setdefault(category, {"count": 0, "sample": str(item.get("message") or "")})
+                observed.setdefault(category, {"count": 0, "sample": str(item.get("message") or ""), "provider": str(item.get("provider") or ""), "model": str(item.get("model") or ""), "status": str(item.get("status") or ""), "message": str(item.get("message") or "")})
                 observed[category]["count"] += 1
+                if item.get("provider") and not observed[category].get("provider"):
+                    observed[category]["provider"] = str(item.get("provider") or "")
+                if item.get("model") and not observed[category].get("model"):
+                    observed[category]["model"] = str(item.get("model") or "")
+                if item.get("status") and not observed[category].get("status"):
+                    observed[category]["status"] = str(item.get("status") or "")
     priority = [
         "auth_failure",
         "fallback_exhausted",
@@ -827,6 +859,10 @@ def build_model_failure_summary(errors: list[dict], recent_events: list[dict]) -
                 "label": labels.get(key, key),
                 "count": int(value.get("count") or 0),
                 "sample": str(value.get("sample") or ""),
+                "provider": str(value.get("provider") or ""),
+                "model": str(value.get("model") or ""),
+                "status": str(value.get("status") or ""),
+                "message": str(value.get("message") or value.get("sample") or ""),
             }
             for key, value in observed.items()
         ],
@@ -870,6 +906,15 @@ def build_context_lifecycle_readiness(config: Optional[dict] = None) -> dict:
     payload["checks"] = checks
     payload["ready"] = all(bool(item.get("ok")) for item in checks)
     payload["headline"] = "长期运行基线已达标" if payload["ready"] else "长期运行基线未达标"
+    payload["recommended_baseline"] = {
+        "session": {
+            "memoryFlush": {"enabled": True, "maxTurns": 120},
+            "contextPruning": {"enabled": True, "tokenBudget": 180000},
+            "dailyReset": {"enabled": True, "hour": 4},
+            "idleReset": {"enabled": True, "seconds": 21600},
+            "sessionMaintenance": {"enabled": True, "intervalSeconds": 1800},
+        }
+    }
     return payload
 
 
@@ -895,8 +940,8 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
         "control_action_queue": task_registry.get("control_queue") or [],
         "runtime_health": {
             "metrics": metrics,
-            "gateway_healthy": check_gateway_health_for_env(selected_env),
-            "gateway_process": get_gateway_process_for_env(selected_env),
+            "gateway_healthy": check_gateway_health_for_env(selected_env) if selected_env.get("port") else False,
+            "gateway_process": get_gateway_process_for_env(selected_env) if selected_env.get("port") else None,
             "guardian_process": get_guardian_process_info(),
             "recent_events": recent_events,
         },
@@ -905,6 +950,12 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
             "suggestions": learning_center.get("suggestions") or [],
             "learnings": learning_center.get("learnings") or [],
             "reflections": learning_center.get("reflections") or [],
+        },
+        "context_lifecycle": build_context_lifecycle_readiness(cfg),
+        "learning_promotion_policy": {
+            "reflection_interval_seconds": int(cfg.get("REFLECTION_INTERVAL_SECONDS", 3600)),
+            "learning_promotion_threshold": int(cfg.get("LEARNING_PROMOTION_THRESHOLD", 3)),
+            "daily_review_expected": True,
         },
         "control_plane": control_plane,
     }
@@ -1464,7 +1515,18 @@ def get_error_logs(count: int = 20, spec: Optional[dict] = None) -> list:
                     try:
                         ts = line[:19]
                         msg = line[20:].strip()[:150]
-                        errors.append({"time": ts[11:19], "message": msg})
+                        status_match = re.search(r"\b(400|401|403|404|408|429|500|502|503|504)\b", msg)
+                        provider_match = re.search(r"provider[=:]\s*([a-zA-Z0-9._-]+)", msg, re.IGNORECASE)
+                        model_match = re.search(r"model[=:]\s*([a-zA-Z0-9._:/-]+)", msg, re.IGNORECASE)
+                        errors.append(
+                            {
+                                "time": ts[11:19],
+                                "message": msg,
+                                "status": status_match.group(1) if status_match else "",
+                                "provider": provider_match.group(1) if provider_match else "",
+                                "model": model_match.group(1) if model_match else "",
+                            }
+                        )
                     except:
                         pass
             break
@@ -1604,11 +1666,63 @@ def wait_for_env_listener(env_id: str, timeout: float = 15.0, interval: float = 
     return False
 
 
+def inactive_env_id(env_id: str) -> str:
+    return "official" if env_id == "primary" else "primary"
+
+
+def enforce_single_active_listener(target_env: str) -> tuple[bool, str]:
+    cfg = load_config()
+    specs = get_env_specs(cfg)
+    active_spec = specs[target_env]
+    inactive_spec = specs[inactive_env_id(target_env)]
+    active_pid = get_listener_pid(int(active_spec["port"]))
+    inactive_pid = get_listener_pid(int(inactive_spec["port"]))
+    if active_pid is None:
+        return False, f"{active_spec['name']} listener 未启动"
+    if inactive_pid is None:
+        return True, "single-active ok"
+    if target_env == "official":
+        run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+    else:
+        run_script([str(OFFICIAL_MANAGER), "stop"], timeout=120)
+    time.sleep(2)
+    inactive_pid_after = get_listener_pid(int(inactive_spec["port"]))
+    if inactive_pid_after is not None:
+        return False, f"{inactive_spec['name']} listener 仍然存活"
+    return True, f"已停止 {inactive_spec['name']} listener"
+
+
+def restore_environment_after_failed_switch(previous_env: str) -> tuple[bool, str]:
+    if previous_env == "official":
+        code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
+        if code != 0:
+            return False, (stderr or stdout or "恢复 official 失败").strip()
+        if not wait_for_env_listener("official"):
+            return False, "恢复 official 失败：listener 未启动"
+        return True, "已恢复 official"
+    code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
+    if code != 0:
+        return False, (stderr or stdout or "恢复 primary 失败").strip()
+    if not wait_for_env_listener("primary"):
+        return False, "恢复 primary 失败：listener 未启动"
+    return True, "已恢复 primary"
+
+
 def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env not in {"primary", "official"}:
         return False, "未知环境"
 
     previous_env = active_env_id(load_config())
+
+    def rollback_and_restore(message: str) -> tuple[bool, str]:
+        if previous_env != target_env:
+            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
+            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
+            restored, restore_message = restore_environment_after_failed_switch(previous_env)
+            if not restored:
+                return False, f"{message}; 回滚恢复失败：{restore_message}"
+        return False, message
+
     if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
         return False, "保存 ACTIVE_OPENCLAW_ENV 失败"
     STORE.save_runtime_value("active_openclaw_env", {"env_id": target_env, "updated_at": int(time.time())})
@@ -1622,28 +1736,22 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env == "official":
         code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
         if code != 0:
-            if previous_env != target_env:
-                save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-                STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-            return False, (stderr or stdout or "官方验证版启动失败").strip()
+            return rollback_and_restore((stderr or stdout or "官方验证版启动失败").strip())
         if not wait_for_env_listener("official"):
-            if previous_env != target_env:
-                save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-                STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-            return False, "官方验证版切换失败：Gateway 未成功启动"
+            return rollback_and_restore("官方验证版切换失败：Gateway 未成功启动")
+        single_ok, single_message = enforce_single_active_listener("official")
+        if not single_ok:
+            return rollback_and_restore(f"官方验证版切换失败：{single_message}")
         return True, stdout.strip() or "已切换到官方验证版"
 
     code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
-        if previous_env != target_env:
-            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-        return False, (stderr or stdout or "主用版启动失败").strip()
+        return rollback_and_restore((stderr or stdout or "主用版启动失败").strip())
     if not wait_for_env_listener("primary"):
-        if previous_env != target_env:
-            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-        return False, "当前主用版切换失败：Gateway 未成功启动"
+        return rollback_and_restore("当前主用版切换失败：Gateway 未成功启动")
+    single_ok, single_message = enforce_single_active_listener("primary")
+    if not single_ok:
+        return rollback_and_restore(f"当前主用版切换失败：{single_message}")
     return True, stdout.strip() or "已切换到当前主用版"
 
 
@@ -1667,6 +1775,9 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         return False, (stderr or stdout or "Gateway 重启失败").strip(), old_pid_str, None, target_env
     if not wait_for_env_listener(target_env):
         return False, f"{spec['name']} 重启失败：Gateway 未成功启动", old_pid_str, None, target_env
+    single_ok, single_message = enforce_single_active_listener(target_env)
+    if not single_ok:
+        return False, f"{spec['name']} 重启失败：{single_message}", old_pid_str, None, target_env
 
     new_pid = get_listener_pid(int(spec["port"]))
     new_pid_str = str(new_pid) if new_pid is not None else None
@@ -1712,6 +1823,8 @@ def manage_official_environment(action: str) -> tuple[bool, str]:
     }
     if action not in allowed:
         return False, "未知操作"
+    if action == "start" and active_env_id(load_config()) != "official":
+        return False, "请先切换到 official 再启动，避免双监听"
     timeout = 300 if action in {"prepare", "update", "start"} else 120
     code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), action], timeout=timeout)
     message = (stdout or stderr or allowed[action]).strip()
@@ -1802,7 +1915,7 @@ def index():
             line-height: 1.05;
             letter-spacing: -0.04em;
         }
-        .refresh-info { font-size: 14px; color: var(--text-muted); max-width: 720px; }
+        .refresh-info { font-size: 12px; color: var(--text-muted); max-width: 560px; }
         .actions { display: flex; flex-wrap: wrap; gap: 10px; }
         .btn,
         .config-btn,
@@ -1818,7 +1931,7 @@ def index():
         }
         .btn,
         .config-btn,
-        .diagnose-action { padding: 10px 16px; font-size: 13px; font-weight: 600; }
+        .diagnose-action { padding: 8px 12px; font-size: 12px; font-weight: 600; }
         .btn:hover,
         .config-btn:hover,
         .diagnose-action:hover,
@@ -1872,8 +1985,8 @@ def index():
         .card {
             position: relative;
             overflow: hidden;
-            min-height: 136px;
-            padding: 18px;
+            min-height: 108px;
+            padding: 14px;
             border-radius: var(--radius-md);
         }
         .card::before {
@@ -1927,7 +2040,7 @@ def index():
         .status-error { color: var(--danger); background: transparent; }
         .section {
             margin: 0;
-            padding: 18px 18px 20px;
+            padding: 14px 14px 16px;
             border-radius: var(--radius-lg);
         }
         .section h2 {
@@ -1939,20 +2052,20 @@ def index():
         }
         .section-lead { display: none; }
         .dashboard-layout,
-        .dashboard-stack { display: grid; gap: 18px; }
+        .dashboard-stack { display: grid; gap: 12px; }
         .hero-supergrid {
             display: grid;
             grid-template-columns: minmax(0, 1.28fr) minmax(360px, 0.72fr);
-            gap: 18px;
+            gap: 14px;
             align-items: stretch;
-            margin-bottom: 18px;
+            margin-bottom: 14px;
         }
         .hero-surface,
         .hero-side {
             position: relative;
             display: grid;
-            gap: 14px;
-            padding: 18px;
+            gap: 10px;
+            padding: 14px;
             border-radius: var(--radius-lg);
             border: 1px solid var(--border-strong);
             background: linear-gradient(180deg, rgba(15, 25, 38, 0.96), rgba(9, 17, 26, 0.98));
@@ -1970,7 +2083,7 @@ def index():
         .hero-headline {
             display: grid;
             gap: 8px;
-            padding-bottom: 14px;
+            padding-bottom: 10px;
             border-bottom: 1px solid rgba(255,255,255,0.06);
         }
         .hero-label {
@@ -1990,11 +2103,11 @@ def index():
         .hero-grid {
             display: grid;
             grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
-            gap: 14px;
+            gap: 10px;
             align-items: start;
         }
         .hero-block {
-            padding: 16px 18px;
+            padding: 12px 14px;
             border-radius: var(--radius-md);
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.06);
@@ -2003,25 +2116,25 @@ def index():
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
-            margin-top: 6px;
+            margin-top: 2px;
         }
         .hero-kpi-strip {
             display: grid;
             grid-template-columns: repeat(4, minmax(180px, 1fr));
-            gap: 14px;
-            margin: 0 0 18px;
+            gap: 10px;
+            margin: 0 0 14px;
         }
         .hero-meta-grid,
         .operations-zone,
         .incident-zone,
         .promotion-zone,
         .evidence-zone,
-        .maintenance-zone { display: grid; gap: 18px; }
-        .hero-meta-grid { grid-template-columns: 1fr; gap: 12px; }
+        .maintenance-zone { display: grid; gap: 14px; }
+        .hero-meta-grid { grid-template-columns: 1fr; gap: 10px; }
         .operations-grid {
             display: grid;
             grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
-            gap: 14px;
+            gap: 10px;
             align-items: start;
         }
         .incident-grid-wide,
@@ -2029,7 +2142,7 @@ def index():
         .evidence-grid,
         .maintenance-grid {
             display: grid;
-            gap: 14px;
+            gap: 10px;
         }
         .incident-grid-wide { grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr); }
         .promotion-grid { grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr); }
@@ -2041,7 +2154,7 @@ def index():
             gap: 14px;
             align-items: start;
         }
-        .panel-shell { padding: 14px; border-radius: var(--radius-md); }
+        .panel-shell { padding: 10px; border-radius: var(--radius-md); box-shadow: none; background: rgba(255,255,255,0.02); }
         .memory-summary,
         .row,
         .env-grid,
@@ -2058,7 +2171,7 @@ def index():
         .workflow-collapsible,
         .env-card,
         .promotion-stage,
-        .incident-card { padding: 16px 18px; border-radius: var(--radius-md); }
+        .incident-card { padding: 12px 14px; border-radius: var(--radius-md); }
         .incident-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
         .incident-card:first-child {
             background: linear-gradient(135deg, rgba(79, 140, 255, 0.14), rgba(12, 21, 32, 0.96));
@@ -2116,7 +2229,7 @@ def index():
         .event-title,
         .control-queue-title,
         .agent-task,
-        .diagnose-title { font-size: 15px; font-weight: 700; color: var(--text); }
+        .diagnose-title { font-size: 13px; font-weight: 700; color: var(--text); }
         .agent-task { margin-bottom: 8px; }
         .agent-file,
         .memory-item-note { margin-top: 8px; font-size: 11px; color: var(--text-soft); }
@@ -2182,8 +2295,8 @@ def index():
             display: grid;
             grid-template-columns: 1.2fr 1fr;
             gap: 12px;
-            padding: 14px 18px;
-            margin-bottom: 18px;
+            padding: 10px 14px;
+            margin-bottom: 14px;
             border-radius: var(--radius-md);
             border: 1px solid var(--border);
             background: rgba(12, 21, 32, 0.9);
@@ -2218,7 +2331,7 @@ def index():
             top: 18px;
             display: grid;
             gap: 8px;
-            padding: 14px;
+            padding: 10px;
             border-radius: var(--radius-lg);
             border: 1px solid var(--border);
             background: rgba(12, 21, 32, 0.92);
@@ -2234,13 +2347,13 @@ def index():
         }
         .tab {
             width: 100%;
-            padding: 12px 14px;
+            padding: 10px 12px;
             border: 1px solid transparent;
             border-radius: 14px;
             background: transparent;
             color: var(--text-soft);
             cursor: pointer;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 700;
             text-align: left;
             transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
@@ -2249,11 +2362,11 @@ def index():
         .tab.active { color: var(--text); background: rgba(88, 166, 255, 0.14); border-color: rgba(88, 166, 255, 0.2); box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.12); }
         .content-panel {
             display: grid;
-            gap: 18px;
+            gap: 14px;
         }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-        .page-stack { display: grid; gap: 18px; }
+        .page-stack { display: grid; gap: 14px; }
         .overview-grid,
         .environment-page,
         .tasks-page,
@@ -2262,7 +2375,7 @@ def index():
         .release-page,
         .recovery-page,
         .learning-page,
-        .settings-page { display: grid; gap: 18px; }
+        .settings-page { display: grid; gap: 14px; }
         .overview-summary-grid,
         .environment-page,
         .tasks-page,
@@ -2272,10 +2385,10 @@ def index():
         .settings-page { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .recovery-page { grid-template-columns: 1.05fr 0.95fr; }
         .agents-page { grid-template-columns: minmax(300px, 0.84fr) minmax(0, 1.16fr); }
-        .section-compact h2 { font-size: 17px; margin-bottom: 10px; }
+        .section-compact h2 { font-size: 15px; margin-bottom: 8px; }
         .metric-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
         .metric-card {
-            padding: 14px 16px;
+            padding: 10px 12px;
             border-radius: var(--radius-md);
             border: 1px solid rgba(255,255,255,0.07);
             background: rgba(255,255,255,0.035);
@@ -2289,13 +2402,13 @@ def index():
             color: var(--text-soft);
             margin-bottom: 8px;
         }
-        .metric-main { font-size: 22px; font-weight: 800; letter-spacing: -0.04em; }
-        .metric-sub { margin-top: 6px; font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+        .metric-main { font-size: 16px; font-weight: 800; letter-spacing: -0.04em; }
+        .metric-sub { margin-top: 4px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
         .summary-list,
         .warning-list { display: grid; gap: 10px; }
         .summary-item,
         .warning-item {
-            padding: 12px 14px;
+            padding: 10px 12px;
             border-radius: var(--radius-sm);
             border: 1px solid rgba(255,255,255,0.06);
             background: rgba(255,255,255,0.03);
@@ -2309,7 +2422,7 @@ def index():
         .dual-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
         .agent-seats { display: grid; gap: 10px; }
         .agent-seat {
-            padding: 14px 15px;
+            padding: 10px 12px;
             border-radius: var(--radius-md);
             border: 1px solid rgba(255,255,255,0.08);
             background: rgba(255,255,255,0.03);
@@ -2327,28 +2440,28 @@ def index():
             background: linear-gradient(135deg, rgba(62,207,142,0.12), rgba(12,21,32,0.94));
         }
         .agent-seat-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
-        .agent-seat-sub { margin-top: 8px; font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+        .agent-seat-sub { margin-top: 6px; font-size: 11px; color: var(--text-muted); line-height: 1.45; }
         .focus-stage {
             display: grid;
-            gap: 12px;
-            padding: 18px;
+            gap: 10px;
+            padding: 14px;
             border-radius: var(--radius-lg);
             border: 1px solid rgba(88,166,255,0.18);
             background: linear-gradient(180deg, rgba(12, 23, 36, 0.96), rgba(8, 15, 24, 0.98));
             box-shadow: var(--shadow-md);
         }
         .focus-quote {
-            padding: 14px 16px;
+            padding: 10px 12px;
             border-radius: var(--radius-md);
             background: rgba(0,0,0,0.28);
             border: 1px solid rgba(255,255,255,0.06);
             color: var(--text);
-            font-size: 14px;
-            line-height: 1.7;
+            font-size: 12px;
+            line-height: 1.55;
         }
         .focus-feed { display: grid; gap: 10px; }
         .feed-item {
-            padding: 12px 14px;
+            padding: 10px 12px;
             border-radius: var(--radius-sm);
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.05);
@@ -2513,12 +2626,7 @@ def index():
                                         </div>
                                         <div class="hero-block">
                                         <div class="hero-label" title="建议优先动作">操作</div>
-                                            <div id="overview-next-action" class="summary-list"></div>
-                                            <div class="hero-actions">
-                                                <button class="btn" onclick="location.reload()">刷新</button>
-                                                <button class="btn btn-primary" onclick="restartGateway()">重启 Gateway</button>
-                                                <button class="btn" style="background:#dc2626" onclick="emergencyRecover()">急救恢复</button>
-                                            </div>
+                                        <div id="overview-next-action" class="summary-list"></div>
                                         </div>
                                     </div>
                                 </div>
@@ -3186,7 +3294,7 @@ def index():
                     const targetMeta = item.id === 'official' ? `目标版本: ${item.target_head || '-'}<br/>` : '';
                     const updateMeta = item.id === 'official' ? `<br/>自动更新: ${item.auto_update_enabled ? '已开启' : '未开启'}` : '';
                     return `
-                        <div class="env-card ${item.active ? 'active' : ''}">
+                        <div class="env-card ${item.active ? 'active' : ''}" title="code=${item.code}&#10;state=${item.home}&#10;token=${item.token_prefix || '-'}">
                             <div class="env-title-row">
                                 <div class="env-title">${item.name}</div>
                                 <div class="env-pill ${item.active ? 'active' : ''}">${item.active ? '当前守护中' : '可切换'}</div>
@@ -3306,7 +3414,11 @@ def index():
                 })), '最近没有新的异常或进度事件');
                 const failureItems = [];
                 if (modelFailureSummary.primary_type && modelFailureSummary.primary_type !== 'ok') {
-                    failureItems.push({title: `主失败类型：${modelFailureSummary.headline}`, body: (modelFailureSummary.items || []).map(item => `${item.label} x${item.count}`).join(' | ') || '暂无细节'});
+                    const failureDetail = (modelFailureSummary.items || []).map(item => {
+                        const meta = [item.provider, item.model, item.status].filter(Boolean).join(' / ');
+                        return `${item.label} x${item.count}${meta ? ` (${meta})` : ''}`;
+                    }).join(' | ');
+                    failureItems.push({title: `主失败类型：${modelFailureSummary.headline}`, body: failureDetail || '暂无细节'});
                 }
                 (data.errors || []).slice(0, 2).forEach(item => failureItems.push({title: '最近错误日志', body: `${item.time} · ${item.message}`}));
                 if ((data.recent_events || []).some(item => String(item.message || '').includes('无回复') || String(item.message || '').includes('WebSocket'))) {
@@ -3370,6 +3482,7 @@ def index():
                         <div class="memory-box-sub" style="margin-top:6px;">证据摘要: ${control.evidence_summary || '-'} </div>
                         <div class="memory-box-sub" style="margin-top:6px;">协议: request=${(control.protocol || {}).request || '-'} | confirmed=${(control.protocol || {}).confirmed || '-'} | final=${(control.protocol || {}).final || '-'} | blocked=${(control.protocol || {}).blocked || '-'} | ack=${(control.protocol || {}).ack_id || '-'}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">下一执行人: ${control.next_actor || '-'} | 缺失回执: ${(control.missing_receipts || []).join(', ') || '无'}${controlAction ? ` | 控制动作: ${controlAction.action_type} (${controlAction.status}, attempts=${controlAction.attempts})` : ''}</div>
+                        ${((control.pipeline_recovery || {}).kind) ? `<div class="memory-box-sub" style="margin-top:6px;">流水线失联: last=${(control.pipeline_recovery || {}).last_dispatched_agent || '-'} | stale=${(control.pipeline_recovery || {}).stale_subagent || '-'} | rebind=${(control.pipeline_recovery || {}).rebind_target || '-'}<br/>恢复建议: ${(control.pipeline_recovery || {}).manual_recovery_hint || '-'}</div>` : ''}
                         <div class="memory-box-sub" style="margin-top:6px;">最近回执: ${receipt.agent || '-'} / ${receipt.phase || '-'} / ${receipt.action || '-'}${receipt.evidence && receipt.evidence !== '-' ? ` | ${receipt.evidence}` : ''}</div>
                         ${renderPhaseStrip(control.phase_statuses)}
                         ${timeline.length ? `<div class="memory-box-sub" style="margin-top:8px;">时间线: ${timeline.map(item => `${item.created_label} ${item.event_type}`).join(' → ')}</div>` : ''}
@@ -3403,6 +3516,7 @@ def index():
                                 控制: ${(item.control || {}).control_state || '-'} | 证据: ${(item.control || {}).evidence_level || '-'} | 口径: ${(item.control || {}).claim_level || '-'}<br/>
                                 摘要: ${(item.control || {}).evidence_summary || '-'}<br/>
                                 协议: request=${((item.control || {}).protocol || {}).request || '-'} | confirmed=${((item.control || {}).protocol || {}).confirmed || '-'} | final=${((item.control || {}).protocol || {}).final || '-'} | blocked=${((item.control || {}).protocol || {}).blocked || '-'}${((item.control || {}).protocol || {}).ack_id ? `<br/>ack=${((item.control || {}).protocol || {}).ack_id}` : ''}${(item.control || {}).missing_receipts?.length ? `<br/>缺失回执: ${(item.control || {}).missing_receipts.join(', ')}` : ''}${(item.control || {}).next_actor ? `<br/>下一执行人: ${(item.control || {}).next_actor}` : ''}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
+                                ${((item.control || {}).pipeline_recovery || {}).kind ? `<br/>流水线失联: last=${((item.control || {}).pipeline_recovery || {}).last_dispatched_agent || '-'} | stale=${((item.control || {}).pipeline_recovery || {}).stale_subagent || '-'} | rebind=${((item.control || {}).pipeline_recovery || {}).rebind_target || '-'}<br/>恢复建议: ${((item.control || {}).pipeline_recovery || {}).manual_recovery_hint || '-'}` : ''}
                                 ${renderPhaseStrip((item.control || {}).phase_statuses)}
                             </div>
                         </div>
@@ -3462,7 +3576,7 @@ def index():
                     `;
                     const processingKeywords = ['正在', '启动', '派发', '等待', '回执受限', '处理中'];
                     agentListEl.innerHTML = activeAgents.map(item => `
-                        <div class="agent-seat ${processingKeywords.some(keyword => (item.state_label || '').includes(keyword)) ? 'processing' : ''} ${item.agent_id === selectedAgentId ? 'active' : ''}" onclick="selectedAgentId='${item.agent_id}'; loadData()">
+                        <div class="agent-seat ${processingKeywords.some(keyword => (item.state_label || '').includes(keyword)) ? 'processing' : ''} ${item.agent_id === selectedAgentId ? 'active' : ''}" onclick="selectedAgentId='${item.agent_id}'; loadData()" title="session=${item.session_file || '-'}">
                             <div class="agent-seat-head">
                                 <div>
                                     <div class="agent-name">${item.emoji ? item.emoji + ' ' : ''}${item.display_name || item.agent_id}</div>
@@ -3470,7 +3584,7 @@ def index():
                                 </div>
                                 <div class="agent-state-pill">${item.state_label || '活动中'}</div>
                             </div>
-                            <div class="agent-seat-sub">任务：${item.task_hint || '未抽取到任务提示'}<br/>${item.detail || '暂无细节'}<br/>会话文件：${item.session_file || '-'}</div>
+                            <div class="agent-seat-sub">${item.task_hint || '未抽取到任务提示'}<br/>${item.detail || '暂无细节'}</div>
                         </div>
                     `).join('');
                     renderAgentFocus(activeAgents);
@@ -3969,6 +4083,15 @@ def api_shared_state():
     )
 
 
+@app.route("/api/context-baseline")
+def api_context_baseline():
+    payload = build_context_lifecycle_readiness(load_config())
+    return app.response_class(
+        response=json.dumps(payload, ensure_ascii=False),
+        mimetype="application/json",
+    )
+
+
 @app.route("/api/environments/switch", methods=["POST"])
 def api_switch_environment():
     """切换当前守护目标环境。"""
@@ -4085,23 +4208,10 @@ def api_emergency_recover():
         snapshot_dir = SNAPSHOTS.restore_latest_snapshot()
         if snapshot_dir is None:
             return jsonify({"success": False, "message": "没有可恢复的配置快照"})
-
-        old_pid = get_listener_pid()
-        if old_pid is not None:
-            subprocess.run(f"kill {old_pid}", shell=True, check=False)
-            time.sleep(2)
-
-        with open(BASE_DIR / "logs" / "guardian.log", "a") as log_handle:
-            subprocess.Popen(
-                ["openclaw", "gateway", "run"],
-                cwd=str(OPENCLAW_CODE),
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
-            )
-
-        record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
-        return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
+        success, message = restore_snapshot_and_restart(snapshot_dir.name)
+        if success:
+            record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name, "env_id": snapshot_env_id(snapshot_dir.name)})
+        return jsonify({"success": success, "message": message if success else f"恢复失败: {message}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
@@ -4145,28 +4255,10 @@ def api_snapshot_restore():
         if not name:
             return jsonify({"success": False, "message": "缺少快照名称"})
 
-        snapshot_dir = SNAPSHOTS.snapshot_root / name
-        if not snapshot_dir.exists() or not snapshot_dir.is_dir():
-            return jsonify({"success": False, "message": "快照不存在"})
-
-        SNAPSHOTS.restore_snapshot(snapshot_dir)
-
-        old_pid = get_listener_pid()
-        if old_pid is not None:
-            subprocess.run(f"kill {old_pid}", shell=True, check=False)
-            time.sleep(2)
-
-        with open(BASE_DIR / "logs" / "guardian.log", "a") as log_handle:
-            subprocess.Popen(
-                ["openclaw", "gateway", "run"],
-                cwd=str(OPENCLAW_CODE),
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
-            )
-
-        record_change("recover", f"恢复指定配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
-        return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
+        success, message = restore_snapshot_and_restart(name)
+        if success:
+            record_change("recover", f"恢复指定配置快照并重启: {name}", {"snapshot": name, "env_id": snapshot_env_id(name)})
+        return jsonify({"success": success, "message": message if success else f"恢复失败: {message}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 

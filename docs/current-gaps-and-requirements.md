@@ -202,6 +202,42 @@
   - attempts
   - last error
 
+#### 3.2.5 流水线失联恢复未完成
+
+现状：
+
+- 已出现真实案例：主任务已成功派发到 `pm`，并进一步派发到 `dev`
+- 但主链路没有收到任何结构化 `PIPELINE_RECEIPT`
+- 最终任务只能停在：
+  - `received_only`
+  - `missing_pipeline_receipt`
+  - `blocked_unverified`
+  - `manual_or_session_recovery`
+
+未完成点：
+
+- 守护系统现在只能识别并阻塞这类任务
+- 还不能自动判断“是 pm 未回执、dev 已失联，还是 test 未接入”
+- 还没有把“流水线失联恢复”做成明确产品能力
+- 操作员仍需要手工翻 session jsonl 才能知道任务到底派发到了哪一步
+
+要求：
+
+- 增加“流水线失联”这一类显式问题类型
+- 明确区分：
+  - 根本未启动
+  - 已启动但未回执
+  - 已完成但未回传
+- 对失联任务输出恢复方案：
+  - session recovery
+  - stale subagent detection
+  - manual recovery hint
+  - active task rebind
+- Dashboard 不只显示 blocked，还要说明：
+  - 最后成功派发到哪个 agent
+  - 缺的是哪类 receipt
+  - 下一步应该恢复哪一段流水线
+
 ### 3.3 P1：模型失败边界还需要彻底做实
 
 #### 3.3.1 “为什么没回复”还不能总是一眼看懂
@@ -375,6 +411,23 @@ OpenClaw Health Monitor 的目标不再是“展示状态”，而是成为 Open
 - `final` 后不再刷屏
 - control action 与唯一 `ack_id` 关联
 
+### R4.1 流水线失联恢复
+
+系统必须能够处理“主任务已经派发子任务，但结构化回执链断掉”的情况。
+
+验收标准：
+
+- 系统能识别：
+  - 子任务未启动
+  - 子任务已启动但未回执
+  - 子任务已完成但主链未收到结果
+- Dashboard 能直接显示：
+  - last dispatched agent
+  - missing receipts
+  - recommended recovery action
+- Guardian 能为这类任务给出明确恢复建议，必要时进入 session recovery
+- 操作员不再需要手工翻 session jsonl 才能定位卡点
+
 ### R5. 模型失败边界显式化
 
 系统必须把“没回复”明确拆层，而不是只呈现一个现象。
@@ -452,6 +505,7 @@ OpenClaw Health Monitor 的目标不再是“展示状态”，而是成为 Open
 
 - 任务证据链增强
 - 控制协议 formal 化
+- 流水线失联恢复
 - 控制动作解释力提升
 - 旧任务迟到结果治理
 

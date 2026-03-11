@@ -407,6 +407,37 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertIn("runtime_health", payload)
         self.assertIn("learning_backlog", payload)
 
+    def test_snapshot_env_id_detects_official_suffix(self):
+        self.assertEqual(dashboard.snapshot_env_id("20260311-before-config-change-official"), "official")
+        self.assertEqual(dashboard.snapshot_env_id("20260311-before-config-change-primary"), "primary")
+
+    def test_restore_snapshot_and_restart_skips_restart_for_inactive_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            official_home = base / ".openclaw-official"
+            snapshot_root = base / "snapshots"
+            target = snapshot_root / "20260311-test-official"
+            target.mkdir(parents=True)
+            (target / "manifest.json").write_text("{}", encoding="utf-8")
+            cfg = {
+                "ACTIVE_OPENCLAW_ENV": "primary",
+                "OPENCLAW_HOME": str(base / ".openclaw"),
+                "OPENCLAW_CODE": str(base / "code-primary"),
+                "GATEWAY_PORT": 18789,
+                "OPENCLAW_OFFICIAL_STATE": str(official_home),
+                "OPENCLAW_OFFICIAL_CODE": str(base / "code-official"),
+                "OPENCLAW_OFFICIAL_PORT": 19021,
+            }
+            with mock.patch.object(dashboard, "BASE_DIR", base), \
+                mock.patch.object(dashboard, "load_config", return_value=cfg), \
+                mock.patch.object(dashboard, "restart_active_openclaw_environment") as restart_env, \
+                mock.patch("dashboard.SnapshotManager.restore_snapshot") as restore_snapshot:
+                ok, message = dashboard.restore_snapshot_and_restart("20260311-test-official")
+        self.assertTrue(ok)
+        self.assertIn("未切换当前活动环境", message)
+        restore_snapshot.assert_called_once()
+        restart_env.assert_not_called()
+
     def test_get_control_plane_overview_reports_recoverable_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -461,12 +492,18 @@ class DashboardMemoryTests(unittest.TestCase):
     @mock.patch("dashboard.wait_for_env_listener")
     @mock.patch("dashboard.run_script")
     @mock.patch("dashboard.save_config")
+    @mock.patch("dashboard.enforce_single_active_listener")
+    @mock.patch("dashboard.restore_environment_after_failed_switch")
     def test_switch_openclaw_environment_rolls_back_when_primary_does_not_start(
         self,
+        restore_previous,
+        single_active,
         save_config,
         run_script,
         wait_for_env_listener,
     ):
+        restore_previous.return_value = (True, "restored")
+        single_active.return_value = (True, "ok")
         save_config.return_value = True
         run_script.side_effect = [
             (0, "", ""),
@@ -483,18 +520,22 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertIn("Gateway 未成功启动", message)
         self.assertEqual(save_config.call_args_list[0].args, ("ACTIVE_OPENCLAW_ENV", "primary"))
         self.assertEqual(save_config.call_args_list[1].args, ("ACTIVE_OPENCLAW_ENV", "official"))
+        restore_previous.assert_called_once_with("official")
         self.assertEqual(store.save_runtime_value.call_args_list[0].args[1]["env_id"], "primary")
         self.assertEqual(store.save_runtime_value.call_args_list[1].args[1]["env_id"], "official")
 
     @mock.patch("dashboard.wait_for_env_listener")
     @mock.patch("dashboard.run_script")
     @mock.patch("dashboard.save_config")
+    @mock.patch("dashboard.enforce_single_active_listener")
     def test_switch_openclaw_environment_succeeds_when_primary_listener_is_ready(
         self,
+        single_active,
         save_config,
         run_script,
         wait_for_env_listener,
     ):
+        single_active.return_value = (True, "ok")
         save_config.return_value = True
         run_script.side_effect = [
             (0, "", ""),
@@ -515,12 +556,15 @@ class DashboardMemoryTests(unittest.TestCase):
     @mock.patch("dashboard.wait_for_env_listener")
     @mock.patch("dashboard.run_script")
     @mock.patch("dashboard.get_listener_pid")
+    @mock.patch("dashboard.enforce_single_active_listener")
     def test_restart_active_openclaw_environment_restarts_official_only(
         self,
+        single_active,
         get_listener_pid,
         run_script,
         wait_for_env_listener,
     ):
+        single_active.return_value = (True, "ok")
         run_script.side_effect = [
             (0, "", ""),
             (0, "", ""),
@@ -550,12 +594,15 @@ class DashboardMemoryTests(unittest.TestCase):
     @mock.patch("dashboard.wait_for_env_listener")
     @mock.patch("dashboard.run_script")
     @mock.patch("dashboard.get_listener_pid")
+    @mock.patch("dashboard.enforce_single_active_listener")
     def test_restart_active_openclaw_environment_restarts_primary_only(
         self,
+        single_active,
         get_listener_pid,
         run_script,
         wait_for_env_listener,
     ):
+        single_active.return_value = (True, "ok")
         run_script.side_effect = [
             (0, "", ""),
             (0, "", ""),
@@ -630,6 +677,47 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertFalse(payload["success"])
         self.assertEqual(payload["status"], "failed_preflight")
         self.assertIn("官方验证环境未运行", payload["message"])
+
+    @mock.patch("dashboard.get_listener_pid")
+    @mock.patch("dashboard.run_script")
+    def test_enforce_single_active_listener_stops_inactive_env(self, run_script, get_listener_pid):
+        get_listener_pid.side_effect = [1111, 2222, None]
+        with mock.patch.object(
+            dashboard,
+            "load_config",
+            return_value={
+                "ACTIVE_OPENCLAW_ENV": "primary",
+                "OPENCLAW_HOME": "/tmp/openclaw-main",
+                "OPENCLAW_CODE": "/tmp/openclaw-code",
+                "GATEWAY_PORT": 18789,
+                "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+                "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+                "OPENCLAW_OFFICIAL_PORT": 19001,
+            },
+        ):
+            ok, message = dashboard.enforce_single_active_listener("primary")
+        self.assertTrue(ok)
+        self.assertIn("listener", message)
+        self.assertEqual(run_script.call_args.args[0], [str(dashboard.OFFICIAL_MANAGER), "stop"])
+
+    def test_manage_official_environment_blocks_start_when_not_active(self):
+        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"}):
+            ok, message = dashboard.manage_official_environment("start")
+        self.assertFalse(ok)
+        self.assertIn("切换到 official", message)
+
+    def test_build_shared_state_snapshot_includes_context_and_policy(self):
+        with mock.patch.object(dashboard, "list_openclaw_environments", return_value=[]), \
+            mock.patch.object(dashboard, "get_task_registry_payload", return_value={}), \
+            mock.patch.object(dashboard, "get_control_plane_overview", return_value={}), \
+            mock.patch.object(dashboard, "get_learning_center_payload", return_value={}), \
+            mock.patch.object(dashboard, "get_system_metrics", return_value={}), \
+            mock.patch.object(dashboard, "get_recent_anomalies", return_value=[]), \
+            mock.patch.object(dashboard, "build_context_lifecycle_readiness", return_value={"ready": False}), \
+            mock.patch.object(dashboard, "env_spec", return_value={"id": "primary"}):
+            payload = dashboard.build_shared_state_snapshot({"REFLECTION_INTERVAL_SECONDS": 3600, "LEARNING_PROMOTION_THRESHOLD": 3})
+        self.assertIn("context_lifecycle", payload)
+        self.assertIn("learning_promotion_policy", payload)
 
 
 if __name__ == "__main__":

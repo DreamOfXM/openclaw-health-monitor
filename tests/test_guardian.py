@@ -181,6 +181,22 @@ class GuardianProgressPushTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-progress",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "DEV_IMPLEMENTING",
+                    "question": "帮我继续处理",
+                    "last_user_message": "帮我继续处理",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
             runtime_log = base / "runtime.log"
             runtime_log.write_text(
                 "\n".join(
@@ -228,6 +244,8 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertIn("GUARDIAN_FOLLOWUP:", followups[0][1])
             self.assertEqual(result[0]["delivery_channel"], "session")
             feishu_push.assert_not_called()
+            events = store.list_task_events("task-progress", limit=10)
+            self.assertTrue(any(item["event_type"] == "guardian_progress_push" for item in events))
 
     def test_deliver_guardian_progress_update_retries_then_falls_back(self):
         dispatch = {
@@ -390,6 +408,22 @@ class GuardianProgressPushTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "DEV_IMPLEMENTING",
+                    "question": "帮我继续处理",
+                    "last_user_message": "帮我继续处理",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
             runtime_log = base / "runtime.log"
             runtime_log.write_text(
                 "\n".join(
@@ -447,6 +481,103 @@ class GuardianProgressPushTests(unittest.TestCase):
             self.assertIn("GUARDIAN_FOLLOWUP:", pushes[0][1])
             self.assertEqual(change_logs[0][2]["idle"], 220)
             self.assertEqual(change_logs[0][2]["delivery_channel"], "session")
+            events = store.list_task_events("task-1", limit=10)
+            self.assertTrue(any(item["event_type"] == "guardian_progress_push" for item in events))
+
+    def test_attach_background_result_if_late_marks_completed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-old",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "旧任务",
+                    "last_user_message": "旧任务",
+                    "started_at": 1,
+                    "last_progress_at": 10,
+                    "created_at": 1,
+                    "updated_at": 10,
+                    "completed_at": 50,
+                }
+            )
+            store.upsert_task(
+                {
+                    "task_id": "task-new",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "新任务",
+                    "last_user_message": "新任务",
+                    "started_at": 20,
+                    "last_progress_at": 60,
+                    "created_at": 60,
+                    "updated_at": 60,
+                }
+            )
+            with mock.patch.object(guardian, "STORE", store):
+                guardian.attach_background_result_if_late("task-old", "session-a", completed_at=60, status="completed")
+            events = store.list_task_events("task-old", limit=10)
+            self.assertTrue(any(item["event_type"] == "background_result" for item in events))
+
+    def test_reconcile_background_results_for_sessions_marks_late_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-old",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "旧任务",
+                    "last_user_message": "旧任务",
+                    "started_at": 1,
+                    "last_progress_at": 10,
+                    "created_at": 1,
+                    "updated_at": 10,
+                    "completed_at": 80,
+                }
+            )
+            store.upsert_task(
+                {
+                    "task_id": "task-new",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "新任务",
+                    "last_user_message": "新任务",
+                    "started_at": 20,
+                    "last_progress_at": 61,
+                    "created_at": 61,
+                    "updated_at": 61,
+                }
+            )
+            with mock.patch.object(guardian, "STORE", store):
+                guardian.reconcile_background_results_for_sessions({"session-a"})
+            events = store.list_task_events("task-old", limit=10)
+            self.assertTrue(any(item["event_type"] == "background_result" for item in events))
+
+    def test_should_record_control_plane_anomaly_deduplicates_recent_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            with mock.patch.object(guardian, "STORE", store), mock.patch("time.time", return_value=1000):
+                self.assertTrue(guardian.should_record_control_plane_anomaly("task-1", "missing_pipeline_receipt", interval=600))
+            with mock.patch.object(guardian, "STORE", store), mock.patch("time.time", return_value=1200):
+                self.assertFalse(guardian.should_record_control_plane_anomaly("task-1", "missing_pipeline_receipt", interval=600))
+            with mock.patch.object(guardian, "STORE", store), mock.patch("time.time", return_value=1701):
+                self.assertTrue(guardian.should_record_control_plane_anomaly("task-1", "missing_pipeline_receipt", interval=600))
 
     def test_push_runtime_progress_updates_resets_after_new_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -936,13 +1067,32 @@ class GuardianProgressPushTests(unittest.TestCase):
             with mock.patch.object(guardian, "BASE_DIR", base), \
                 mock.patch.object(guardian, "STORE", store), \
                 mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}, "official": {"id": "official", "port": 19021}}), \
                 mock.patch.object(guardian, "get_system_metrics", return_value={"cpu": 1.0, "mem_used": 1.0, "mem_total": 8.0}), \
                 mock.patch.object(guardian, "check_process_running", return_value=True), \
                 mock.patch.object(guardian, "check_gateway_health", return_value=True):
                 guardian.write_task_registry_snapshot()
             self.assertTrue((base / "data" / "shared-state" / "runtime-health.json").exists())
+            self.assertTrue((base / "data" / "shared-state" / "learning-promotion-policy.json").exists())
+            self.assertTrue((base / "data" / "shared-state" / "README.md").exists())
             self.assertTrue((base / ".learnings" / "ERRORS.md").exists())
             self.assertTrue((base / "MEMORY.md").exists())
+
+    def test_enforce_single_active_runtime_guard_records_dual_listener(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "active_env_id", return_value="primary"), \
+                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}, "official": {"id": "official", "port": 19021}}), \
+                mock.patch.object(guardian, "get_listener_pid", side_effect=[1111, 2222]), \
+                mock.patch.object(guardian, "run_args") as run_args, \
+                mock.patch.object(guardian, "record_change_log") as record_change_log, \
+                mock.patch.object(guardian, "notify"):
+                issues = guardian.enforce_single_active_runtime_guard()
+            self.assertEqual(issues[0]["code"], "dual_listener")
+            record_change_log.assert_called_once()
+            self.assertEqual(run_args.call_args.args[0], [str(guardian.OFFICIAL_MANAGER), "stop"])
 
 
 if __name__ == "__main__":

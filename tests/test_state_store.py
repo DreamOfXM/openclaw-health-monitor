@@ -388,6 +388,43 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(control["control_state"], "blocked_unverified")
             self.assertEqual(control["next_action"], "manual_or_session_recovery")
 
+    def test_derive_task_control_state_detects_pipeline_detached_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-detached",
+                    "session_key": "session-detached",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "blocked",
+                    "current_stage": "implementation:started",
+                    "question": "开发一个记事本系统",
+                    "last_user_message": "开发一个记事本系统",
+                    "blocked_reason": "missing_pipeline_receipt",
+                    "started_at": 1,
+                    "last_progress_at": 30,
+                    "created_at": 1,
+                    "updated_at": 30,
+                }
+            )
+            store.upsert_task_contract(
+                "task-detached",
+                {
+                    "id": "delivery_pipeline",
+                    "protocol_version": "hm.v1",
+                    "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"],
+                },
+            )
+            store.record_task_event("task-detached", "dispatch_started", {"question": "开发一个记事本系统"})
+            store.record_task_event("task-detached", "pipeline_receipt", {"receipt": {"agent": "pm", "phase": "planning", "action": "completed", "ack_id": "ack-pm"}})
+            store.record_task_event("task-detached", "stage_progress", {"marker": "implementation:started", "stage": "implementation:started"})
+            control = store.derive_task_control_state("task-detached")
+            self.assertEqual(control["next_action"], "manual_or_session_recovery")
+            self.assertEqual(control["pipeline_recovery"]["rebind_target"], "dev")
+            self.assertIn("流水线", control["approved_summary"])
+
     def test_delivery_contract_requires_dev_receipt_after_pm_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
