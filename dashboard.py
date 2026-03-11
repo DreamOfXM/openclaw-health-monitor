@@ -19,9 +19,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request, redirect
 
-from typing import Optional
+from typing import Any, Optional
 
 from monitor_config import load_config as load_shared_config, save_local_config_value, sanitize_config_for_ui
+from promotion_controller import PromotionController
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
 
@@ -576,26 +577,52 @@ def summarize_memory_usage(metrics: dict, top_processes: list[dict]) -> dict:
 
 def list_snapshots(limit: int = 20) -> list[dict]:
     """列出最近的配置快照。"""
+    cfg = load_config()
     snapshots = []
-    for snapshot_dir in SNAPSHOTS.list_snapshots()[:limit]:
-        manifest_file = snapshot_dir / "manifest.json"
-        item = {
-            "name": snapshot_dir.name,
-            "created_at": "",
-            "label": "",
-            "file_count": 0,
-        }
-        if manifest_file.exists():
-            try:
-                with open(manifest_file) as handle:
-                    manifest = json.load(handle)
-                item["created_at"] = manifest.get("created_at", "")
-                item["label"] = manifest.get("label", "")
-                item["file_count"] = len(manifest.get("files", []))
-            except Exception:
-                pass
-        snapshots.append(item)
-    return snapshots
+    for env_id, spec in get_env_specs(cfg).items():
+        manager = SnapshotManager(BASE_DIR, Path(spec["home"]))
+        for snapshot_dir in manager.list_snapshots()[:limit]:
+            manifest_file = snapshot_dir / "manifest.json"
+            item = {
+                "name": snapshot_dir.name,
+                "created_at": "",
+                "label": "",
+                "file_count": 0,
+                "env_id": env_id,
+            }
+            if manifest_file.exists():
+                try:
+                    with open(manifest_file) as handle:
+                        manifest = json.load(handle)
+                    item["created_at"] = manifest.get("created_at", "")
+                    item["label"] = manifest.get("label", "")
+                    item["file_count"] = len(manifest.get("files", []))
+                except Exception:
+                    pass
+            snapshots.append(item)
+    snapshots.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return snapshots[:limit]
+
+
+def snapshot_env_id(snapshot_name: str) -> str:
+    if snapshot_name.endswith("-official") or "-official-" in snapshot_name:
+        return "official"
+    return "primary"
+
+
+def restore_snapshot_and_restart(snapshot_name: str) -> tuple[bool, str]:
+    cfg = load_config()
+    env_id = snapshot_env_id(snapshot_name)
+    spec = env_spec(env_id, cfg)
+    manager = SnapshotManager(BASE_DIR, Path(spec["home"]))
+    snapshot_dir = manager.snapshot_root / snapshot_name
+    if not snapshot_dir.exists() or not snapshot_dir.is_dir():
+        return False, "快照不存在"
+    manager.restore_snapshot(snapshot_dir)
+    if env_id == active_env_id(cfg):
+        success, message, _, _, _ = restart_active_openclaw_environment()
+        return success, message if success else f"快照已恢复，但重启失败：{message}"
+    return True, f"已恢复 {env_id} 配置快照，未切换当前活动环境"
 
 
 def load_config() -> dict:
@@ -640,6 +667,16 @@ def get_env_specs(config: Optional[dict] = None) -> dict[str, dict]:
             "kind": "official",
         },
     }
+
+
+def create_config_snapshots(label: str) -> list[Path]:
+    snapshots: list[Path] = []
+    cfg = load_config()
+    for env_id, spec in get_env_specs(cfg).items():
+        snapshot_dir = SnapshotManager(BASE_DIR, Path(spec["home"])).create_snapshot(f"{label}-{env_id}")
+        if snapshot_dir is not None:
+            snapshots.append(snapshot_dir)
+    return snapshots
 
 
 def env_spec(env_id: Optional[str], config: Optional[dict] = None) -> dict:
@@ -700,6 +737,228 @@ def env_has_control_ui_assets(spec: dict) -> bool:
 
 def env_open_link(spec: dict) -> str:
     return f"/open-dashboard/{spec['id']}"
+
+
+def env_token_prefix(spec: dict) -> str:
+    config_path = Path(spec["home"]) / "openclaw.json"
+    try:
+        token = (
+            json.loads(config_path.read_text(encoding="utf-8"))
+            .get("gateway", {})
+            .get("auth", {})
+            .get("token", "")
+        )
+    except Exception:
+        token = ""
+    token = str(token or "")
+    return token[:8] if token else ""
+
+
+def detect_environment_inconsistencies(environments: list[dict], active_env: str) -> list[dict]:
+    issues: list[dict] = []
+    running = [item for item in environments if item.get("running")]
+    if len(running) > 1:
+        issues.append(
+            {
+                "severity": "error",
+                "code": "dual_listener",
+                "title": "检测到双环境同时监听",
+                "detail": "single-active-environment 约束被破坏，当前存在两个 gateway listener。",
+            }
+        )
+    for item in environments:
+        if item.get("active") and not item.get("running"):
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": "active_env_not_running",
+                    "title": f"{item.get('id')} 已激活但未监听",
+                    "detail": "ACTIVE_OPENCLAW_ENV 与实际 listener 不一致。",
+                }
+            )
+        if active_env == "official" and item.get("id") == "primary" and item.get("running"):
+            issues.append(
+                {
+                    "severity": "error",
+                    "code": "primary_running_while_official_active",
+                    "title": "Official 激活时 Primary 仍在监听",
+                    "detail": "这会导致状态漂移和消息误投。",
+                }
+            )
+        if active_env == "primary" and item.get("id") == "official" and item.get("running"):
+            issues.append(
+                {
+                    "severity": "error",
+                    "code": "official_running_while_primary_active",
+                    "title": "Primary 激活时 Official 仍在监听",
+                    "detail": "这会破坏单活环境运行基线。",
+                }
+            )
+    dedup: dict[str, dict] = {}
+    for issue in issues:
+        dedup[str(issue.get("code") or len(dedup))] = issue
+    return list(dedup.values())
+
+
+def build_model_failure_summary(errors: list[dict], recent_events: list[dict]) -> dict:
+    categories = {
+        "auth_failure": ["401", "oauth", "auth", "re-authenticate", "token refresh failed"],
+        "empty_response": ["empty response", "空响应", "no content", "response was empty"],
+        "fallback_exhausted": ["all models failed", "fallback exhausted", "model_pool_failed"],
+        "delivery_failed": ["websocket", "ws closed", "delivery", "连接断开", "1006"],
+        "control_followup_failed": ["control_followup_failed", "守护控制面催办失败", "followup failed"],
+        "no_visible_reply": ["no visible reply", "无回复", "没回复"],
+    }
+    observed: dict[str, dict[str, Any]] = {}
+    for item in recent_events or []:
+        text = " ".join(
+            [
+                str(item.get("message") or ""),
+                json.dumps(item.get("details") or {}, ensure_ascii=False),
+            ]
+        ).lower()
+        for category, needles in categories.items():
+            if any(needle in text for needle in needles):
+                observed.setdefault(category, {"count": 0, "sample": str(item.get("message") or ""), "provider": "", "model": "", "status": "", "message": str(item.get("message") or "")})
+                observed[category]["count"] += 1
+    for item in errors or []:
+        text = str(item.get("message") or "").lower()
+        for category, needles in categories.items():
+            if any(needle in text for needle in needles):
+                observed.setdefault(category, {"count": 0, "sample": str(item.get("message") or ""), "provider": str(item.get("provider") or ""), "model": str(item.get("model") or ""), "status": str(item.get("status") or ""), "message": str(item.get("message") or "")})
+                observed[category]["count"] += 1
+                if item.get("provider") and not observed[category].get("provider"):
+                    observed[category]["provider"] = str(item.get("provider") or "")
+                if item.get("model") and not observed[category].get("model"):
+                    observed[category]["model"] = str(item.get("model") or "")
+                if item.get("status") and not observed[category].get("status"):
+                    observed[category]["status"] = str(item.get("status") or "")
+    priority = [
+        "auth_failure",
+        "fallback_exhausted",
+        "delivery_failed",
+        "control_followup_failed",
+        "empty_response",
+        "no_visible_reply",
+    ]
+    primary = next((key for key in priority if key in observed), "")
+    labels = {
+        "auth_failure": "认证失败",
+        "empty_response": "空响应",
+        "fallback_exhausted": "回退耗尽",
+        "delivery_failed": "交付失败",
+        "control_followup_failed": "控制追问失败",
+        "no_visible_reply": "无可见回复",
+    }
+    return {
+        "headline": labels.get(primary, "最近没有明显模型失败"),
+        "primary_type": primary or "ok",
+        "items": [
+            {
+                "type": key,
+                "label": labels.get(key, key),
+                "count": int(value.get("count") or 0),
+                "sample": str(value.get("sample") or ""),
+                "provider": str(value.get("provider") or ""),
+                "model": str(value.get("model") or ""),
+                "status": str(value.get("status") or ""),
+                "message": str(value.get("message") or value.get("sample") or ""),
+            }
+            for key, value in observed.items()
+        ],
+    }
+
+
+def build_context_lifecycle_readiness(config: Optional[dict] = None) -> dict:
+    cfg = config or load_config()
+    spec = env_spec(active_env_id(cfg), cfg)
+    payload = {"ready": False, "checks": [], "target_env": spec["id"]}
+    config_path = Path(spec["home"]) / "openclaw.json"
+    openclaw_payload: dict[str, Any] = {}
+    try:
+        openclaw_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        openclaw_payload = {}
+    session_cfg = openclaw_payload.get("session") or {}
+    memory_cfg = openclaw_payload.get("memory") or {}
+    checks = [
+        {
+            "name": "memory_flush",
+            "ok": bool(memory_cfg.get("memoryFlush") or session_cfg.get("memoryFlush") or session_cfg.get("memoryFlushAt")),
+            "detail": "memory flush 已配置" if (memory_cfg.get("memoryFlush") or session_cfg.get("memoryFlush") or session_cfg.get("memoryFlushAt")) else "缺少 memory flush 策略",
+        },
+        {
+            "name": "context_pruning",
+            "ok": bool(memory_cfg.get("contextPruning") or session_cfg.get("contextPruning")),
+            "detail": "context pruning 已配置" if (memory_cfg.get("contextPruning") or session_cfg.get("contextPruning")) else "缺少 context pruning 策略",
+        },
+        {
+            "name": "daily_or_idle_reset",
+            "ok": bool(session_cfg.get("dailyReset") or session_cfg.get("idleReset") or session_cfg.get("resetOnExit")),
+            "detail": "存在 daily/idle/reset 策略" if (session_cfg.get("dailyReset") or session_cfg.get("idleReset") or session_cfg.get("resetOnExit")) else "缺少 daily / idle reset 策略",
+        },
+        {
+            "name": "session_maintenance",
+            "ok": bool(session_cfg.get("maintenance") or session_cfg.get("maintenanceBudget") or session_cfg.get("sessionMaintenance")),
+            "detail": "session maintenance 已配置" if (session_cfg.get("maintenance") or session_cfg.get("maintenanceBudget") or session_cfg.get("sessionMaintenance")) else "缺少 session maintenance 策略",
+        },
+    ]
+    payload["checks"] = checks
+    payload["ready"] = all(bool(item.get("ok")) for item in checks)
+    payload["headline"] = "长期运行基线已达标" if payload["ready"] else "长期运行基线未达标"
+    payload["recommended_baseline"] = {
+        "session": {
+            "memoryFlush": {"enabled": True, "maxTurns": 120},
+            "contextPruning": {"enabled": True, "tokenBudget": 180000},
+            "dailyReset": {"enabled": True, "hour": 4},
+            "idleReset": {"enabled": True, "seconds": 21600},
+            "sessionMaintenance": {"enabled": True, "intervalSeconds": 1800},
+        }
+    }
+    return payload
+
+
+def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
+    cfg = config or load_config()
+    selected_env = env_spec(active_env_id(cfg), cfg)
+    environments = list_openclaw_environments(cfg)
+    task_registry = get_task_registry_payload(limit=20)
+    control_plane = get_control_plane_overview(selected_env["id"])
+    learning_center = get_learning_center_payload(limit=20)
+    metrics = get_system_metrics()
+    recent_events = get_recent_anomalies(limit=12, days=7)
+    return {
+        "generated_at": int(time.time()),
+        "active_environment": selected_env["id"],
+        "environment_integrity": detect_environment_inconsistencies(environments, selected_env["id"]),
+        "current_task_facts": {
+            "summary": task_registry.get("summary") or {},
+            "current": task_registry.get("current"),
+            "session_resolution": task_registry.get("session_resolution") or {},
+        },
+        "task_registry_snapshot": task_registry,
+        "control_action_queue": task_registry.get("control_queue") or [],
+        "runtime_health": {
+            "metrics": metrics,
+            "gateway_healthy": check_gateway_health_for_env(selected_env) if selected_env.get("port") else False,
+            "gateway_process": get_gateway_process_for_env(selected_env) if selected_env.get("port") else None,
+            "guardian_process": get_guardian_process_info(),
+            "recent_events": recent_events,
+        },
+        "learning_backlog": {
+            "summary": learning_center.get("summary") or {},
+            "suggestions": learning_center.get("suggestions") or [],
+            "learnings": learning_center.get("learnings") or [],
+            "reflections": learning_center.get("reflections") or [],
+        },
+        "context_lifecycle": build_context_lifecycle_readiness(cfg),
+        "learning_promotion_policy": {
+            "reflection_interval_seconds": int(cfg.get("REFLECTION_INTERVAL_SECONDS", 3600)),
+            "learning_promotion_threshold": int(cfg.get("LEARNING_PROMOTION_THRESHOLD", 3)),
+            "daily_review_expected": True,
+        },
+        "control_plane": control_plane,
+    }
 
 
 def read_git_head(repo: Path) -> str:
@@ -771,7 +1030,8 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
     official_schedule_plist = Path.home() / "Library" / "LaunchAgents" / "ai.openclaw.official-update.plist"
     environments = []
     for item in get_env_specs(cfg).values():
-        running = get_listener_pid(int(item["port"])) is not None
+        listener_pid = get_listener_pid(int(item["port"]))
+        running = listener_pid is not None
         active = item["id"] == current
         git_head = read_git_head(Path(item["code"]))
         target_head = read_git_target_head(Path(item["code"]), official_ref) if item["id"] == "official" else git_head
@@ -786,6 +1046,8 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "home": str(item["home"]),
                 "git_head": git_head,
                 "target_head": target_head,
+                "listener_pid": int(listener_pid) if listener_pid is not None else None,
+                "token_prefix": env_token_prefix(item),
                 "running": running,
                 "healthy": check_gateway_health_for_env(item) if running else False,
                 "control_ui_ready": control_ui_ready,
@@ -1253,7 +1515,18 @@ def get_error_logs(count: int = 20, spec: Optional[dict] = None) -> list:
                     try:
                         ts = line[:19]
                         msg = line[20:].strip()[:150]
-                        errors.append({"time": ts[11:19], "message": msg})
+                        status_match = re.search(r"\b(400|401|403|404|408|429|500|502|503|504)\b", msg)
+                        provider_match = re.search(r"provider[=:]\s*([a-zA-Z0-9._-]+)", msg, re.IGNORECASE)
+                        model_match = re.search(r"model[=:]\s*([a-zA-Z0-9._:/-]+)", msg, re.IGNORECASE)
+                        errors.append(
+                            {
+                                "time": ts[11:19],
+                                "message": msg,
+                                "status": status_match.group(1) if status_match else "",
+                                "provider": provider_match.group(1) if provider_match else "",
+                                "model": model_match.group(1) if model_match else "",
+                            }
+                        )
                     except:
                         pass
             break
@@ -1349,7 +1622,7 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
 
 def save_config(key: str, value: str) -> bool:
     """保存配置"""
-    SNAPSHOTS.create_snapshot("before-config-change")
+    create_config_snapshots("before-config-change")
     return save_local_config_value(BASE_DIR, key, value)
     """加载告警历史"""
     alerts_file = BASE_DIR / "alerts.json"
@@ -1393,11 +1666,63 @@ def wait_for_env_listener(env_id: str, timeout: float = 15.0, interval: float = 
     return False
 
 
+def inactive_env_id(env_id: str) -> str:
+    return "official" if env_id == "primary" else "primary"
+
+
+def enforce_single_active_listener(target_env: str) -> tuple[bool, str]:
+    cfg = load_config()
+    specs = get_env_specs(cfg)
+    active_spec = specs[target_env]
+    inactive_spec = specs[inactive_env_id(target_env)]
+    active_pid = get_listener_pid(int(active_spec["port"]))
+    inactive_pid = get_listener_pid(int(inactive_spec["port"]))
+    if active_pid is None:
+        return False, f"{active_spec['name']} listener 未启动"
+    if inactive_pid is None:
+        return True, "single-active ok"
+    if target_env == "official":
+        run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+    else:
+        run_script([str(OFFICIAL_MANAGER), "stop"], timeout=120)
+    time.sleep(2)
+    inactive_pid_after = get_listener_pid(int(inactive_spec["port"]))
+    if inactive_pid_after is not None:
+        return False, f"{inactive_spec['name']} listener 仍然存活"
+    return True, f"已停止 {inactive_spec['name']} listener"
+
+
+def restore_environment_after_failed_switch(previous_env: str) -> tuple[bool, str]:
+    if previous_env == "official":
+        code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
+        if code != 0:
+            return False, (stderr or stdout or "恢复 official 失败").strip()
+        if not wait_for_env_listener("official"):
+            return False, "恢复 official 失败：listener 未启动"
+        return True, "已恢复 official"
+    code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
+    if code != 0:
+        return False, (stderr or stdout or "恢复 primary 失败").strip()
+    if not wait_for_env_listener("primary"):
+        return False, "恢复 primary 失败：listener 未启动"
+    return True, "已恢复 primary"
+
+
 def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env not in {"primary", "official"}:
         return False, "未知环境"
 
     previous_env = active_env_id(load_config())
+
+    def rollback_and_restore(message: str) -> tuple[bool, str]:
+        if previous_env != target_env:
+            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
+            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
+            restored, restore_message = restore_environment_after_failed_switch(previous_env)
+            if not restored:
+                return False, f"{message}; 回滚恢复失败：{restore_message}"
+        return False, message
+
     if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
         return False, "保存 ACTIVE_OPENCLAW_ENV 失败"
     STORE.save_runtime_value("active_openclaw_env", {"env_id": target_env, "updated_at": int(time.time())})
@@ -1411,29 +1736,80 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
     if target_env == "official":
         code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
         if code != 0:
-            if previous_env != target_env:
-                save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-                STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-            return False, (stderr or stdout or "官方验证版启动失败").strip()
+            return rollback_and_restore((stderr or stdout or "官方验证版启动失败").strip())
         if not wait_for_env_listener("official"):
-            if previous_env != target_env:
-                save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-                STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-            return False, "官方验证版切换失败：Gateway 未成功启动"
+            return rollback_and_restore("官方验证版切换失败：Gateway 未成功启动")
+        single_ok, single_message = enforce_single_active_listener("official")
+        if not single_ok:
+            return rollback_and_restore(f"官方验证版切换失败：{single_message}")
         return True, stdout.strip() or "已切换到官方验证版"
 
     code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
-        if previous_env != target_env:
-            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-        return False, (stderr or stdout or "主用版启动失败").strip()
+        return rollback_and_restore((stderr or stdout or "主用版启动失败").strip())
     if not wait_for_env_listener("primary"):
-        if previous_env != target_env:
-            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-            STORE.save_runtime_value("active_openclaw_env", {"env_id": previous_env, "updated_at": int(time.time())})
-        return False, "当前主用版切换失败：Gateway 未成功启动"
+        return rollback_and_restore("当前主用版切换失败：Gateway 未成功启动")
+    single_ok, single_message = enforce_single_active_listener("primary")
+    if not single_ok:
+        return rollback_and_restore(f"当前主用版切换失败：{single_message}")
     return True, stdout.strip() or "已切换到当前主用版"
+
+
+def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Optional[str], str]:
+    cfg = load_config()
+    target_env = active_env_id(cfg)
+    spec = env_spec(target_env, cfg)
+    old_pid = get_listener_pid(int(spec["port"]))
+    old_pid_str = str(old_pid) if old_pid is not None else None
+
+    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=120)
+    run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+    time.sleep(2)
+
+    if target_env == "official":
+        code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
+    else:
+        code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
+
+    if code != 0:
+        return False, (stderr or stdout or "Gateway 重启失败").strip(), old_pid_str, None, target_env
+    if not wait_for_env_listener(target_env):
+        return False, f"{spec['name']} 重启失败：Gateway 未成功启动", old_pid_str, None, target_env
+    single_ok, single_message = enforce_single_active_listener(target_env)
+    if not single_ok:
+        return False, f"{spec['name']} 重启失败：{single_message}", old_pid_str, None, target_env
+
+    new_pid = get_listener_pid(int(spec["port"]))
+    new_pid_str = str(new_pid) if new_pid is not None else None
+    if new_pid_str:
+        return True, stdout.strip() or "Gateway 已重启", old_pid_str, new_pid_str, target_env
+    return False, "Gateway 启动失败", old_pid_str, None, target_env
+
+
+def execute_official_promotion() -> dict:
+    config = load_config()
+    environments = list_openclaw_environments(config)
+    task_registry = get_task_registry_payload(limit=8)
+    controller = PromotionController(BASE_DIR, STORE, config)
+    result = controller.run(environments, task_registry)
+    status = result.get("status", "unknown")
+    details = {
+        "status": status,
+        "primary_git_head": (result.get("preflight") or {}).get("primary_git_head", ""),
+        "official_git_head": (result.get("preflight") or {}).get("official_git_head", ""),
+    }
+    backups = result.get("backups") or {}
+    if backups:
+        details["snapshots"] = backups
+    if status == "promoted":
+        record_change("version", "官方验证版晋升为当前主用版", details)
+    elif status == "rolled_back":
+        details["error"] = result.get("error", "")
+        record_change("recover", "官方验证版晋升失败，已回滚主用版", details)
+    elif status == "failed_preflight":
+        details["checks"] = result.get("preflight", {}).get("checks", [])
+        record_change("version", "官方验证版晋升前检查未通过", details)
+    return result
 
 
 def manage_official_environment(action: str) -> tuple[bool, str]:
@@ -1447,6 +1823,8 @@ def manage_official_environment(action: str) -> tuple[bool, str]:
     }
     if action not in allowed:
         return False, "未知操作"
+    if action == "start" and active_env_id(load_config()) != "official":
+        return False, "请先切换到 official 再启动，避免双监听"
     timeout = 300 if action in {"prepare", "update", "start"} else 120
     code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), action], timeout=timeout)
     message = (stdout or stderr or allowed[action]).strip()
@@ -1466,367 +1844,731 @@ def index():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenClaw 健康监控中心</title>
     <style>
+        :root {
+            --bg: #07111a;
+            --bg-elevated: #0d1722;
+            --bg-panel: rgba(12, 21, 32, 0.92);
+            --bg-panel-soft: rgba(18, 28, 42, 0.82);
+            --bg-row: rgba(255, 255, 255, 0.035);
+            --border: rgba(148, 163, 184, 0.18);
+            --border-strong: rgba(148, 163, 184, 0.3);
+            --text: #e8eef5;
+            --text-muted: #9fb0c3;
+            --text-soft: #71839a;
+            --ok: #3ecf8e;
+            --warn: #f4b740;
+            --danger: #ef6b6b;
+            --info: #58a6ff;
+            --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.35);
+            --shadow-md: 0 14px 34px rgba(0, 0, 0, 0.24);
+            --radius-sm: 12px;
+            --radius-md: 18px;
+            --radius-lg: 24px;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        body {
+            font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
             min-height: 100vh;
-            color: #fff;
+            color: var(--text);
+            background:
+                radial-gradient(circle at top left, rgba(88, 166, 255, 0.16), transparent 34%),
+                radial-gradient(circle at top right, rgba(62, 207, 142, 0.1), transparent 28%),
+                linear-gradient(180deg, #0a1420 0%, #07111a 42%, #091521 100%);
         }
-        .container { width: min(100%, 1680px); margin: 0 auto; padding: 14px clamp(14px, 2vw, 24px) 24px; }
-        header { 
-            display: flex; justify-content: space-between; align-items: center;
-            padding: 14px 0 16px; border-bottom: 1px solid rgba(255,255,255,0.1);
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image: linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+            background-size: 36px 36px;
+            mask-image: linear-gradient(180deg, rgba(0,0,0,0.35), transparent 85%);
         }
-        h1 { font-size: clamp(20px, 2vw, 24px); display: flex; align-items: center; gap: 10px; }
-        .refresh-info { font-size: 14px; color: #888; }
-        .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 10px; margin: 10px 0 14px; }
-        .card { 
-            background: rgba(255,255,255,0.05); border-radius: 10px; padding: 12px 14px;
-            backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1);
+        .container {
+            position: relative;
+            width: min(100%, 1720px);
+            margin: 0 auto;
+            padding: 18px clamp(14px, 2vw, 28px) 28px;
         }
-        .card h3 { font-size: 12px; color: #888; margin-bottom: 6px; }
-        .card .value { font-size: clamp(20px, 2vw, 24px); font-weight: 700; line-height: 1.1; }
-        .card .sub { font-size: 11px; color: #8b93a7; margin-top: 4px; }
-        .progress { height: 5px; background: rgba(255,255,255,0.1); border-radius: 3px; margin-top: 8px; }
-        .progress-bar { height: 100%; border-radius: 3px; transition: width 0.3s; }
-        .good { background: #4ade80; }
-        .warning { background: #fbbf24; }
-        .error { background: #f87171; }
-        
-        .section { margin: 14px 0; }
-        .section h2 { font-size: 16px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-        .section-lead { font-size: 12px; color: #9ca3af; margin: -4px 0 12px; }
-        table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
-        th { color: #888; font-weight: normal; }
-        .event-list { display: grid; gap: 10px; }
-        .is-hidden { display: none !important; }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 18px;
+            padding: 20px 22px;
+            margin-bottom: 18px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: linear-gradient(135deg, rgba(18, 29, 43, 0.95), rgba(10, 18, 29, 0.96));
+            box-shadow: var(--shadow-lg);
+            backdrop-filter: blur(18px);
+        }
+        .header-copy { display: grid; gap: 6px; }
+        .eyebrow {
+            font-size: 11px;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: var(--text-soft);
+        }
+        h1 {
+            font-size: clamp(20px, 1.7vw, 24px);
+            line-height: 1.05;
+            letter-spacing: -0.04em;
+        }
+        .refresh-info { font-size: 12px; color: var(--text-muted); max-width: 560px; }
+        .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+        .btn,
+        .config-btn,
+        .diagnose-action,
         .list-expander {
-            margin-top: 8px;
-            padding: 8px 10px;
-            border-radius: 10px;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(255,255,255,0.04);
-            color: #dbeafe;
-            font-size: 12px;
+            appearance: none;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: rgba(255,255,255,0.06);
+            color: var(--text);
             cursor: pointer;
+            transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
         }
-        .list-expander:hover { background: rgba(59,130,246,0.12); }
-        .event-item {
-            padding: 12px 14px; border-radius: 10px; background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.08);
+        .btn,
+        .config-btn,
+        .diagnose-action { padding: 8px 12px; font-size: 12px; font-weight: 600; }
+        .btn:hover,
+        .config-btn:hover,
+        .diagnose-action:hover,
+        .list-expander:hover {
+            transform: translateY(-1px);
+            border-color: rgba(88, 166, 255, 0.45);
+            background: rgba(88, 166, 255, 0.12);
+            box-shadow: 0 10px 22px rgba(27, 54, 87, 0.28);
         }
-        .event-item.anomaly { border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.08); }
-        .event-item.pipeline { border-color: rgba(96,165,250,0.35); background: rgba(96,165,250,0.08); }
-        .event-meta { font-size: 12px; color: #9ca3af; margin-bottom: 6px; }
-        .event-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
-        .event-details { font-size: 12px; color: #d1d5db; line-height: 1.5; }
-        .incident-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
-        .incident-card {
-            padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.08);
-        }
-        .incident-card.error { border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.1); }
-        .incident-card.watch { border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.08); }
-        .incident-label { font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
-        .incident-main { font-size: 16px; font-weight: 700; line-height: 1.35; }
-        .incident-sub { font-size: 12px; color: #d1d5db; margin-top: 6px; line-height: 1.5; }
-        .memory-summary {
-            display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(280px, 0.92fr); gap: 14px; margin-bottom: 12px;
-        }
-        .memory-box {
-            padding: 14px 16px; border-radius: 12px; background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.08);
-        }
-        .memory-box-title { font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
-        .memory-box-main { font-size: 18px; font-weight: 700; line-height: 1.4; }
-        .memory-box-sub { font-size: 12px; color: #d1d5db; margin-top: 8px; line-height: 1.5; }
-        .memory-items { display: grid; gap: 8px; }
-        .memory-item {
-            display: flex; justify-content: space-between; gap: 12px; align-items: center;
-            padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04);
-        }
-        .memory-item-name { font-size: 13px; font-weight: 600; }
-        .memory-item-note { font-size: 11px; color: #9ca3af; margin-top: 4px; }
-        .memory-item-value { font-size: 13px; color: #f3f4f6; white-space: nowrap; }
-        .env-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 12px 0 6px; }
-        .env-card {
-            padding: 16px; border-radius: 12px; background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.08);
-        }
-        .env-card.active {
-            border-color: rgba(74,222,128,0.45);
-            box-shadow: 0 0 0 1px rgba(74,222,128,0.22) inset, 0 14px 32px rgba(16,185,129,0.08);
-            background: linear-gradient(135deg, rgba(16,185,129,0.18), rgba(59,130,246,0.08));
-        }
-        .env-title-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 8px; }
-        .env-title { font-size: 18px; font-weight: 700; }
-        .env-card.active .env-title { color: #ecfdf5; }
-        .env-pill {
-            font-size: 11px; padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.08);
-            color: #d1d5db;
-        }
-        .env-pill.active {
-            background: linear-gradient(135deg, #22c55e, #16a34a);
-            color: #f0fdf4;
-            font-weight: 700;
-            box-shadow: 0 8px 18px rgba(34,197,94,0.22);
+        .btn-primary,
+        .config-btn,
+        input:checked + .slider {
+            background: linear-gradient(135deg, #4f8cff, #2d74ff);
+            border-color: rgba(88, 166, 255, 0.55);
+            box-shadow: 0 14px 28px rgba(45, 116, 255, 0.28);
         }
         .btn-current {
-            background: linear-gradient(135deg, #22c55e, #16a34a);
-            color: #f0fdf4;
-            font-weight: 700;
-            box-shadow: 0 10px 22px rgba(34,197,94,0.22);
+            background: linear-gradient(135deg, #32c787, #179b63);
+            border-color: rgba(62, 207, 142, 0.5);
+            color: #f2fff8;
+            box-shadow: 0 14px 28px rgba(23, 155, 99, 0.28);
             cursor: default;
         }
-        .btn-current:disabled {
-            opacity: 1;
+        .btn-current:disabled { opacity: 1; }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(180px, 1fr));
+            gap: 14px;
+            margin: 0 0 18px;
         }
-        .env-meta { font-size: 12px; color: #9ca3af; line-height: 1.7; margin-top: 10px; }
-        .env-actions { display: flex; gap: 8px; margin-top: 14px; }
-        .env-actions.wrap { flex-wrap: wrap; }
-        .env-link { color: #93c5fd; text-decoration: none; font-size: 12px; }
-        .env-link:hover { text-decoration: underline; }
-        .env-link.disabled { color: #6b7280; pointer-events: none; cursor: not-allowed; text-decoration: none; }
-        .workflow-board { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 10px; }
-        .workflow-box {
-            padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.08);
+        .card,
+        .section,
+        .panel-shell,
+        .memory-box,
+        .incident-card,
+        .workflow-box,
+        .workflow-collapsible,
+        .promotion-stage,
+        .env-card,
+        .agent-card,
+        .control-queue-item,
+        .diagnose-item,
+        .event-item,
+        .event-empty,
+        .memory-item {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-md);
+            backdrop-filter: blur(18px);
         }
-        .workflow-collapsible {
-            border-radius: 12px;
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.08);
+        .card {
+            position: relative;
+            overflow: hidden;
+            min-height: 108px;
+            padding: 14px;
+            border-radius: var(--radius-md);
+        }
+        .card::before {
+            content: "";
+            position: absolute;
+            inset: 0 0 auto 0;
+            height: 3px;
+            background: linear-gradient(90deg, rgba(88,166,255,0.95), rgba(62,207,142,0.7));
+        }
+        .card h3,
+        .memory-box-title,
+        .workflow-title,
+        .promotion-stage-title,
+        .incident-label,
+        .event-meta,
+        .agent-meta,
+        .control-queue-meta,
+        .env-meta,
+        .config-value,
+        th {
+            font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+            font-size: 11px;
+            letter-spacing: 0.03em;
+            color: var(--text-soft);
+        }
+        .card .value,
+        .memory-box-main,
+        .incident-main,
+        .workflow-main,
+        .env-title,
+        .promotion-stage-main {
+            font-size: clamp(15px, 1.25vw, 18px);
+            font-weight: 700;
+            line-height: 1.08;
+            letter-spacing: -0.04em;
+        }
+        .card .sub,
+        .memory-box-sub,
+        .incident-sub,
+        .workflow-sub,
+        .event-details,
+        .agent-detail,
+        .diagnose-msg { font-size: 12px; line-height: 1.55; color: var(--text-muted); }
+        .progress { height: 6px; background: rgba(255,255,255,0.08); border-radius: 999px; margin-top: 12px; overflow: hidden; }
+        .progress-bar { height: 100%; border-radius: 999px; transition: width 0.3s; }
+        .good { color: var(--ok); background-color: var(--ok); }
+        .warning { color: var(--warn); background-color: var(--warn); }
+        .error { color: var(--danger); background-color: var(--danger); }
+        .status-ok { color: var(--ok); background: transparent; }
+        .status-warning { color: var(--warn); background: transparent; }
+        .status-error { color: var(--danger); background: transparent; }
+        .section {
+            margin: 0;
+            padding: 14px 14px 16px;
+            border-radius: var(--radius-lg);
+        }
+        .section h2 {
+            font-size: 15px;
+            margin-bottom: 14px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.07);
+            letter-spacing: -0.02em;
+        }
+        .section-lead { display: none; }
+        .dashboard-layout,
+        .dashboard-stack { display: grid; gap: 12px; }
+        .hero-supergrid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.28fr) minmax(360px, 0.72fr);
+            gap: 14px;
+            align-items: stretch;
+            margin-bottom: 14px;
+        }
+        .hero-surface,
+        .hero-side {
+            position: relative;
+            display: grid;
+            gap: 10px;
+            padding: 14px;
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border-strong);
+            background: linear-gradient(180deg, rgba(15, 25, 38, 0.96), rgba(9, 17, 26, 0.98));
+            box-shadow: var(--shadow-lg);
             overflow: hidden;
         }
-        .workflow-collapsible summary {
-            list-style: none;
-            cursor: pointer;
-            padding: 14px;
+        .hero-surface::before,
+        .hero-side::before {
+            content: "";
+            position: absolute;
+            inset: 0 0 auto 0;
+            height: 2px;
+            background: linear-gradient(90deg, rgba(88,166,255,0.95), rgba(62,207,142,0.65));
         }
-        .workflow-collapsible summary::-webkit-details-marker { display: none; }
-        .workflow-collapsible[open] summary { border-bottom: 1px solid rgba(255,255,255,0.08); }
-        .workflow-collapsible-body { padding: 12px 14px 14px; }
-        .workflow-title { font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
-        .workflow-main { font-size: 15px; font-weight: 700; line-height: 1.35; }
-        .workflow-sub { font-size: 12px; color: #d1d5db; line-height: 1.6; margin-top: 8px; }
-        .workflow-steps { display: grid; gap: 8px; margin-top: 10px; }
+        .hero-headline {
+            display: grid;
+            gap: 8px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .hero-label {
+            font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+            font-size: 10px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--text-soft);
+        }
+        .hero-title {
+            font-size: clamp(15px, 1.2vw, 18px);
+            line-height: 1;
+            letter-spacing: -0.05em;
+            font-weight: 800;
+        }
+        .hero-subtitle { display: none; }
+        .hero-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
+            gap: 10px;
+            align-items: start;
+        }
+        .hero-block {
+            padding: 12px 14px;
+            border-radius: var(--radius-md);
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 2px;
+        }
+        .hero-kpi-strip {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(180px, 1fr));
+            gap: 10px;
+            margin: 0 0 14px;
+        }
+        .hero-meta-grid,
+        .operations-zone,
+        .incident-zone,
+        .promotion-zone,
+        .evidence-zone,
+        .maintenance-zone { display: grid; gap: 14px; }
+        .hero-meta-grid { grid-template-columns: 1fr; gap: 10px; }
+        .operations-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+            gap: 10px;
+            align-items: start;
+        }
+        .incident-grid-wide,
+        .promotion-grid,
+        .evidence-grid,
+        .maintenance-grid {
+            display: grid;
+            gap: 10px;
+        }
+        .incident-grid-wide { grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr); }
+        .promotion-grid { grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr); }
+        .evidence-grid { grid-template-columns: minmax(0, 1.04fr) minmax(0, 0.96fr); }
+        .maintenance-grid { grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr); }
+        .operations-layout {
+            display: grid;
+            grid-template-columns: minmax(280px, 0.95fr) minmax(320px, 1.05fr);
+            gap: 14px;
+            align-items: start;
+        }
+        .panel-shell { padding: 10px; border-radius: var(--radius-md); box-shadow: none; background: rgba(255,255,255,0.02); }
+        .memory-summary,
+        .row,
+        .env-grid,
+        .promotion-stage-grid {
+            display: grid;
+            gap: 12px;
+        }
+        .memory-summary { grid-template-columns: minmax(0, 1.08fr) minmax(280px, 0.92fr); margin-bottom: 14px; }
+        .row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .env-grid { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 12px; }
+        .promotion-stage-grid { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); }
+        .memory-box,
+        .workflow-box,
+        .workflow-collapsible,
+        .env-card,
+        .promotion-stage,
+        .incident-card { padding: 12px 14px; border-radius: var(--radius-md); }
+        .incident-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+        .incident-card:first-child {
+            background: linear-gradient(135deg, rgba(79, 140, 255, 0.14), rgba(12, 21, 32, 0.96));
+            border-color: rgba(88, 166, 255, 0.32);
+        }
+        .incident-card.error,
+        .event-item.anomaly,
+        .promotion-stage.fail { border-color: rgba(239, 107, 107, 0.4); background: linear-gradient(135deg, rgba(239, 107, 107, 0.12), rgba(12, 21, 32, 0.95)); }
+        .incident-card.watch,
+        .event-item.warning { border-color: rgba(244, 183, 64, 0.38); background: linear-gradient(135deg, rgba(244, 183, 64, 0.1), rgba(12, 21, 32, 0.95)); }
+        .event-item.pipeline,
+        .event-item.info,
+        .promotion-stage.active { border-color: rgba(88, 166, 255, 0.34); background: linear-gradient(135deg, rgba(88, 166, 255, 0.12), rgba(12, 21, 32, 0.95)); }
+        .promotion-stage.ok,
+        .env-card.active,
+        .agent-card.processing { border-color: rgba(62, 207, 142, 0.34); background: linear-gradient(135deg, rgba(62, 207, 142, 0.12), rgba(12, 21, 32, 0.95)); }
+        .promotion-stage.pending { background: var(--bg-panel-soft); }
+        .event-list,
+        .memory-items,
+        .agent-grid,
+        .workflow-board,
+        .control-queue { display: grid; gap: 10px; }
+        .event-item,
+        .memory-item,
+        .control-queue-item,
+        .diagnose-item,
         .workflow-step {
-            padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.04);
-            font-size: 12px; color: #d1d5db;
+            padding: 12px 14px;
+            border-radius: var(--radius-sm);
         }
-        .workflow-step strong { color: #fff; }
-        .dashboard-layout { display: grid; grid-template-columns: minmax(0, 1.22fr) minmax(360px, 0.78fr); gap: 14px; align-items: start; }
-        .dashboard-stack { display: grid; gap: 14px; }
-        .operations-layout { display: grid; grid-template-columns: minmax(280px, 0.92fr) minmax(320px, 1.08fr); gap: 12px; align-items: start; }
-        .panel-shell {
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 14px;
-            padding: 12px;
-        }
-        .agent-summary-box {
-            margin-bottom: 14px;
-            background: linear-gradient(135deg, rgba(59,130,246,0.14), rgba(34,197,94,0.08));
-            border-color: rgba(96,165,250,0.18);
-        }
-        .agent-grid { display: grid; gap: 12px; }
-        .agent-card {
-            padding: 14px 15px;
-            border-radius: 14px;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(255,255,255,0.045);
-            transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-        }
-        .agent-card.processing {
-            border-color: rgba(74,222,128,0.45);
-            background: linear-gradient(135deg, rgba(16,185,129,0.18), rgba(59,130,246,0.08));
-            box-shadow: 0 0 0 1px rgba(74,222,128,0.14) inset, 0 10px 28px rgba(16,185,129,0.08);
-        }
-        .agent-card.processing .agent-state-pill {
-            background: rgba(74,222,128,0.18);
-            color: #bbf7d0;
-        }
-        .agent-card.idle {
-            opacity: 0.72;
-            background: rgba(148,163,184,0.06);
-            border-color: rgba(148,163,184,0.16);
-        }
-        .agent-card:hover {
-            transform: translateY(-1px);
-        }
+        .event-header,
+        .env-title-row,
         .agent-card-head {
             display: flex;
             justify-content: space-between;
             gap: 12px;
             align-items: flex-start;
-            margin-bottom: 10px;
         }
-        .agent-name {
-            font-size: 15px;
-            font-weight: 700;
-        }
-        .agent-meta {
-            margin-top: 4px;
-            font-size: 12px;
-            color: #9ca3af;
-        }
-        .agent-state-pill {
-            white-space: nowrap;
-            font-size: 11px;
-            padding: 5px 8px;
-            border-radius: 999px;
-            background: rgba(148,163,184,0.16);
-            color: #d1d5db;
-        }
-        .agent-task {
-            font-size: 13px;
-            font-weight: 600;
-            color: #f3f4f6;
-            margin-bottom: 8px;
-        }
-        .agent-detail {
-            font-size: 12px;
-            line-height: 1.6;
-            color: #d1d5db;
-        }
-        .agent-file {
-            margin-top: 8px;
-            font-size: 11px;
-            color: #9ca3af;
-        }
-        .event-empty {
-            padding: 16px;
-            border-radius: 12px;
-            background: rgba(255,255,255,0.04);
-            border: 1px dashed rgba(255,255,255,0.12);
-            color: #9ca3af;
-            font-size: 13px;
-        }
-        .phase-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .event-time,
+        .agent-state-pill,
+        .env-pill,
         .phase-pill {
-            padding: 6px 9px;
+            white-space: nowrap;
+            padding: 5px 9px;
             border-radius: 999px;
+            font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
             font-size: 11px;
-            font-weight: 700;
-            background: rgba(148,163,184,0.14);
-            color: #cbd5e1;
+            color: #d7e0ea;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.06);
         }
-        .phase-pill.completed { background: rgba(34,197,94,0.18); color: #dcfce7; }
-        .phase-pill.running { background: rgba(59,130,246,0.18); color: #dbeafe; }
-        .phase-pill.blocked { background: rgba(248,113,113,0.18); color: #fee2e2; }
-        .phase-pill.pending { background: rgba(148,163,184,0.14); color: #cbd5e1; }
-        .control-queue { display: grid; gap: 8px; margin-top: 12px; }
-        .control-queue-item {
-            padding: 10px 12px;
-            border-radius: 10px;
-            background: rgba(255,255,255,0.045);
-            border: 1px solid rgba(255,255,255,0.08);
-        }
-        .control-queue-title { font-size: 12px; font-weight: 700; margin-bottom: 4px; }
-        .control-queue-meta { font-size: 11px; color: #9ca3af; line-height: 1.5; }
-        
-        .diagnose-item { 
-            display: flex; align-items: center; gap: 15px; padding: 15px; 
-            background: rgba(255,255,255,0.05); border-radius: 8px; margin-bottom: 10px;
-        }
-        .diagnose-icon { font-size: 24px; }
-        .diagnose-content { flex: 1; }
-        .diagnose-title { font-weight: bold; margin-bottom: 5px; }
-        .diagnose-msg { font-size: 13px; color: #aaa; }
-        .diagnose-action { 
-            padding: 6px 12px; background: #3b82f6; border-radius: 6px; 
-            font-size: 12px; cursor: pointer; border: none; color: #fff;
-        }
-        
-        .status-ok { color: #4ade80; }
-        .status-error { color: #f87171; }
-        .status-warning { color: #fbbf24; }
-        
-        .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-        .actions { display: flex; gap: 10px; }
-        .btn {
-            padding: 8px 16px; background: rgba(255,255,255,0.1); border: none;
-            border-radius: 6px; color: #fff; cursor: pointer; font-size: 13px;
-        }
-        .btn:hover { background: rgba(255,255,255,0.2); }
-        .btn-primary { background: #3b82f6; }
-        
-        /* 开关样式 */
-        .switch {
-            position: relative; display: inline-block; width: 44px; height: 24px;
-        }
+        .env-pill.active { background: rgba(62, 207, 142, 0.14); color: #dffcef; border-color: rgba(62, 207, 142, 0.26); }
+        .agent-card.idle { opacity: 0.8; background: var(--bg-panel-soft); }
+        .agent-name,
+        .event-title,
+        .control-queue-title,
+        .agent-task,
+        .diagnose-title { font-size: 13px; font-weight: 700; color: var(--text); }
+        .agent-task { margin-bottom: 8px; }
+        .agent-file,
+        .memory-item-note { margin-top: 8px; font-size: 11px; color: var(--text-soft); }
+        .memory-item,
+        .diagnose-item { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+        .memory-item-value { white-space: nowrap; font-size: 14px; font-weight: 700; }
+        .env-actions,
+        .promotion-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+        .env-link { color: #9ec7ff; text-decoration: none; font-size: 12px; }
+        .env-link:hover { text-decoration: underline; }
+        .env-link.disabled { color: var(--text-soft); pointer-events: none; cursor: not-allowed; text-decoration: none; }
+        .workflow-collapsible { overflow: hidden; }
+        .workflow-collapsible summary { list-style: none; cursor: pointer; padding: 16px 18px; }
+        .workflow-collapsible summary::-webkit-details-marker { display: none; }
+        .workflow-collapsible[open] summary { border-bottom: 1px solid rgba(255,255,255,0.08); }
+        .workflow-collapsible-body { padding: 14px 18px 18px; }
+        .workflow-step { background: var(--bg-row); border: 1px solid rgba(255,255,255,0.04); }
+        .workflow-step strong { color: var(--text); }
+        .phase-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .phase-pill.completed { background: rgba(62, 207, 142, 0.16); color: #dffcef; }
+        .phase-pill.running { background: rgba(88, 166, 255, 0.16); color: #e3f0ff; }
+        .phase-pill.blocked { background: rgba(239, 107, 107, 0.16); color: #ffe3e3; }
+        .phase-pill.pending { background: rgba(255,255,255,0.08); color: #c2cfdb; }
+        .switch { position: relative; display: inline-block; width: 46px; height: 26px; }
         .switch input { opacity: 0; width: 0; height: 0; }
         .slider {
-            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-            background-color: #444; transition: .4s; border-radius: 24px;
+            position: absolute;
+            inset: 0;
+            cursor: pointer;
+            background-color: rgba(255,255,255,0.14);
+            transition: .3s;
+            border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.08);
         }
         .slider:before {
-            position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
-            background-color: white; transition: .4s; border-radius: 50%;
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
         }
-        input:checked + .slider { background-color: #3b82f6; }
         input:checked + .slider:before { transform: translateX(20px); }
-        
-        /* 配置按钮 */
-        .config-btn {
-            padding: 6px 12px; background: #3b82f6; border: none;
-            border-radius: 6px; color: #fff; cursor: pointer; font-size: 12px;
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            overflow: hidden;
+            border-radius: var(--radius-sm);
         }
-        .config-btn:hover { background: #2563eb; }
-        .config-btn.configured { background: #10b981; }
-        .config-value { font-size: 12px; color: #888; margin-left: 8px; }
-        
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-        .live { animation: pulse 2s infinite; }
-        
-        .tabs { display: flex; gap: 5px; margin: 20px 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
-        .tab { padding: 10px 20px; background: transparent; border: none; color: #888; cursor: pointer; font-size: 14px; }
-        .tab.active { color: #fff; border-bottom: 2px solid #3b82f6; }
+        th, td {
+            padding: 12px 10px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            vertical-align: top;
+        }
+        td { color: var(--text-muted); }
+        tbody tr:hover { background: rgba(255,255,255,0.03); }
+        .status-strip {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
+            gap: 12px;
+            padding: 10px 14px;
+            margin-bottom: 14px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+            background: rgba(12, 21, 32, 0.9);
+            box-shadow: var(--shadow-md);
+        }
+        .status-group,
+        .status-summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .status-pill,
+        .env-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.07);
+            background: rgba(255,255,255,0.04);
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-pill strong,
+        .env-chip strong { color: var(--text); font-weight: 700; }
+        .env-chip.active { background: rgba(88,166,255,0.14); border-color: rgba(88,166,255,0.22); }
+        .workspace-shell {
+            display: grid;
+            grid-template-columns: 220px minmax(0, 1fr);
+            gap: 18px;
+            align-items: start;
+        }
+        .sidebar-nav {
+            position: sticky;
+            top: 18px;
+            display: grid;
+            gap: 8px;
+            padding: 10px;
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border);
+            background: rgba(12, 21, 32, 0.92);
+            box-shadow: var(--shadow-md);
+        }
+        .sidebar-label {
+            font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+            font-size: 11px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--text-soft);
+            padding: 4px 6px 10px;
+        }
+        .tab {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid transparent;
+            border-radius: 14px;
+            background: transparent;
+            color: var(--text-soft);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 700;
+            text-align: left;
+            transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+        }
+        .tab:hover { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.05); }
+        .tab.active { color: var(--text); background: rgba(88, 166, 255, 0.14); border-color: rgba(88, 166, 255, 0.2); box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.12); }
+        .content-panel {
+            display: grid;
+            gap: 14px;
+        }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-        
-        .toast-container {
-            position: fixed; top: 20px; right: 20px; z-index: 9999;
+        .page-stack { display: grid; gap: 14px; }
+        .overview-grid,
+        .environment-page,
+        .tasks-page,
+        .agents-page,
+        .diagnostics-page,
+        .release-page,
+        .recovery-page,
+        .learning-page,
+        .settings-page { display: grid; gap: 14px; }
+        .overview-summary-grid,
+        .environment-page,
+        .tasks-page,
+        .diagnostics-page,
+        .release-page,
+        .learning-page,
+        .settings-page { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .recovery-page { grid-template-columns: 1.05fr 0.95fr; }
+        .agents-page { grid-template-columns: minmax(300px, 0.84fr) minmax(0, 1.16fr); }
+        .section-compact h2 { font-size: 15px; margin-bottom: 8px; }
+        .metric-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .metric-card {
+            padding: 10px 12px;
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(255,255,255,0.07);
+            background: rgba(255,255,255,0.035);
         }
+        .metric-label,
+        .data-label {
+            font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+            font-size: 11px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-soft);
+            margin-bottom: 8px;
+        }
+        .metric-main { font-size: 16px; font-weight: 800; letter-spacing: -0.04em; }
+        .metric-sub { margin-top: 4px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+        .summary-list,
+        .warning-list { display: grid; gap: 10px; }
+        .summary-item,
+        .warning-item {
+            padding: 10px 12px;
+            border-radius: var(--radius-sm);
+            border: 1px solid rgba(255,255,255,0.06);
+            background: rgba(255,255,255,0.03);
+        }
+        .summary-item { font-size: 12px; line-height: 1.55; }
+        .summary-item strong,
+        .warning-item strong { font-size: 12px; }
+        .warning-item { background: linear-gradient(135deg, rgba(244, 183, 64, 0.1), rgba(12, 21, 32, 0.96)); }
+        .summary-item strong,
+        .warning-item strong { color: var(--text); }
+        .dual-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+        .agent-seats { display: grid; gap: 10px; }
+        .agent-seat {
+            padding: 10px 12px;
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.03);
+            cursor: pointer;
+            transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+        }
+        .agent-seat:hover { transform: translateY(-1px); }
+        .agent-seat.active {
+            border-color: rgba(88,166,255,0.3);
+            background: linear-gradient(135deg, rgba(88,166,255,0.12), rgba(12, 21, 32, 0.94));
+            box-shadow: inset 0 0 0 1px rgba(88,166,255,0.14);
+        }
+        .agent-seat.processing {
+            border-color: rgba(62,207,142,0.26);
+            background: linear-gradient(135deg, rgba(62,207,142,0.12), rgba(12,21,32,0.94));
+        }
+        .agent-seat-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+        .agent-seat-sub { margin-top: 6px; font-size: 11px; color: var(--text-muted); line-height: 1.45; }
+        .focus-stage {
+            display: grid;
+            gap: 10px;
+            padding: 14px;
+            border-radius: var(--radius-lg);
+            border: 1px solid rgba(88,166,255,0.18);
+            background: linear-gradient(180deg, rgba(12, 23, 36, 0.96), rgba(8, 15, 24, 0.98));
+            box-shadow: var(--shadow-md);
+        }
+        .focus-quote {
+            padding: 10px 12px;
+            border-radius: var(--radius-md);
+            background: rgba(0,0,0,0.28);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: var(--text);
+            font-size: 12px;
+            line-height: 1.55;
+        }
+        .focus-feed { display: grid; gap: 10px; }
+        .feed-item {
+            padding: 10px 12px;
+            border-radius: var(--radius-sm);
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .settings-grid { display: grid; gap: 14px; }
+        .event-empty {
+            padding: 18px;
+            border-radius: var(--radius-md);
+            border-style: dashed;
+            color: var(--text-soft);
+            font-size: 13px;
+        }
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
         .toast {
-            padding: 15px 20px; margin-bottom: 10px; border-radius: 8px;
-            color: #fff; font-size: 14px; animation: slideIn 0.3s;
-            max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            padding: 15px 20px;
+            margin-bottom: 10px;
+            border-radius: var(--radius-sm);
+            color: #fff;
+            font-size: 14px;
+            animation: slideIn 0.3s;
+            max-width: 420px;
+            box-shadow: var(--shadow-lg);
         }
-        .toast.error { background: #ef4444; }
-        .toast.warning { background: #f59e0b; }
-        .toast.success { background: #10b981; }
-        .toast.info { background: #3b82f6; }
-        @keyframes slideIn {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
+        .toast.error { background: #c43d3d; }
+        .toast.warning { background: #b68419; }
+        .toast.success { background: #158a58; }
+        .toast.info { background: #2d74ff; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .live { animation: pulse 2s infinite; }
+        .footer-bar { text-align: center; padding: 22px 0 4px; color: var(--text-soft); font-size: 12px; }
         @media (max-width: 1500px) {
-            .dashboard-layout { grid-template-columns: minmax(0, 1.14fr) minmax(330px, 0.86fr); }
-            .operations-layout { grid-template-columns: 1fr; }
-            .memory-summary { grid-template-columns: 1fr; }
+            .status-strip,
+            .workspace-shell,
+            .hero-supergrid,
+            .incident-grid-wide,
+            .promotion-grid,
+            .evidence-grid,
+            .maintenance-grid,
+            .operations-grid,
+            .operations-layout,
+            .memory-summary,
+            .incident-grid,
+            .overview-summary-grid,
+            .environment-page,
+            .tasks-page,
+            .agents-page,
+            .diagnostics-page,
+            .release-page,
+            .recovery-page,
+            .learning-page,
+            .settings-page,
+            .dual-column { grid-template-columns: 1fr; }
         }
         @media (max-width: 1260px) {
-            .dashboard-layout { grid-template-columns: 1fr; }
-            .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .hero-supergrid,
+            .hero-grid,
+            .operations-grid,
             .row { grid-template-columns: 1fr; }
+            .stats-grid,
+            .hero-kpi-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .workspace-shell { grid-template-columns: 1fr; }
+            .sidebar-nav { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .sidebar-label { grid-column: 1 / -1; }
         }
         @media (max-width: 900px) {
-            .dashboard-layout, .dashboard-stack, .operations-layout, .row, .incident-grid, .memory-summary, .env-grid, .workflow-board {
-                grid-template-columns: 1fr;
-            }
-            .stats-grid { grid-template-columns: 1fr; }
+            .stats-grid,
+            .hero-kpi-strip,
+            .env-grid,
+            .promotion-stage-grid,
+            .incident-grid,
+            .row,
+            .memory-summary,
+            .operations-layout,
+            .hero-supergrid,
+            .hero-grid,
+            .incident-grid-wide,
+            .promotion-grid,
+            .evidence-grid,
+            .maintenance-grid,
+            .operations-grid,
+            .sidebar-nav,
+            .metric-card-grid,
+            .overview-summary-grid,
+            .environment-page,
+            .tasks-page,
+            .agents-page,
+            .diagnostics-page,
+            .release-page,
+            .recovery-page,
+            .learning-page,
+            .settings-page,
+            .dual-column { grid-template-columns: 1fr; }
             .container { padding-inline: 12px; }
-            header { flex-direction: column; align-items: flex-start; gap: 10px; }
+            header { flex-direction: column; align-items: flex-start; }
+            .tab { font-size: 13px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>🛡️ OpenClaw 健康监控中心</h1>
+            <div class="header-copy">
+                <div class="eyebrow">Health Guardian Control Plane</div>
+                <h1>OpenClaw 健康守护者</h1>
+                <div class="refresh-info">把双环境守护、活跃代理、版本晋升和异常定位收束到一条清晰的控制视线里。</div>
+            </div>
             <div class="actions">
                 <button class="btn" onclick="location.reload()">🔄 刷新</button>
                 <button class="btn btn-primary" onclick="restartGateway()">🔁 重启 Gateway</button>
@@ -1834,212 +2576,391 @@ def index():
             </div>
         </header>
         
-        <div class="tabs">
-            <button class="tab active" onclick="switchTab('dashboard', event)">📊 监控</button>
-            <button class="tab" onclick="switchTab('changes', event)">📝 变更日志</button>
-            <button class="tab" onclick="switchTab('snapshots', event)">📦 配置快照</button>
-        </div>
-        
-        <div id="tab-dashboard" class="tab-content active">
-        <div class="stats-grid">
-            <div class="card">
-                <h3>CPU 使用率</h3>
-                <div class="value" id="cpu">--</div>
-                <div class="sub" id="cpu-sub">--</div>
-                <div class="progress"><div class="progress-bar" id="cpu-bar"></div></div>
+        <div class="status-strip">
+            <div class="status-group">
+                <div id="global-active-env" class="env-chip active"><strong>当前环境</strong> 加载中</div>
+                <div id="global-primary-env" class="env-chip"><strong>Primary</strong> --</div>
+                <div id="global-official-env" class="env-chip"><strong>Official</strong> --</div>
             </div>
-            <div class="card">
-                <h3>内存使用</h3>
-                <div class="value" id="mem">--</div>
-                <div class="sub" id="mem-sub">--</div>
-                <div class="progress"><div class="progress-bar" id="mem-bar"></div></div>
-            </div>
-            <div class="card">
-                <h3>会话统计 (5分钟)</h3>
-                <div class="value" id="sessions">--</div>
-                <div class="sub" id="sessions-sub">--</div>
-                <div id="slow-reasons" style="font-size:11px;color:#888;margin-top:5px"></div>
-            </div>
-            <div class="card">
-                <h3>服务状态</h3>
-                <div class="value" id="gateway-status">--</div>
-                <div class="sub" id="process-pid">--</div>
+            <div class="status-summary">
+                <div id="global-gateway-status" class="status-pill"><strong>Gateway</strong> --</div>
+                <div id="global-guardian-status" class="status-pill"><strong>Guardian</strong> --</div>
+                <div id="global-task-stats" class="status-pill"><strong>任务</strong> --</div>
+                <div id="global-alert-stats" class="status-pill"><strong>告警</strong> --</div>
             </div>
         </div>
 
-        <div class="dashboard-layout">
-            <div class="dashboard-stack">
-                <div class="section">
-                    <h2>🎯 问题定位</h2>
-                    <div id="incident-summary" class="incident-grid"></div>
-                </div>
+        <div class="workspace-shell">
+            <div class="sidebar-nav">
+                <div class="sidebar-label">Control Areas</div>
+                <button class="tab active" onclick="switchTab('overview', event)">总览</button>
+                <button class="tab" onclick="switchTab('environments', event)">环境切换</button>
+                <button class="tab" onclick="switchTab('tasks', event)">任务处理</button>
+                <button class="tab" onclick="switchTab('agents', event)">代理活动</button>
+                <button class="tab" onclick="switchTab('diagnostics', event)">异常排查</button>
+                <button class="tab" onclick="switchTab('release', event)">升级发布</button>
+                <button class="tab" onclick="switchTab('recovery', event)">快照恢复</button>
+                <button class="tab" onclick="switchTab('learning', event)">学习优化</button>
+                <button class="tab" onclick="switchTab('settings', event)">系统设置</button>
+            </div>
 
-                <div class="section">
-                    <h2>🧠 执行工作台</h2>
-                    <div class="section-lead">这里优先展示当前正在动手的代理和当前任务链路，避免你再去翻 OpenClaw 原始日志。</div>
-                    <div class="operations-layout">
-                        <div class="panel-shell">
-                            <h2>🤖 活跃代理</h2>
-                            <div id="active-agents-summary" class="memory-box agent-summary-box"></div>
-                            <div id="active-agents-list" class="agent-grid"></div>
+            <div class="content-panel">
+                <div id="tab-overview" class="tab-content active">
+                    <div class="page-stack">
+                        <div class="hero-supergrid">
+                            <div class="hero-surface">
+                                <div class="hero-headline">
+                                    <div class="hero-label" title="系统摘要">总览</div>
+                                    <div class="hero-title">当前状态与下一步</div>
+                                    <div class="hero-subtitle"></div>
+                                </div>
+                                <div class="hero-grid">
+                                    <div class="hero-block">
+                                        <div class="hero-label" title="当前最重要状态">当前状态</div>
+                                        <div id="incident-summary" class="incident-grid"></div>
+                                    </div>
+                                    <div class="hero-meta-grid">
+                                        <div class="hero-block">
+                                            <div class="hero-label" title="当前激活环境">环境</div>
+                                            <div id="overview-environment-quick" class="summary-list"></div>
+                                        </div>
+                                        <div class="hero-block">
+                                        <div class="hero-label" title="建议优先动作">操作</div>
+                                        <div id="overview-next-action" class="summary-list"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="hero-side">
+                                <div class="hero-label" title="发布与晋升摘要">发布</div>
+                                <div id="overview-release-quick" class="summary-list"></div>
+                                <div id="overview-warning-list" class="warning-list"></div>
+                            </div>
                         </div>
-                        <div class="panel-shell">
-                            <h2>🧪 控制面健康</h2>
-                            <div id="control-plane-summary" class="memory-box"></div>
+
+                        <div class="hero-kpi-strip">
+                            <div class="card">
+                                <h3>CPU 使用率</h3>
+                                <div class="value" id="cpu">--</div>
+                                <div class="sub" id="cpu-sub">--</div>
+                                <div class="progress"><div class="progress-bar" id="cpu-bar"></div></div>
+                            </div>
+                            <div class="card">
+                                <h3>内存使用</h3>
+                                <div class="value" id="mem">--</div>
+                                <div class="sub" id="mem-sub">--</div>
+                                <div class="progress"><div class="progress-bar" id="mem-bar"></div></div>
+                            </div>
+                            <div class="card">
+                                <h3>会话统计</h3>
+                                <div class="value" id="sessions">--</div>
+                                <div class="sub" id="sessions-sub">--</div>
+                                <div id="slow-reasons" style="font-size:11px;color:#888;margin-top:5px"></div>
+                            </div>
+                            <div class="card">
+                                <h3>服务状态</h3>
+                                <div class="value" id="gateway-status">--</div>
+                                <div class="sub" id="process-pid">--</div>
+                            </div>
                         </div>
-                        <div class="panel-shell">
-                            <h2>🗂️ 任务注册表</h2>
-                            <div id="task-registry-summary" class="memory-box" style="margin-bottom:14px;"></div>
-                            <div id="task-registry-list" class="event-list"></div>
+
+                        <div class="overview-summary-grid">
+                            <div class="section section-compact">
+                                <h2>环境摘要</h2>
+                                <div id="overview-environment-cards" class="summary-list"></div>
+                            </div>
+                            <div class="section section-compact">
+                                <h2>任务摘要</h2>
+                                <div id="overview-task-cards" class="summary-list"></div>
+                            </div>
+                            <div class="section section-compact">
+                                <h2>最近异常</h2>
+                                <div id="overview-recent-events" class="summary-list"></div>
+                            </div>
+                            <div class="section section-compact">
+                                <h2>模型 / 控制失败摘要</h2>
+                                <div id="overview-failure-summary" class="summary-list"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <div class="section">
-                    <h2>💻 内存归因：进程 Top 15 + 系统项</h2>
-                    <div id="memory-attribution" class="memory-summary"></div>
-                    <div id="memory-items" class="memory-items"></div>
-                    <table>
-                        <thead><tr><th>PID</th><th>用户</th><th>CPU %</th><th>内存</th><th>进程</th></tr></thead>
-                        <tbody id="top-processes"></tbody>
-                    </table>
-                </div>
-
-                <div class="row">
-                    <div class="section">
-                        <h2>📋 错误日志</h2>
-                        <table>
-                            <thead><tr><th>时间</th><th>错误信息</th></tr></thead>
-                            <tbody id="error-logs"></tbody>
-                        </table>
-                    </div>
-                    <div class="section">
-                        <h2>📊 进程监控</h2>
-                        <table>
-                            <thead><tr><th>进程</th><th>PID</th><th>CPU %</th><th>内存 %</th></tr></thead>
-                            <tbody id="processes"></tbody>
-                        </table>
+                <div id="tab-environments" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>环境切换</h2>
+                            <div class="section-lead"></div>
+                            <div class="environment-page">
+                                <div class="dashboard-stack">
+                                    <div id="environment-summary" class="memory-box"></div>
+                                    <div id="environment-alerts" class="warning-list"></div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div id="environment-workflow" class="workflow-board"></div>
+                                </div>
+                            </div>
+                            <div id="environment-cards" class="env-grid"></div>
+                        </div>
                     </div>
                 </div>
+
+                <div id="tab-tasks" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>任务处理</h2>
+                            <div class="section-lead"></div>
+                            <div class="tasks-page">
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>当前任务</h2>
+                                        <div id="task-registry-summary" class="memory-box" style="margin-bottom:14px;"></div>
+                                        <div id="task-registry-list" class="event-list"></div>
+                                    </div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>控制面状态</h2>
+                                        <div id="control-plane-summary" class="memory-box"></div>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>会话裁决</h2>
+                                        <div id="session-resolution" class="memory-box"></div>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>待处理控制动作</h2>
+                                        <div id="control-queue-board" class="event-list"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="tab-agents" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>代理活动</h2>
+                            <div class="section-lead"></div>
+                            <div class="agents-page">
+                                <div class="dashboard-stack">
+                                    <div id="active-agents-summary" class="memory-box agent-summary-box"></div>
+                                    <div id="active-agents-list" class="agent-seats"></div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div id="agent-activity-focus" class="focus-stage"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="tab-diagnostics" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>异常排查</h2>
+                            <div class="section-lead"></div>
+                            <div class="diagnostics-page">
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>诊断建议</h2>
+                                        <div id="diagnoses"></div>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>最近异常</h2>
+                                        <div id="recent-events" class="event-list"></div>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>会话分析</h2>
+                                        <table>
+                                            <thead><tr><th>时间</th><th>问题</th><th>回复</th><th>耗时</th><th>状态</th></tr></thead>
+                                            <tbody id="slow-sessions"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>内存归因</h2>
+                                        <div id="memory-attribution" class="memory-summary"></div>
+                                        <div id="memory-items" class="memory-items"></div>
+                                        <table>
+                                            <thead><tr><th>PID</th><th>用户</th><th>CPU %</th><th>内存</th><th>进程</th></tr></thead>
+                                            <tbody id="top-processes"></tbody>
+                                        </table>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>错误日志</h2>
+                                        <table>
+                                            <thead><tr><th>时间</th><th>错误信息</th></tr></thead>
+                                            <tbody id="error-logs"></tbody>
+                                        </table>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>运行进程</h2>
+                                        <table>
+                                            <thead><tr><th>进程</th><th>PID</th><th>CPU %</th><th>内存 %</th></tr></thead>
+                                            <tbody id="processes"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="tab-release" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>升级发布</h2>
+                            <div class="section-lead"></div>
+                            <div class="release-page">
+                                <div class="dashboard-stack">
+                                    <div id="promotion-summary" class="memory-box"></div>
+                                    <div id="promotion-status-board" class="promotion-board"></div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div id="release-summary-list" class="summary-list"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="tab-recovery" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>快照恢复</h2>
+                            <div class="section-lead"></div>
+                            <div class="recovery-page">
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>配置快照</h2>
+                                        <div style="margin-bottom: 15px;">
+                                            <button class="btn" onclick="loadSnapshots()">刷新</button>
+                                            <button class="btn btn-primary" onclick="captureSnapshot()">创建快照</button>
+                                        </div>
+                                        <table>
+                                            <thead><tr><th>名称</th><th>标签</th><th>创建时间</th><th>文件数</th><th>操作</th></tr></thead>
+                                            <tbody id="snapshot-logs"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>变更日志</h2>
+                                        <div style="margin-bottom: 15px;">
+                                            <button class="btn" onclick="loadChanges()">刷新</button>
+                                            <button class="btn" style="background:#dc2626" onclick="emergencyRecover()">执行急救恢复</button>
+                                        </div>
+                                        <table>
+                                            <thead><tr><th>日期</th><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>
+                                            <tbody id="change-logs"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="tab-learning" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>学习优化</h2>
+                            <div class="section-lead"></div>
+                            <div class="learning-page">
+                                <div class="dashboard-stack">
+                                    <div id="learning-summary" class="memory-box"></div>
+                                    <div class="panel-shell">
+                                        <h2>当前学习项</h2>
+                                        <div id="learning-list" class="event-list"></div>
+                                    </div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>改进建议</h2>
+                                        <div id="learning-suggestions" class="event-list"></div>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>最近反思</h2>
+                                        <div id="learning-reflections" class="event-list"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="tab-settings" class="tab-content">
+                    <div class="page-stack">
+                        <div class="section">
+                            <h2>系统设置</h2>
+                            <div class="section-lead"></div>
+                            <div class="settings-page">
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>配置管理</h2>
+                                        <table>
+                                            <tr>
+                                                <td width="200">自动更新</td>
+                                                <td>
+                                                    <label class="switch">
+                                                        <input type="checkbox" id="auto-update-toggle" onchange="toggleAutoUpdate(this)">
+                                                        <span class="slider"></span>
+                                                    </label>
+                                                    <span id="auto-update-status" class="config-value"></span>
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td>当前版本</td>
+                                                <td id="current-version">--</td>
+                                            </tr>
+                                            <tr>
+                                                <td>版本历史</td>
+                                                <td id="version-history">--</td>
+                                            </tr>
+                                            <tr>
+                                                <td>钉钉通知</td>
+                                                <td>
+                                                    <button class="config-btn" id="dingtalk-btn" onclick="configureWebhook('DINGTALK')">配置</button>
+                                                    <span id="dingtalk-status" class="config-value"></span>
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td>飞书通知</td>
+                                                <td>
+                                                    <button class="config-btn" id="feishu-btn" onclick="configureWebhook('FEISHU')">配置</button>
+                                                    <span id="feishu-status" class="config-value"></span>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </div>
+                                </div>
+                                <div class="dashboard-stack">
+                                    <div class="panel-shell">
+                                        <h2>上下文运行基线</h2>
+                                        <div id="context-readiness" class="summary-list"></div>
+                                    </div>
+                                    <div class="panel-shell">
+                                        <h2>系统信息</h2>
+                                        <div id="system-info-summary" class="summary-list"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <footer class="footer-bar">
+                    <span class="live">●</span> 自动刷新中 | <span id="last-update">--</span>
+                </footer>
             </div>
-
-            <div class="dashboard-stack">
-                <div class="section">
-                    <h2>🧭 版本环境</h2>
-                    <div id="environment-summary" class="memory-box" style="margin-bottom:14px;"></div>
-                    <div id="environment-workflow" class="workflow-board"></div>
-                    <div id="promotion-summary" class="memory-box" style="margin-bottom:14px;"></div>
-                    <div id="environment-cards" class="env-grid"></div>
-                </div>
-
-                <div class="section">
-                    <h2>🚨 最近异常 / 进度</h2>
-                    <div id="recent-events" class="event-list"></div>
-                </div>
-
-                <div class="section">
-                    <h2>🎛️ 控制队列</h2>
-                    <div id="control-queue-board" class="event-list"></div>
-                </div>
-
-                <div class="section">
-                    <h2>🧭 会话裁决</h2>
-                    <div id="session-resolution" class="memory-box"></div>
-                </div>
-
-                <div class="section">
-                    <h2>🔍 会话分析 (最近5分钟)</h2>
-                    <table>
-                        <thead><tr><th>时间</th><th>问题</th><th>回复</th><th>耗时</th><th>状态</th></tr></thead>
-                        <tbody id="slow-sessions"></tbody>
-                    </table>
-                </div>
-
-                <div class="section">
-                    <h2>🛠️ 诊断 & 建议</h2>
-                    <div id="diagnoses"></div>
-                </div>
-
-                <div class="section">
-                    <h2>🧪 反思与自进化</h2>
-                    <div id="learning-summary" class="memory-box" style="margin-bottom:14px;"></div>
-                    <div id="learning-list" class="event-list"></div>
-                </div>
-
-                <div class="section">
-                    <h2>⚙️ 配置管理</h2>
-                    <table>
-                        <tr>
-                            <td width="200">自动更新</td>
-                            <td>
-                                <label class="switch">
-                                    <input type="checkbox" id="auto-update-toggle" onchange="toggleAutoUpdate(this)">
-                                    <span class="slider"></span>
-                                </label>
-                                <span id="auto-update-status" class="config-value"></span>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td>当前版本</td>
-                            <td id="current-version">--</td>
-                        </tr>
-                        <tr>
-                            <td>版本历史</td>
-                            <td id="version-history">--</td>
-                        </tr>
-                        <tr>
-                            <td>钉钉通知</td>
-                            <td>
-                                <button class="config-btn" id="dingtalk-btn" onclick="configureWebhook('DINGTALK')">配置</button>
-                                <span id="dingtalk-status" class="config-value"></span>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td>飞书通知</td>
-                            <td>
-                                <button class="config-btn" id="feishu-btn" onclick="configureWebhook('FEISHU')">配置</button>
-                                <span id="feishu-status" class="config-value"></span>
-                            </td>
-                        </tr>
-                    </table>
-                </div>
-            </div>
-        </div>
-        
-        <footer style="text-align: center; padding: 20px; color: #666; font-size: 12px;">
-            <span class="live">●</span> 自动刷新中 | <span id="last-update">--</span>
-        </footer>
-    </div>
-    
-    <div id="tab-changes" class="tab-content">
-        <div class="section">
-            <h2>📝 变更日志</h2>
-            <div style="margin-bottom: 15px;">
-                <button class="btn" onclick="loadChanges()">🔄 刷新</button>
-            </div>
-            <table>
-                <thead><tr><th>日期</th><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>
-                <tbody id="change-logs"></tbody>
-            </table>
-        </div>
-    </div>
-
-    <div id="tab-snapshots" class="tab-content">
-        <div class="section">
-            <h2>📦 配置快照</h2>
-            <div style="margin-bottom: 15px;">
-                <button class="btn" onclick="loadSnapshots()">🔄 刷新</button>
-                <button class="btn btn-primary" onclick="captureSnapshot()">➕ 创建快照</button>
-            </div>
-            <table>
-                <thead><tr><th>名称</th><th>标签</th><th>创建时间</th><th>文件数</th><th>操作</th></tr></thead>
-                <tbody id="snapshot-logs"></tbody>
-            </table>
         </div>
     </div>
     
     <script>
         let currentData = null;
+        let promotionActionInFlight = false;
+        let selectedAgentId = null;
 
         function makeExpandableList(items, renderItem, emptyHtml, options = {}) {
             const limit = options.limit || 4;
@@ -2064,6 +2985,148 @@ def index():
             hidden.classList.toggle('is-hidden', expanded);
             button.dataset.expanded = expanded ? 'false' : 'true';
             button.textContent = expanded ? expandLabel : collapseLabel;
+        }
+
+        function formatPromotionTime(ts) {
+            if (!ts) return '暂无';
+            try {
+                return new Date(ts * 1000).toLocaleString();
+            } catch (_) {
+                return String(ts);
+            }
+        }
+
+        function renderSimpleList(targetId, items, emptyText) {
+            const el = document.getElementById(targetId);
+            if (!el) return;
+            if (!items || !items.length) {
+                el.innerHTML = `<div class="summary-item">${emptyText}</div>`;
+                return;
+            }
+            el.innerHTML = items.map(item => `
+                <div class="summary-item">
+                    <strong>${item.title}</strong><br/>
+                    <span>${item.body}</span>
+                </div>
+            `).join('');
+        }
+
+        function chooseAgentFocus(activeAgents) {
+            if (!activeAgents || !activeAgents.length) return null;
+            const current = activeAgents.find(item => item.agent_id === selectedAgentId);
+            if (current) return current;
+            const processingKeywords = ['正在', '启动', '派发', '等待', '回执受限', '处理中'];
+            const processing = activeAgents.find(item => processingKeywords.some(keyword => (item.state_label || '').includes(keyword)));
+            const chosen = processing || activeAgents[0];
+            selectedAgentId = chosen.agent_id;
+            return chosen;
+        }
+
+        function renderAgentFocus(activeAgents) {
+            const focusEl = document.getElementById('agent-activity-focus');
+            if (!focusEl) return;
+            const current = chooseAgentFocus(activeAgents);
+            if (!current) {
+                focusEl.innerHTML = '<div class="focus-quote">暂无代理活动，最近没有新的协作输出。</div>';
+                return;
+            }
+            const feed = activeAgents.slice(0, 4).map(item => `
+                <div class="feed-item">
+                    <div class="event-header">
+                        <div class="event-title">${item.display_name || item.agent_id}</div>
+                        <div class="event-time">${item.updated_label || '-'}</div>
+                    </div>
+                    <div class="event-details">${item.task_hint || '未抽取到任务提示'}<br/>${item.detail || '暂无额外输出'}</div>
+                </div>
+            `).join('');
+            focusEl.innerHTML = `
+                <div class="hero-label">当前焦点代理</div>
+                        <div class="hero-title" style="font-size:18px;">${current.emoji ? current.emoji + ' ' : ''}${current.display_name || current.agent_id}</div>
+                <div class="hero-subtitle">${current.agent_id || '-'} · ${current.state_label || '活动中'} · ${current.updated_label || '-'}</div>
+                <div class="focus-quote">${current.task_hint || '未抽取到当前任务'}${current.detail ? `<br/><br/>${current.detail}` : ''}</div>
+                <div class="focus-feed">${feed}</div>
+            `;
+        }
+
+        function renderPromotionStage(statusClass, title, main, sub) {
+            return `
+                <div class="promotion-stage ${statusClass}">
+                    <div class="promotion-stage-title">${title}</div>
+                    <div class="promotion-stage-main">${main}</div>
+                    <div class="promotion-stage-sub">${sub}</div>
+                </div>
+            `;
+        }
+
+        function renderPromotionRun(promotionSummary, run) {
+            const boardEl = document.getElementById('promotion-status-board');
+            if (!boardEl) return;
+            const status = run && run.status ? run.status : 'idle';
+            const checks = (run && run.preflight && run.preflight.checks) || [];
+            const failedChecks = checks.filter(item => !item.ok).map(item => item.detail);
+            const snapshots = run && run.backups ? Object.entries(run.backups).map(([k, v]) => `${k}: ${v}`).join(' | ') : '尚未创建';
+            const verifyChecks = (run && run.verification && run.verification.checks) || [];
+            const verifySummary = verifyChecks.length
+                ? verifyChecks.map(item => `${item.name}:${item.ok ? 'OK' : 'FAIL'}`).join(' | ')
+                : '尚未执行';
+            const rollbackSummary = run && run.rollback
+                ? `已恢复 ${run.rollback.primary_snapshot || '-'}${run.rollback.primary_head ? ` · HEAD ${run.rollback.primary_head.slice(0, 8)}` : ''}`
+                : '未触发';
+            const headline = run && run.status
+                ? ({
+                    preflight: '正在做晋升前检查',
+                    backup: '已通过前检，正在建立回滚点',
+                    cutover: '已完成同步，正在切换主用版',
+                    promoted: '晋升完成，主用版已切到验证通过的官方版本',
+                    rolled_back: '晋升失败，已自动回滚主用版',
+                    failed_preflight: '晋升前检查未通过',
+                }[run.status] || `当前状态：${run.status}`)
+                : (promotionSummary && promotionSummary.safe_to_promote ? '官方验证版已满足晋升条件，可以开始发布到主用版' : '还没有发生正式晋升，当前显示的是准备状态');
+            const updatedAt = run && run.updated_at ? formatPromotionTime(run.updated_at) : '暂无运行记录';
+            const actionLabel = promotionActionInFlight ? '晋升执行中...' : '将官方验证版升级为主用版';
+            boardEl.innerHTML = `
+                <div class="memory-box">
+                    <div class="memory-box-title">晋升执行流</div>
+                    <div class="memory-box-main">${headline}</div>
+                    <div class="memory-box-sub">最近更新：${updatedAt}</div>
+                    <div class="promotion-actions">
+                        <button class="btn btn-primary" ${promotionActionInFlight ? 'disabled' : ''} onclick="promoteOfficialToPrimary()">${actionLabel}</button>
+                        <button class="btn" onclick="loadData()">刷新流程状态</button>
+                    </div>
+                </div>
+                <div class="promotion-stage-grid">
+                    ${renderPromotionStage(status === 'failed_preflight' ? 'fail' : (status !== 'idle' ? 'ok' : 'pending'), 'Preflight', checks.length ? `${checks.filter(item => item.ok).length}/${checks.length} 通过` : '待检查', failedChecks.length ? failedChecks.join(' | ') : '会检查 official 健康、阻塞任务、候选版本差异。')}
+                    ${renderPromotionStage(status === 'backup' ? 'active' : (run && run.backups ? 'ok' : 'pending'), 'Backup', run && run.backups ? '回滚点已建立' : '待执行', snapshots)}
+                    ${renderPromotionStage(status === 'cutover' ? 'active' : ((run && run.cutover) || status === 'promoted' || status === 'rolled_back' ? 'ok' : 'pending'), 'Cutover', run && run.cutover ? '主用版已切换启动链路' : '待执行', run && run.cutover ? (run.cutover.message || '已开始切换主用环境') : '会停止 official，启动 primary，并将守护目标切回 primary。')}
+                    ${renderPromotionStage(status === 'promoted' ? 'ok' : (status === 'rolled_back' ? 'fail' : (verifyChecks.length ? 'active' : 'pending')), 'Verify', status === 'promoted' ? '自动验活通过' : (status === 'rolled_back' ? '验证失败' : '待执行'), verifySummary)}
+                    ${renderPromotionStage(status === 'rolled_back' ? 'fail' : 'pending', 'Rollback', status === 'rolled_back' ? '已自动回滚' : '未触发', status === 'rolled_back' ? `${run.error || '未知错误'} | ${rollbackSummary}` : '只有在 cutover 或 verify 失败时才会触发。')}
+                </div>
+            `;
+        }
+
+        async function promoteOfficialToPrimary() {
+            if (promotionActionInFlight) return;
+            const confirmed = confirm('这会把已验证通过的 official 晋升为新的 primary，并在失败时自动回滚。现在开始吗？');
+            if (!confirmed) return;
+            promotionActionInFlight = true;
+            const boardEl = document.getElementById('promotion-status-board');
+            if (boardEl) {
+                boardEl.innerHTML = '<div class="memory-box"><div class="memory-box-title">晋升执行流</div><div class="memory-box-main">正在执行 official -> primary 晋升...</div><div class="memory-box-sub">请等待备份、同步、切换与自动验活完成。</div></div>';
+            }
+            try {
+                const res = await fetch('/api/environments/promote', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({source_env: 'official', target_env: 'primary'})
+                });
+                const data = await res.json();
+                alert(data.message || (data.success ? '晋升完成' : '晋升失败'));
+            } catch (err) {
+                alert('晋升请求失败: ' + err);
+            } finally {
+                promotionActionInFlight = false;
+                await loadData();
+            }
         }
         
         async function loadData() {
@@ -2125,10 +3188,37 @@ def index():
                 const primaryEnv = envs.find(item => item.id === 'primary') || null;
                 const officialEnv = envs.find(item => item.id === 'official') || null;
                 const promotionSummary = data.promotion_summary || {};
+                const promotionLastRun = data.promotion_last_run || {};
+                const environmentIntegrity = data.environment_integrity || [];
+                const modelFailureSummary = data.model_failure_summary || {};
+                const contextReadiness = data.context_readiness || {};
+                const taskSummary = (data.task_registry || {}).summary || {};
+                const dualRunning = envs.filter(item => item.running).length > 1;
+                const activeEnvChip = document.getElementById('global-active-env');
+                const primaryChip = document.getElementById('global-primary-env');
+                const officialChip = document.getElementById('global-official-env');
+                const gatewayStatusPill = document.getElementById('global-gateway-status');
+                const guardianStatusPill = document.getElementById('global-guardian-status');
+                const taskStatsPill = document.getElementById('global-task-stats');
+                const alertStatsPill = document.getElementById('global-alert-stats');
+                if (activeEnvChip) activeEnvChip.innerHTML = `<strong>当前环境</strong> ${activeEnv ? activeEnv.name : '未识别'}`;
+                if (primaryChip) {
+                    primaryChip.classList.toggle('active', !!(primaryEnv && primaryEnv.active));
+                    primaryChip.innerHTML = `<strong>Primary</strong> ${primaryEnv ? (primaryEnv.running ? (primaryEnv.healthy ? '健康' : '异常') : '未运行') : '--'}`;
+                }
+                if (officialChip) {
+                    officialChip.classList.toggle('active', !!(officialEnv && officialEnv.active));
+                    officialChip.innerHTML = `<strong>Official</strong> ${officialEnv ? (officialEnv.running ? (officialEnv.healthy ? '健康' : '异常') : '未运行') : '--'}`;
+                }
+                if (gatewayStatusPill) gatewayStatusPill.innerHTML = `<strong>Gateway</strong> ${data.gateway_healthy ? '运行中' : '异常'}`;
+                if (guardianStatusPill) guardianStatusPill.innerHTML = `<strong>Guardian</strong> ${data.guardian_process ? '运行中' : '未检测到'}`;
+                if (taskStatsPill) taskStatsPill.innerHTML = `<strong>任务</strong> 运行中 ${taskSummary.running || 0} / 阻塞 ${taskSummary.blocked || 0}`;
+                if (alertStatsPill) alertStatsPill.innerHTML = `<strong>告警</strong> ${dualRunning ? '双环境同时运行' : `${(data.recent_events || []).filter(item => item.type === 'anomaly').length} 条异常`}`;
                 envSummaryEl.innerHTML = activeEnv ? `
                     <div class="memory-box-title">当前守护目标</div>
-                    <div class="memory-box-main">${activeEnv.name} · ${activeEnv.healthy ? '健康' : (activeEnv.running ? '运行中但健康检查失败' : '未运行')}</div>
-                    <div class="memory-box-sub">端口 ${activeEnv.port} · 版本 ${activeEnv.git_head} · ${activeEnv.code}</div>
+                    <div class="memory-box-main">${activeEnv.name} · ${activeEnv.healthy ? '健康' : (activeEnv.running ? '异常' : '未运行')}</div>
+                    <div class="memory-box-sub">env=${activeEnv.id} · 端口 ${activeEnv.port} · 版本 ${activeEnv.git_head}</div>
+                    <div class="memory-box-sub" style="margin-top:6px;">代码目录: ${activeEnv.code}<br/>状态目录: ${activeEnv.home}</div>
                 ` : `
                     <div class="memory-box-title">当前守护目标</div>
                     <div class="memory-box-main">未识别</div>
@@ -2166,6 +3256,22 @@ def index():
                     <div class="memory-box-sub">${promotionSummary.recommended_action || '-'}</div>
                     <div class="memory-box-sub" style="margin-top:6px;">${(promotionSummary.reasons || []).length ? (promotionSummary.reasons || []).join(' | ') : '当前没有额外阻断条件。'}</div>
                 `;
+                renderPromotionRun(promotionSummary, promotionLastRun);
+                const incident = data.incident_summary || {};
+                renderSimpleList('overview-environment-quick', activeEnv ? [
+                    {title: `${activeEnv.name}`, body: `env=${activeEnv.id} · port=${activeEnv.port} · ${activeEnv.healthy ? '健康' : (activeEnv.running ? '异常' : '未运行')}`},
+                    {title: '模式', body: dualRunning ? '双运行，需处理。' : '单活运行。'}
+                ] : [], '当前没有识别到活动环境');
+                renderSimpleList('overview-next-action', [
+                    {title: incident.action || '继续观察', body: incident.focus || '无明显异常。'},
+                    {title: promotionSummary.recommended_action || '暂无发布动作', body: promotionSummary.headline || '暂无新的版本晋升任务。'}
+                ], '暂无动作');
+                renderSimpleList('overview-release-quick', [
+                    {title: promotionSummary.headline || '暂无版本晋升判断', body: promotionSummary.recommended_action || '继续观察。'},
+                    {title: activeEnv && activeEnv.id === 'official' ? '当前使用验证版' : '当前使用主用版', body: dualRunning ? '发现双运行风险。' : '未发现双运行。'}
+                ], '暂无发布摘要');
+                const envAlerts = environmentIntegrity.length ? environmentIntegrity.map(item => ({title: item.title, body: item.detail})) : [];
+                renderSimpleList('environment-alerts', envAlerts, '当前没有检测到环境不一致告警。');
                 envCardsEl.innerHTML = envs.map(item => {
                     const switchBtn = `<button class="btn ${item.active ? 'btn-current' : 'btn-primary'}" ${item.active ? 'disabled' : ''} onclick="switchEnvironment('${item.id}')">${item.active ? '当前使用中' : '切换到这里'}</button>`;
                     let dashboardLink = '';
@@ -2188,15 +3294,20 @@ def index():
                     const targetMeta = item.id === 'official' ? `目标版本: ${item.target_head || '-'}<br/>` : '';
                     const updateMeta = item.id === 'official' ? `<br/>自动更新: ${item.auto_update_enabled ? '已开启' : '未开启'}` : '';
                     return `
-                        <div class="env-card ${item.active ? 'active' : ''}">
+                        <div class="env-card ${item.active ? 'active' : ''}" title="code=${item.code}&#10;state=${item.home}&#10;token=${item.token_prefix || '-'}">
                             <div class="env-title-row">
                                 <div class="env-title">${item.name}</div>
                                 <div class="env-pill ${item.active ? 'active' : ''}">${item.active ? '当前守护中' : '可切换'}</div>
                             </div>
                             <div class="event-details">${item.description}</div>
                             <div class="env-meta">
+                                env: ${item.id}<br/>
                                 端口: ${item.port}<br/>
                                 版本: ${item.git_head}<br/>
+                                代码: ${item.code}<br/>
+                                状态目录: ${item.home}<br/>
+                                listener pid: ${item.listener_pid || '-'}<br/>
+                                token 前缀: ${item.token_prefix || '-'}<br/>
                                 ${targetMeta}
                                 状态: ${item.running ? (item.healthy ? '健康' : '运行中但异常') : '未运行'}${updateMeta}
                             </div>
@@ -2272,30 +3383,61 @@ def index():
 
                 // 问题定位摘要
                 const incidentEl = document.getElementById('incident-summary');
-                const incident = data.incident_summary || {};
                 incidentEl.innerHTML = `
                     <div class="incident-card ${incident.status || 'ok'}">
-                        <div class="incident-label">当前关注点</div>
+                        <div class="incident-label" title="当前最主要问题">关注点</div>
                         <div class="incident-main">${incident.headline || '最近未发现明显异常'}</div>
-                        <div class="incident-sub">${incident.focus || '-'}</div>
+                        <div class="incident-sub" title="详细说明">${incident.focus || '-'}</div>
                     </div>
                     <div class="incident-card">
-                        <div class="incident-label">最后阶段</div>
+                        <div class="incident-label" title="最近记录到的阶段">阶段</div>
                         <div class="incident-main">${incident.last_stage || '-'}</div>
-                        <div class="incident-sub">用于快速判断当前卡在哪个环节。</div>
+                            <div class="incident-sub"></div>
                     </div>
                     <div class="incident-card">
-                        <div class="incident-label">建议动作</div>
+                        <div class="incident-label" title="建议优先执行的动作">动作</div>
                         <div class="incident-main">${incident.action || '继续观察即可'}</div>
-                        <div class="incident-sub">最近问题: ${incident.last_question || '-'}</div>
+                        <div class="incident-sub" title="最近问题">${incident.last_question || '-'}</div>
                     </div>
                 `;
+                renderSimpleList('overview-environment-cards', envs.map(item => ({
+                    title: `${item.name} · ${item.active ? '当前使用中' : '备用'}`,
+                    body: `${item.running ? (item.healthy ? '健康' : '异常') : '未运行'} · ${item.git_head} · ${item.port}`
+                })), '暂无环境信息');
+                renderSimpleList('overview-task-cards', [
+                    {title: `任务总数 ${taskSummary.total || 0}`, body: `运行中 ${taskSummary.running || 0} · 阻塞 ${taskSummary.blocked || 0} · 已完成 ${taskSummary.completed || 0}`},
+                    {title: `当前会话 ${((data.task_registry || {}).session_resolution || {}).active_task_id || '暂无'}`, body: ((data.task_registry || {}).session_resolution || {}).summary || '当前没有需要会话裁决的复杂任务。'}
+                ], '暂无任务摘要');
+                renderSimpleList('overview-recent-events', (data.recent_events || []).slice(0, 3).map(item => ({
+                    title: item.message || '未命名事件',
+                    body: formatChangeDetails(item)
+                })), '最近没有新的异常或进度事件');
+                const failureItems = [];
+                if (modelFailureSummary.primary_type && modelFailureSummary.primary_type !== 'ok') {
+                    const failureDetail = (modelFailureSummary.items || []).map(item => {
+                        const meta = [item.provider, item.model, item.status].filter(Boolean).join(' / ');
+                        return `${item.label} x${item.count}${meta ? ` (${meta})` : ''}`;
+                    }).join(' | ');
+                    failureItems.push({title: `主失败类型：${modelFailureSummary.headline}`, body: failureDetail || '暂无细节'});
+                }
+                (data.errors || []).slice(0, 2).forEach(item => failureItems.push({title: '最近错误日志', body: `${item.time} · ${item.message}`}));
+                if ((data.recent_events || []).some(item => String(item.message || '').includes('无回复') || String(item.message || '').includes('WebSocket'))) {
+                    const event = (data.recent_events || []).find(item => String(item.message || '').includes('无回复') || String(item.message || '').includes('WebSocket'));
+                    failureItems.push({title: '最新失败边界', body: event ? `${event.message} · ${formatChangeDetails(event)}` : '最近没有模型或交付失败记录。'});
+                }
+                renderSimpleList('overview-failure-summary', failureItems, '最近没有明显的模型或交付失败。');
+                renderSimpleList('overview-warning-list', envAlerts.length ? envAlerts : (data.diagnoses || []).slice(0, 2).map(item => ({title: item.title, body: item.message})), '当前没有需要升级处理的风险。');
+                renderSimpleList('release-summary-list', [
+                    {title: activeEnv && activeEnv.id === 'official' ? '当前主视角在 Official' : '当前主视角在 Primary', body: activeEnv ? `${activeEnv.code} · ${activeEnv.git_head}` : '未识别当前环境'},
+                    {title: '发布判断', body: (promotionSummary.reasons || []).join(' | ') || '当前没有额外阻断条件。'}
+                ], '暂无发布补充信息');
 
                 // 任务注册表
                 const taskRegistry = data.task_registry || {};
                 const taskSummaryEl = document.getElementById('task-registry-summary');
                 const taskListEl = document.getElementById('task-registry-list');
                 const controlPlaneSummaryEl = document.getElementById('control-plane-summary');
+                const controlPlaneSummarySecondaryEl = document.getElementById('control-plane-summary-secondary');
                 const controlQueueBoardEl = document.getElementById('control-queue-board');
                 const sessionResolutionEl = document.getElementById('session-resolution');
                 const currentTask = taskRegistry.current || null;
@@ -2308,6 +3450,9 @@ def index():
                     `;
                     taskListEl.innerHTML = '';
                     controlQueueBoardEl.innerHTML = '<div class="event-empty">任务注册表未启用</div>';
+                    if (controlPlaneSummarySecondaryEl) {
+                        controlPlaneSummarySecondaryEl.innerHTML = controlPlaneSummaryEl.innerHTML;
+                    }
                     sessionResolutionEl.innerHTML = `
                         <div class="memory-box-title">当前会话</div>
                         <div class="memory-box-main">未启用</div>
@@ -2334,7 +3479,10 @@ def index():
                         <div class="memory-box-sub">状态: ${currentTask.status} | 阶段: ${currentTask.current_stage} | 会话: ${currentTask.session_key}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">任务总数: ${summary.total || 0} | 运行中: ${summary.running || 0} | 阻塞: ${summary.blocked || 0} | 后台: ${summary.background || 0}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">控制裁决: ${control.approved_summary || '-'} | 证据: ${control.evidence_level || '-'} | 合同: ${(control.contract || {}).id || '-'} | 对外口径: ${control.claim_level || '-'}</div>
+                        <div class="memory-box-sub" style="margin-top:6px;">证据摘要: ${control.evidence_summary || '-'} </div>
+                        <div class="memory-box-sub" style="margin-top:6px;">协议: request=${(control.protocol || {}).request || '-'} | confirmed=${(control.protocol || {}).confirmed || '-'} | final=${(control.protocol || {}).final || '-'} | blocked=${(control.protocol || {}).blocked || '-'} | ack=${(control.protocol || {}).ack_id || '-'}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">下一执行人: ${control.next_actor || '-'} | 缺失回执: ${(control.missing_receipts || []).join(', ') || '无'}${controlAction ? ` | 控制动作: ${controlAction.action_type} (${controlAction.status}, attempts=${controlAction.attempts})` : ''}</div>
+                        ${((control.pipeline_recovery || {}).kind) ? `<div class="memory-box-sub" style="margin-top:6px;">流水线失联: last=${(control.pipeline_recovery || {}).last_dispatched_agent || '-'} | stale=${(control.pipeline_recovery || {}).stale_subagent || '-'} | rebind=${(control.pipeline_recovery || {}).rebind_target || '-'}<br/>恢复建议: ${(control.pipeline_recovery || {}).manual_recovery_hint || '-'}</div>` : ''}
                         <div class="memory-box-sub" style="margin-top:6px;">最近回执: ${receipt.agent || '-'} / ${receipt.phase || '-'} / ${receipt.action || '-'}${receipt.evidence && receipt.evidence !== '-' ? ` | ${receipt.evidence}` : ''}</div>
                         ${renderPhaseStrip(control.phase_statuses)}
                         ${timeline.length ? `<div class="memory-box-sub" style="margin-top:8px;">时间线: ${timeline.map(item => `${item.created_label} ${item.event_type}`).join(' → ')}</div>` : ''}
@@ -2365,7 +3513,10 @@ def index():
                             <div class="event-details">
                                 task_id=${item.task_id} | session=${item.session_key}<br/>
                                 最近进展时间: ${item.last_progress_label || '-'}<br/>
-                                控制: ${(item.control || {}).control_state || '-'} | 证据: ${(item.control || {}).evidence_level || '-'} | 口径: ${(item.control || {}).claim_level || '-'}${(item.control || {}).missing_receipts?.length ? `<br/>缺失回执: ${(item.control || {}).missing_receipts.join(', ')}` : ''}${(item.control || {}).next_actor ? `<br/>下一执行人: ${(item.control || {}).next_actor}` : ''}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
+                                控制: ${(item.control || {}).control_state || '-'} | 证据: ${(item.control || {}).evidence_level || '-'} | 口径: ${(item.control || {}).claim_level || '-'}<br/>
+                                摘要: ${(item.control || {}).evidence_summary || '-'}<br/>
+                                协议: request=${((item.control || {}).protocol || {}).request || '-'} | confirmed=${((item.control || {}).protocol || {}).confirmed || '-'} | final=${((item.control || {}).protocol || {}).final || '-'} | blocked=${((item.control || {}).protocol || {}).blocked || '-'}${((item.control || {}).protocol || {}).ack_id ? `<br/>ack=${((item.control || {}).protocol || {}).ack_id}` : ''}${(item.control || {}).missing_receipts?.length ? `<br/>缺失回执: ${(item.control || {}).missing_receipts.join(', ')}` : ''}${(item.control || {}).next_actor ? `<br/>下一执行人: ${(item.control || {}).next_actor}` : ''}${item.blocked_reason ? `<br/>阻塞: ${item.blocked_reason}` : ''}
+                                ${((item.control || {}).pipeline_recovery || {}).kind ? `<br/>流水线失联: last=${((item.control || {}).pipeline_recovery || {}).last_dispatched_agent || '-'} | stale=${((item.control || {}).pipeline_recovery || {}).stale_subagent || '-'} | rebind=${((item.control || {}).pipeline_recovery || {}).rebind_target || '-'}<br/>恢复建议: ${((item.control || {}).pipeline_recovery || {}).manual_recovery_hint || '-'}` : ''}
                                 ${renderPhaseStrip((item.control || {}).phase_statuses)}
                             </div>
                         </div>
@@ -2379,6 +3530,9 @@ def index():
                         <div class="memory-box-sub" style="margin-top:6px;">动作队列: pending=${actionStats.pending || 0} · sent=${actionStats.sent || 0} · blocked=${actionStats.blocked || 0} · resolved=${actionStats.resolved || 0}</div>
                         <div class="memory-box-sub" style="margin-top:6px;">下一执行人分布: ${Object.entries(taskStats.next_actor_counts || {}).map(([k, v]) => `${k}:${v}`).join(' · ') || '暂无'}</div>
                     `;
+                    if (controlPlaneSummarySecondaryEl) {
+                        controlPlaneSummarySecondaryEl.innerHTML = controlPlaneSummaryEl.innerHTML;
+                    }
                     controlQueueBoardEl.innerHTML = makeExpandableList(controlQueue, item => `
                         <div class="event-item ${item.status === 'blocked' ? 'warning' : (item.status === 'sent' ? 'info' : 'anomaly')}">
                             <div class="event-header">
@@ -2388,7 +3542,7 @@ def index():
                             <div class="event-details">
                                 task_id=${item.task_id || '-'} | state=${item.control_state || '-'}<br/>
                                 ${(item.required_receipts || []).length ? `required=${item.required_receipts.join(', ')}<br/>` : ''}
-                                ${(item.summary || '-')}${item.last_error ? `<br/>last_error=${item.last_error}` : ''}
+                                ${(item.summary || '-')}${item.reason ? `<br/>reason=${item.reason}` : ''}${item.last_error ? `<br/>last_error=${item.last_error}` : ''}
                             </div>
                         </div>
                     `, '<div class="event-empty">当前没有待执行的控制动作</div>', { limit: 3, buttonLabel: '展开更多控制动作', collapseLabel: '收起控制动作' });
@@ -2413,6 +3567,7 @@ def index():
                         <div class="memory-box-sub">最近 ${Math.round((agentSummary.lookback_seconds || 1800) / 60)} 分钟内没有检测到新的 agent 会话更新。</div>
                     `;
                     agentListEl.innerHTML = '<div class="event-empty">暂无 agent 活动记录</div>';
+                    renderAgentFocus([]);
                 } else {
                     agentSummaryEl.innerHTML = `
                         <div class="memory-box-title">当前活跃代理</div>
@@ -2421,19 +3576,18 @@ def index():
                     `;
                     const processingKeywords = ['正在', '启动', '派发', '等待', '回执受限', '处理中'];
                     agentListEl.innerHTML = activeAgents.map(item => `
-                        <div class="agent-card ${processingKeywords.some(keyword => (item.state_label || '').includes(keyword)) ? 'processing' : 'idle'}">
-                            <div class="agent-card-head">
+                        <div class="agent-seat ${processingKeywords.some(keyword => (item.state_label || '').includes(keyword)) ? 'processing' : ''} ${item.agent_id === selectedAgentId ? 'active' : ''}" onclick="selectedAgentId='${item.agent_id}'; loadData()" title="session=${item.session_file || '-'}">
+                            <div class="agent-seat-head">
                                 <div>
                                     <div class="agent-name">${item.emoji ? item.emoji + ' ' : ''}${item.display_name || item.agent_id}</div>
                                     <div class="agent-meta">${item.updated_label || '-'} · ${item.agent_id || '-'}</div>
                                 </div>
                                 <div class="agent-state-pill">${item.state_label || '活动中'}</div>
                             </div>
-                            <div class="agent-task">任务：${item.task_hint || '未抽取到任务提示'}</div>
-                            <div class="agent-detail">${item.detail || '暂无细节'}</div>
-                            <div class="agent-file">会话文件：${item.session_file || '-'}</div>
+                            <div class="agent-seat-sub">${item.task_hint || '未抽取到任务提示'}<br/>${item.detail || '暂无细节'}</div>
                         </div>
                     `).join('');
+                    renderAgentFocus(activeAgents);
                 }
 
                 // 反思与自进化
@@ -2472,6 +3626,30 @@ def index():
                         </div>
                     </div>
                 `, '<div class="event-empty">暂无 learnings</div>', { limit: 3, buttonLabel: '展开更多 learnings', collapseLabel: '收起 learnings' })}`;
+                const learningSuggestionsEl = document.getElementById('learning-suggestions');
+                const learningReflectionsEl = document.getElementById('learning-reflections');
+                if (learningSuggestionsEl) {
+                    learningSuggestionsEl.innerHTML = suggestions.length ? suggestions.map(item => `
+                        <div class="event-item info">
+                            <div class="event-header">
+                                <div class="event-title">${item.title}</div>
+                                <div class="event-time">${item.status} · x${item.occurrences}</div>
+                            </div>
+                            <div class="event-details">${item.action || '-'}${item.detail ? `<br/>${item.detail}` : ''}</div>
+                        </div>
+                    `).join('') : '<div class="event-empty">当前没有新的改进建议</div>';
+                }
+                if (learningReflectionsEl) {
+                    learningReflectionsEl.innerHTML = reflections.length ? reflections.map(item => `
+                        <div class="event-item ${item.status === 'completed' ? 'info' : 'warning'}">
+                            <div class="event-header">
+                                <div class="event-title">${item.created_label || '未命名反思'}</div>
+                                <div class="event-time">promoted=${(item.summary || {}).promoted || 0}</div>
+                            </div>
+                            <div class="event-details">pending=${(item.summary || {}).pending || 0} · reviewed=${(item.summary || {}).reviewed || 0}</div>
+                        </div>
+                    `).join('') : '<div class="event-empty">暂无反思记录</div>';
+                }
 
                 // 最近异常 / 进度
                 const eventsEl = document.getElementById('recent-events');
@@ -2518,6 +3696,14 @@ def index():
                 document.getElementById('auto-update-status').textContent = autoUpdate ? '已开启' : '已关闭';
                 document.getElementById('current-version').textContent = data.version.current || 'unknown';
                 document.getElementById('version-history').textContent = data.version.history ? data.version.history.length + ' 个历史版本' : '无';
+                renderSimpleList('context-readiness', (contextReadiness.checks || []).map(item => ({
+                    title: `${item.ok ? '已满足' : '未满足'} · ${item.name}`,
+                    body: item.detail
+                })), '暂无上下文治理信息');
+                renderSimpleList('system-info-summary', [
+                    {title: '当前版本', body: `${data.version.current || 'unknown'} · 历史 ${data.version.history ? data.version.history.length : 0} 条`},
+                    {title: '资源占用', body: `CPU ${data.metrics.cpu}% · 内存 ${data.metrics.mem_used}G / ${data.metrics.mem_total}G`}
+                ], '暂无系统信息');
                 
                 const dingtalkWebhook = data.config.DINGTALK_WEBHOOK;
                 const feishuWebhook = data.config.FEISHU_WEBHOOK;
@@ -2669,10 +3855,8 @@ def index():
             evt.target.classList.add('active');
             document.getElementById('tab-' + tabName).classList.add('active');
             console.log('Tab content element:', document.getElementById('tab-' + tabName));
-            if (tabName === 'changes') {
-                console.log('Calling loadChanges...');
+            if (tabName === 'recovery') {
                 loadChanges();
-            } else if (tabName === 'snapshots') {
                 loadSnapshots();
             }
         }
@@ -2809,17 +3993,47 @@ def api_status():
     active_agents = get_active_agent_activity(selected_env, config)
     learning_center = get_learning_center_payload(limit=10)
     promotion_summary = build_environment_promotion_summary(environments, task_registry)
+    promotion_last_run = STORE.load_runtime_value("promotion_last_run", {})
     control_plane = get_control_plane_overview(selected_env["id"])
+    environment_integrity = detect_environment_inconsistencies(environments, selected_env["id"])
+    for issue in environment_integrity:
+        diagnoses.insert(
+            0,
+            {
+                "level": "error" if issue.get("severity") == "error" else "warning",
+                "title": str(issue.get("title") or "环境状态异常"),
+                "message": str(issue.get("detail") or "active env 与 listener 不一致"),
+                "action": "检查环境切换",
+            },
+        )
+    model_failure_summary = build_model_failure_summary(errors, recent_events)
+    if model_failure_summary.get("primary_type") not in {"", "ok"}:
+        diagnoses.insert(
+            0,
+            {
+                "level": "warning",
+                "title": f"最新失败层级：{model_failure_summary.get('headline')}",
+                "message": " | ".join(
+                    f"{item.get('label')} x{item.get('count')}"
+                    for item in (model_failure_summary.get("items") or [])[:3]
+                )
+                or "最近存在模型或交付失败。",
+                "action": "查看异常排查",
+            },
+        )
+    context_readiness = build_context_lifecycle_readiness(config)
     
     data = {
         "active_environment": selected_env["id"],
         "environments": environments,
+        "environment_integrity": environment_integrity,
         "metrics": metrics,
         "gateway_process": gateway_process,
         "guardian_process": guardian_process,
         "gateway_healthy": gateway_healthy,
         "sessions": sessions,
         "errors": errors,
+        "model_failure_summary": model_failure_summary,
         "version": {"current": version, "history": version_history.get("history", [])},
         "config": safe_config,
         "diagnoses": diagnoses,
@@ -2832,6 +4046,8 @@ def api_status():
         "learning_center": learning_center,
         "control_plane": control_plane,
         "promotion_summary": promotion_summary,
+        "promotion_last_run": promotion_last_run,
+        "context_readiness": context_readiness,
     }
     return app.response_class(
         response=json.dumps(data, ensure_ascii=False),
@@ -2852,6 +4068,24 @@ def api_task_registry():
 @app.route("/api/learnings")
 def api_learnings():
     payload = get_learning_center_payload(limit=20)
+    return app.response_class(
+        response=json.dumps(payload, ensure_ascii=False),
+        mimetype="application/json",
+    )
+
+
+@app.route("/api/shared-state")
+def api_shared_state():
+    payload = build_shared_state_snapshot(load_config())
+    return app.response_class(
+        response=json.dumps(payload, ensure_ascii=False),
+        mimetype="application/json",
+    )
+
+
+@app.route("/api/context-baseline")
+def api_context_baseline():
+    payload = build_context_lifecycle_readiness(load_config())
     return app.response_class(
         response=json.dumps(payload, ensure_ascii=False),
         mimetype="application/json",
@@ -2886,6 +4120,32 @@ def api_manage_environment():
         return jsonify({"success": False, "message": str(exc)})
 
 
+@app.route("/api/environments/promote", methods=["POST"])
+def api_promote_environment():
+    """Promote validated official environment into primary."""
+    try:
+        data = request.get_json(silent=True) or {}
+        source_env = str(data.get("source_env", "official")).strip() or "official"
+        target_env = str(data.get("target_env", "primary")).strip() or "primary"
+        if source_env != "official" or target_env != "primary":
+            return jsonify({"success": False, "message": "当前只支持 official -> primary 的版本晋升"})
+        result = execute_official_promotion()
+        status = result.get("status", "unknown")
+        success = status == "promoted"
+        if status == "failed_preflight":
+            failed = [item.get("detail", "") for item in (result.get("preflight") or {}).get("checks", []) if not item.get("ok")]
+            message = "晋升前检查未通过：" + (" | ".join(failed) if failed else "请查看流程状态")
+        elif status == "rolled_back":
+            message = f"晋升失败，已自动回滚：{result.get('error', '未知错误')}"
+        elif status == "promoted":
+            message = "官方验证版已晋升为当前主用版，并通过自动验活"
+        else:
+            message = f"晋升流程结束：{status}"
+        return jsonify({"success": success, "message": message, "result": result, "status": status})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)})
+
+
 @app.route("/open-dashboard/<env_id>")
 def open_dashboard(env_id: str):
     """Open the target OpenClaw dashboard through a server-side redirect."""
@@ -2906,42 +4166,30 @@ def open_dashboard(env_id: str):
 def api_restart():
     """重启 Gateway"""
     try:
-        old_pid = get_listener_pid()
-        if old_pid is not None:
-            subprocess.run(f"kill {old_pid}", shell=True, check=False)
-            time.sleep(2)
+        ok, message, old_pid_str, new_pid, target_env = restart_active_openclaw_environment()
 
-        with open(BASE_DIR / "logs" / "guardian.log", "a") as log_handle:
-            subprocess.Popen(
-                ["openclaw", "gateway", "run"],
-                cwd=str(OPENCLAW_CODE),
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
+        if ok and new_pid and new_pid != old_pid_str:
+            record_change(
+                "restart",
+                f"{env_spec(target_env)['name']} 重启成功 (PID: {old_pid_str} → {new_pid})",
+                {"old_pid": old_pid_str, "new_pid": new_pid, "env_id": target_env},
             )
-
-        time.sleep(5)
-        listener_pid = get_listener_pid()
-        new_pid = str(listener_pid) if listener_pid is not None else None
-        old_pid_str = str(old_pid) if old_pid is not None else None
-        
-        if new_pid and new_pid != old_pid_str:
-            record_change("restart", f"Gateway 重启成功 (PID: {old_pid_str} → {new_pid})",
-                         {"old_pid": old_pid_str, "new_pid": new_pid})
             return jsonify({
-                "success": True, 
-                "message": f"Gateway 已重启\n旧PID: {old_pid_str or '无'}\n新PID: {new_pid}",
+                "success": True,
+                "message": f"{env_spec(target_env)['name']} 已重启\n旧PID: {old_pid_str or '无'}\n新PID: {new_pid}",
                 "old_pid": old_pid_str,
-                "new_pid": new_pid
+                "new_pid": new_pid,
+                "env_id": target_env,
             })
-        elif new_pid:
+        elif ok and new_pid:
             return jsonify({
-                "success": True, 
-                "message": f"Gateway 正在运行 (PID: {new_pid})",
-                "new_pid": new_pid
+                "success": True,
+                "message": f"{env_spec(target_env)['name']} 正在运行 (PID: {new_pid})",
+                "new_pid": new_pid,
+                "env_id": target_env,
             })
         else:
-            return jsonify({"success": False, "message": "Gateway 启动失败"})
+            return jsonify({"success": False, "message": message, "env_id": target_env})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
@@ -2960,23 +4208,10 @@ def api_emergency_recover():
         snapshot_dir = SNAPSHOTS.restore_latest_snapshot()
         if snapshot_dir is None:
             return jsonify({"success": False, "message": "没有可恢复的配置快照"})
-
-        old_pid = get_listener_pid()
-        if old_pid is not None:
-            subprocess.run(f"kill {old_pid}", shell=True, check=False)
-            time.sleep(2)
-
-        with open(BASE_DIR / "logs" / "guardian.log", "a") as log_handle:
-            subprocess.Popen(
-                ["openclaw", "gateway", "run"],
-                cwd=str(OPENCLAW_CODE),
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
-            )
-
-        record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
-        return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
+        success, message = restore_snapshot_and_restart(snapshot_dir.name)
+        if success:
+            record_change("recover", f"恢复配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name, "env_id": snapshot_env_id(snapshot_dir.name)})
+        return jsonify({"success": success, "message": message if success else f"恢复失败: {message}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
@@ -3001,11 +4236,12 @@ def api_snapshot_create():
     try:
         data = request.get_json(silent=True) or {}
         label = str(data.get("label", "manual")).strip() or "manual"
-        snapshot_dir = SNAPSHOTS.create_snapshot(label)
-        if snapshot_dir is None:
+        snapshot_dirs = create_config_snapshots(label)
+        if not snapshot_dirs:
             return jsonify({"success": False, "message": "没有可快照的配置文件"})
-        record_change("snapshot", f"手动创建配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
-        return jsonify({"success": True, "message": f"已创建配置快照: {snapshot_dir.name}"})
+        names = [path.name for path in snapshot_dirs]
+        record_change("snapshot", "手动创建配置快照", {"snapshots": names})
+        return jsonify({"success": True, "message": f"已创建配置快照: {', '.join(names)}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
@@ -3019,28 +4255,10 @@ def api_snapshot_restore():
         if not name:
             return jsonify({"success": False, "message": "缺少快照名称"})
 
-        snapshot_dir = SNAPSHOTS.snapshot_root / name
-        if not snapshot_dir.exists() or not snapshot_dir.is_dir():
-            return jsonify({"success": False, "message": "快照不存在"})
-
-        SNAPSHOTS.restore_snapshot(snapshot_dir)
-
-        old_pid = get_listener_pid()
-        if old_pid is not None:
-            subprocess.run(f"kill {old_pid}", shell=True, check=False)
-            time.sleep(2)
-
-        with open(BASE_DIR / "logs" / "guardian.log", "a") as log_handle:
-            subprocess.Popen(
-                ["openclaw", "gateway", "run"],
-                cwd=str(OPENCLAW_CODE),
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
-            )
-
-        record_change("recover", f"恢复指定配置快照并重启: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
-        return jsonify({"success": True, "message": f"已恢复配置快照并发起重启: {snapshot_dir.name}"})
+        success, message = restore_snapshot_and_restart(name)
+        if success:
+            record_change("recover", f"恢复指定配置快照并重启: {name}", {"snapshot": name, "env_id": snapshot_env_id(name)})
+        return jsonify({"success": success, "message": message if success else f"恢复失败: {message}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
