@@ -181,6 +181,24 @@ Dashboard 负责提供本地操作和诊断视图，当前包括：
 - 支持在 Dashboard 中切换当前守护目标
 - 同一时间只允许一个 Gateway 处于激活运行态
 
+### 5. 进度治理机制（本轮新增落地）
+
+这轮实现把“有方案 ≠ 开发已启动、 有开发 ≠ 测试已启动、缺少回执 ≠ 可宣称推进”真正落成了代码约束：
+
+- **统一结构化回执协议**：`PIPELINE_RECEIPT` 必须包含 `agent / phase / action / evidence`，并补齐 `ack_id`
+- **状态机推进规则**：`planning_only / dev_running / awaiting_test / test_running / blocked_* / completed_verified` 由真实 receipt 驱动
+- **超时守护 / 缺失回执判定**：在宽限期后生成 `task_control_actions`，默认记录 follow-up 或直接阻塞
+- **单一事实源**：对外查询统一读取 `data/current-task-facts.json`
+- **用户可见文案绑定**：新增 `user_visible_progress`，由 `control_state + missing_receipts + contract` 决定，而不是口头猜测
+- **A 股闭环优先覆盖**：新增 `a_share_delivery_pipeline` 合同，专门约束 `A股 / 闭环采样 / 采样策略` 这类开发交付任务
+
+当前推荐的外部查询口径：
+
+- 先读 `data/current-task-facts.json`
+- 只根据 `approved_summary / user_visible_progress / control_state / next_action / missing_receipts` 回答
+- 当 `control_state=planning_only` 时，只能说“方案已完成，但开发尚未启动”
+- 当缺少 `dev/test` receipt 时，禁止说“开发/测试正在推进”
+
 ## 架构说明
 
 完整架构图与任务状态流转图见：

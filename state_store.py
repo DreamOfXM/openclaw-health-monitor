@@ -12,16 +12,62 @@ from pathlib import Path
 from typing import Any
 
 
+class RetryingSQLiteConnection(sqlite3.Connection):
+    """SQLite connection with lightweight retry for transient lock contention."""
+
+    retry_attempts = 5
+    retry_sleep_seconds = 0.05
+
+    @staticmethod
+    def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
+        return "locked" in str(exc).lower()
+
+    def _retry_sqlite_call(self, fn, *args, **kwargs):
+        for attempt in range(self.retry_attempts):
+            try:
+                return fn(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked_error(exc) or attempt >= self.retry_attempts - 1:
+                    raise
+                time.sleep(self.retry_sleep_seconds * (attempt + 1))
+        raise AssertionError("unreachable")
+
+    def execute(self, sql, parameters=(), /):  # type: ignore[override]
+        return self._retry_sqlite_call(super().execute, sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters, /):  # type: ignore[override]
+        return self._retry_sqlite_call(super().executemany, sql, seq_of_parameters)
+
+    def executescript(self, sql_script, /):  # type: ignore[override]
+        return self._retry_sqlite_call(super().executescript, sql_script)
+
+    def commit(self):  # type: ignore[override]
+        return self._retry_sqlite_call(super().commit)
+
+
 class MonitorStateStore:
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
         self.db_path = base_dir / "data" / "monitor.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        try:
+            self._init_db()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30, factory=RetryingSQLiteConnection)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("PRAGMA synchronous = NORMAL")
+        except sqlite3.OperationalError:
+            pass
         return conn
 
     @contextmanager
@@ -149,6 +195,25 @@ class MonitorStateStore:
                     summary_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS watcher_tasks (
+                    watcher_task_id TEXT PRIMARY KEY,
+                    env_id TEXT NOT NULL,
+                    source_agent TEXT NOT NULL,
+                    target_agent TEXT NOT NULL,
+                    intent TEXT NOT NULL,
+                    current_state TEXT NOT NULL,
+                    completed_at INTEGER NOT NULL DEFAULT 0,
+                    delivered_at INTEGER NOT NULL DEFAULT 0,
+                    last_checked_at INTEGER NOT NULL DEFAULT 0,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    in_dlq INTEGER NOT NULL DEFAULT 0,
+                    payload_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_watcher_tasks_env_state_updated
+                ON watcher_tasks(env_id, current_state, updated_at DESC);
                 """
             )
             columns = {
@@ -157,7 +222,13 @@ class MonitorStateStore:
             }
             if "event_key" not in columns:
                 conn.execute("ALTER TABLE task_events ADD COLUMN event_key TEXT NOT NULL DEFAULT ''")
-            conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
+            index_rows = conn.execute("PRAGMA index_list(task_events)").fetchall()
+            dedupe_index = next(
+                (row for row in index_rows if row["name"] == "idx_task_events_dedupe"),
+                None,
+            )
+            needs_rebuild = bool(dedupe_index is None or not dedupe_index["unique"])
+
             rows = conn.execute(
                 "SELECT id, task_id, event_type, payload_json FROM task_events WHERE event_key = '' OR event_key IS NULL"
             ).fetchall()
@@ -170,34 +241,38 @@ class MonitorStateStore:
                 marker = (str(row["task_id"] or ""), str(row["event_type"] or ""), event_key)
                 if marker in dedupe_map:
                     duplicate_ids.append(int(row["id"]))
+                    needs_rebuild = True
                     continue
                 dedupe_map[marker] = int(row["id"])
                 conn.execute(
                     "UPDATE task_events SET event_key = ? WHERE id = ?",
                     (event_key, row["id"]),
                 )
-            if duplicate_ids:
-                placeholders = ",".join("?" for _ in duplicate_ids)
+
+            if needs_rebuild:
+                conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
+                if duplicate_ids:
+                    placeholders = ",".join("?" for _ in duplicate_ids)
+                    conn.execute(
+                        f"DELETE FROM task_events WHERE id IN ({placeholders})",
+                        duplicate_ids,
+                    )
                 conn.execute(
-                    f"DELETE FROM task_events WHERE id IN ({placeholders})",
-                    duplicate_ids,
+                    """
+                    DELETE FROM task_events
+                    WHERE id NOT IN (
+                        SELECT MIN(id)
+                        FROM task_events
+                        GROUP BY task_id, event_type, event_key
+                    )
+                    """
                 )
-            conn.execute(
-                """
-                DELETE FROM task_events
-                WHERE id NOT IN (
-                    SELECT MIN(id)
-                    FROM task_events
-                    GROUP BY task_id, event_type, event_key
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_dedupe
+                    ON task_events(task_id, event_type, event_key)
+                    """
                 )
-                """
-            )
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_dedupe
-                ON task_events(task_id, event_type, event_key)
-                """
-            )
 
     def _load_kv(self, namespace: str, key: str) -> Any | None:
         with self._connection() as conn:
@@ -466,6 +541,39 @@ class MonitorStateStore:
             for row in rows
         ]
 
+    def has_task_event(self, task_id: str, event_type: str) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM task_events
+                WHERE task_id = ? AND event_type = ?
+                LIMIT 1
+                """,
+                (task_id, event_type),
+            ).fetchone()
+        return bool(row)
+
+    def count_task_events(self, event_type: str, *, env_id: str | None = None) -> int:
+        query = """
+            SELECT COUNT(*)
+            FROM task_events te
+        """
+        params: list[Any] = []
+        if env_id:
+            query += """
+                INNER JOIN managed_tasks mt
+                    ON mt.task_id = te.task_id
+                WHERE te.event_type = ? AND mt.env_id = ?
+            """
+            params.extend([event_type, env_id])
+        else:
+            query += " WHERE te.event_type = ?"
+            params.append(event_type)
+        with self._connection() as conn:
+            row = conn.execute(query, params).fetchone()
+        return int((row[0] if row else 0) or 0)
+
     def upsert_task_contract(self, task_id: str, contract: dict[str, Any]) -> None:
         payload = json.dumps(contract or {}, ensure_ascii=False)
         now = int(time.time())
@@ -544,6 +652,8 @@ class MonitorStateStore:
                 "last_followup_at": int(row["last_followup_at"] or 0),
                 "last_error": row["last_error"] or "",
                 "details": json.loads(row["details_json"] or "{}"),
+                "reason": (json.loads(row["details_json"] or "{}").get("reason") if (row["details_json"] or "") else ""),
+                "ack_id": (json.loads(row["details_json"] or "{}").get("ack_id") if (row["details_json"] or "") else ""),
                 "created_at": int(row["created_at"] or 0),
                 "updated_at": int(row["updated_at"] or 0),
                 "resolved_at": int(row["resolved_at"] or 0),
@@ -565,7 +675,8 @@ class MonitorStateStore:
         flags: dict[str, bool],
         seen_receipts: set[str],
     ) -> list[dict[str, Any]]:
-        if contract_id == "delivery_pipeline":
+        delivery_contract_ids = {"delivery_pipeline", "a_share_delivery_pipeline"}
+        if contract_id in delivery_contract_ids:
             steps = [
                 ("pm", "产品", "planning"),
                 ("dev", "开发", "implementation"),
@@ -609,6 +720,33 @@ class MonitorStateStore:
         return phase_statuses
 
     @staticmethod
+    def _render_user_visible_progress(
+        contract: dict[str, Any],
+        control_state: str,
+        *,
+        approved_summary: str,
+        next_action: str,
+        missing_receipts: list[str],
+    ) -> str:
+        custom = (contract.get("user_progress_rules") or {}).get(control_state)
+        if custom:
+            return str(custom)
+        if control_state == "received_only":
+            return "这轮任务已接收并执行过，但目前没有结构化流水线证据证明产品/研发链路继续推进。"
+        if control_state == "planning_only":
+            return "方案已完成，但开发尚未启动。" if next_action == "require_dev_receipt" else "产品阶段已启动，等待方案回执。"
+        if control_state == "dev_running":
+            return "开发阶段已启动，存在结构化执行证据。"
+        if control_state == "awaiting_test":
+            return "开发回执已完成，但测试尚未启动。"
+        if control_state == "test_running":
+            return "测试阶段已启动，等待最终测试回执。"
+        if control_state in {"blocked_unverified", "blocked_control_followup_failed"}:
+            missing = "、".join(missing_receipts) if missing_receipts else "结构化回执"
+            return f"任务缺少{missing}，守护系统已判定为阻塞。"
+        return approved_summary
+
+    @staticmethod
     def _summarize_claim_level(
         control_state: str,
         evidence_level: str,
@@ -626,6 +764,82 @@ class MonitorStateStore:
             return "progress_only"
         return "received_only"
 
+    @staticmethod
+    def _infer_pipeline_recovery(
+        contract_id: str,
+        flags: dict[str, bool],
+        missing_receipts: list[str],
+        *,
+        latest_receipt: dict[str, Any],
+        current_stage: str,
+        task_status: str,
+    ) -> dict[str, Any]:
+        delivery_contract_ids = {"delivery_pipeline", "a_share_delivery_pipeline"}
+        if contract_id not in delivery_contract_ids:
+            return {}
+        current_lower = (current_stage or "").lower()
+        last_agent = str(latest_receipt.get("agent") or "")
+        if not last_agent:
+            if "planning" in current_lower:
+                last_agent = "pm"
+            elif "implementation" in current_lower or "dev" in current_lower:
+                last_agent = "dev"
+            elif "test" in current_lower:
+                last_agent = "test"
+        recovery_kind = ""
+        recovery_hint = ""
+        stale_subagent = ""
+        rebind_target = ""
+        downstream_started = flags["dev_started"] or flags["dev_completed"] or flags["test_started"] or flags["test_completed"]
+        test_phase_started = flags["test_started"] or flags["test_completed"]
+        if "pm:started" in missing_receipts and not downstream_started:
+            recovery_kind = "not_started"
+            recovery_hint = "主任务已接收，但产品阶段尚未启动，应先确认 pm 是否收到调度。"
+            rebind_target = "pm"
+        elif flags["pm_started"] and "pm:completed" in missing_receipts and not downstream_started:
+            recovery_kind = "started_no_receipt"
+            recovery_hint = "pm 已启动但没有结构化回执，建议做 session recovery 并确认规划结果是否已丢失。"
+            stale_subagent = "pm"
+            rebind_target = "pm"
+        elif (flags["dev_started"] or "implementation" in current_lower) and "dev:completed" in missing_receipts:
+            recovery_kind = "pipeline_detached"
+            recovery_hint = "开发阶段看起来已启动，但主链路没有拿到 dev 结构化回执，应优先做 stale subagent detection 和 active task rebind。"
+            stale_subagent = last_agent or "dev"
+            rebind_target = "dev"
+        elif flags["pm_completed"] and "dev:started" in missing_receipts and not downstream_started:
+            recovery_kind = "handoff_lost"
+            recovery_hint = "pm 已完成，但 dev 未回执，需检查 dev 是否接到派发或主链路是否丢失 handoff。"
+            stale_subagent = last_agent or "dev"
+            rebind_target = "dev"
+        elif flags["dev_completed"] and "test:started" in missing_receipts and not test_phase_started:
+            recovery_kind = "handoff_lost"
+            recovery_hint = "dev 已完成，但 test 未启动，需恢复 dev -> test 的流水线接力。"
+            stale_subagent = last_agent or "test"
+            rebind_target = "test"
+        elif (flags["test_started"] or "test" in current_lower) and "test:completed" in missing_receipts:
+            recovery_kind = "started_no_receipt"
+            recovery_hint = "测试阶段已启动但最终回执缺失，应检查 test 子代理是否失联。"
+            stale_subagent = last_agent or "test"
+            rebind_target = "test"
+        elif task_status == "no_reply":
+            recovery_kind = "completed_not_returned"
+            recovery_hint = "任务可能已完成但结果未回传，应确认 final 输出是否丢失并执行 active task rebind。"
+            stale_subagent = last_agent or "main"
+            rebind_target = last_agent or "main"
+        if not recovery_kind:
+            return {}
+        return {
+            "kind": recovery_kind,
+            "last_dispatched_agent": last_agent or "unknown",
+            "missing_receipts": missing_receipts,
+            "stale_subagent": stale_subagent or "unknown",
+            "rebind_target": rebind_target or "guardian",
+            "manual_recovery_hint": recovery_hint,
+            "session_recovery": True,
+            "stale_subagent_detection": bool(stale_subagent),
+            "active_task_rebind": bool(rebind_target),
+        }
+
     def reconcile_task_control_action(
         self,
         task: dict[str, Any],
@@ -640,10 +854,14 @@ class MonitorStateStore:
         control_state = str(control.get("control_state") or "unknown")
         details_payload = {
             "contract_id": ((control.get("contract") or {}).get("id") or "single_agent"),
+            "protocol_version": ((control.get("contract") or {}).get("protocol_version") or "hm.v1"),
             "next_action": next_action,
             "next_actor": control.get("next_actor") or "",
             "claim_level": control.get("claim_level") or "received_only",
             "phase_statuses": control.get("phase_statuses") or [],
+            "reason": control.get("action_reason") or control.get("approved_summary") or "",
+            "ack_id": ((control.get("protocol") or {}).get("ack_id") or ""),
+            "pipeline_recovery": control.get("pipeline_recovery") or {},
         }
         existing = self.list_task_control_actions(
             task_id=task_id,
@@ -651,8 +869,7 @@ class MonitorStateStore:
             limit=20,
         )
 
-        if next_action in {"none", "manual_or_session_recovery"}:
-            final_status = "resolved" if next_action == "none" else "blocked"
+        if next_action == "none":
             with self._connection() as conn:
                 conn.execute(
                     """
@@ -660,7 +877,7 @@ class MonitorStateStore:
                     SET status = ?, summary = ?, control_state = ?, updated_at = ?, resolved_at = ?
                     WHERE task_id = ? AND status IN ('pending', 'sent', 'blocked')
                     """,
-                    (final_status, summary, control_state, now, now, task_id),
+                    ("resolved", summary, control_state, now, now, task_id),
                 )
             return None
 
@@ -728,6 +945,7 @@ class MonitorStateStore:
         last_error: str | None = None,
         summary: str | None = None,
         control_state: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         fields: list[str] = ["updated_at = :updated_at"]
         params: dict[str, Any] = {"action_id": action_id, "updated_at": int(time.time())}
@@ -752,6 +970,9 @@ class MonitorStateStore:
         if control_state is not None:
             fields.append("control_state = :control_state")
             params["control_state"] = control_state
+        if details is not None:
+            fields.append("details_json = :details_json")
+            params["details_json"] = json.dumps(details, ensure_ascii=False)
         with self._connection() as conn:
             conn.execute(
                 f"UPDATE task_control_actions SET {', '.join(fields)} WHERE id = :action_id",
@@ -823,6 +1044,8 @@ class MonitorStateStore:
             "id": "single_agent",
             "required_receipts": [],
         }
+        contract_view = dict(contract)
+        contract_view.setdefault("mode", "observation_template")
         flags = {
             "dispatch_started": False,
             "dispatch_completed": False,
@@ -849,6 +1072,8 @@ class MonitorStateStore:
         }
         latest_receipt: dict[str, Any] = task.get("latest_receipt") or {}
         seen_receipts: set[str] = set()
+        latest_recovery_success: dict[str, Any] = {}
+        latest_protocol_violation: dict[str, Any] = {}
 
         def apply_receipt(receipt: dict[str, Any]) -> None:
             if not receipt:
@@ -866,6 +1091,10 @@ class MonitorStateStore:
             if agent == "pm" and action == "started":
                 flags["pm_started"] = True
             if agent == "dev":
+                flags["pm_started"] = True
+                flags["pm_completed"] = True
+                seen_receipts.add("pm:started")
+                seen_receipts.add("pm:completed")
                 if action == "started":
                     flags["dev_started"] = True
                 elif action == "completed":
@@ -875,6 +1104,14 @@ class MonitorStateStore:
                     flags["dev_started"] = True
                     flags["dev_blocked"] = True
             if agent == "test":
+                flags["pm_started"] = True
+                flags["pm_completed"] = True
+                flags["dev_started"] = True
+                flags["dev_completed"] = True
+                seen_receipts.add("pm:started")
+                seen_receipts.add("pm:completed")
+                seen_receipts.add("dev:started")
+                seen_receipts.add("dev:completed")
                 if action == "started":
                     flags["test_started"] = True
                 elif action == "completed":
@@ -927,6 +1164,10 @@ class MonitorStateStore:
             elif event_type == "pipeline_receipt":
                 latest_receipt = payload.get("receipt") or latest_receipt
                 apply_receipt(payload.get("receipt") or {})
+            elif event_type == "recovery_succeeded" and not latest_recovery_success:
+                latest_recovery_success = payload
+            elif event_type == "protocol_violation" and not latest_protocol_violation:
+                latest_protocol_violation = payload
 
         evidence_level = "weak"
         if flags["pipeline_receipt"]:
@@ -985,7 +1226,7 @@ class MonitorStateStore:
                 approved_summary = "精算结果已返回，但复核尚未完成。"
                 next_action = "require_verifier_receipt"
                 next_actor = "verifier"
-        elif contract.get("id") == "delivery_pipeline":
+        elif contract.get("id") in {"delivery_pipeline", "a_share_delivery_pipeline"}:
             if not missing_receipts and flags["dispatch_completed"]:
                 control_state = "completed_verified"
                 approved_summary = "产品、开发、测试链路都已收到结构化回执。"
@@ -1078,22 +1319,102 @@ class MonitorStateStore:
             next_actor = "guardian"
 
         contract_id = str(contract.get("id") or "single_agent")
+        pipeline_recovery = self._infer_pipeline_recovery(
+            contract_id,
+            flags,
+            missing_receipts,
+            latest_receipt=latest_receipt,
+            current_stage=str(task.get("current_stage") or ""),
+            task_status=str(task.get("status") or ""),
+        )
+        if pipeline_recovery and (
+            str(task.get("status") or "") in {"blocked", "no_reply", "background"}
+            or control_state in {"blocked_unverified", "blocked_control_followup_failed"}
+        ):
+            if control_state in {"blocked_unverified", "blocked_control_followup_failed"}:
+                approved_summary = "流水线已失联，守护系统已将任务切换到恢复流程。"
+            else:
+                approved_summary = "流水线已派发但主链路未收到关键回执，任务进入失联恢复视图。"
+            next_action = "manual_or_session_recovery"
+            next_actor = str(pipeline_recovery.get("rebind_target") or "guardian")
+        if latest_recovery_success and missing_receipts:
+            approved_summary = "守护系统已自动发起恢复，当前等待恢复后的新结构化回执。"
+            next_action = "await_receipt_after_recovery"
+            next_actor = str(
+                latest_recovery_success.get("rebind_target")
+                or pipeline_recovery.get("rebind_target")
+                or "guardian"
+            )
         phase_statuses = self._build_contract_phase_statuses(contract_id, flags, seen_receipts)
         claim_level = self._summarize_claim_level(control_state, evidence_level, missing_receipts)
-
-        return {
-            "evidence_level": evidence_level,
+        protocol_status = {
+            "request": "seen" if (flags["dispatch_started"] or flags["dispatch_completed"] or bool(task.get("question"))) else "missing",
+            "confirmed": "seen" if (flags["pipeline_progress"] or flags["pipeline_receipt"] or bool(latest_receipt)) else "missing",
+            "final": "seen" if control_state == "completed_verified" or flags["visible_completion"] else "missing",
+            "blocked": "seen" if control_state.startswith("blocked") or control_state.endswith("_blocked") else "missing",
+            "ack_id": str((latest_receipt or {}).get("ack_id") or task.get("task_id") or ""),
+        }
+        native_state = {
+            "source": "runtime_events",
+            "dispatch_started": flags["dispatch_started"],
+            "dispatch_completed": flags["dispatch_completed"],
+            "pipeline_progress_seen": flags["pipeline_progress"],
+            "pipeline_receipt_seen": flags["pipeline_receipt"],
+            "latest_receipt": latest_receipt,
+            "status": str(task.get("status") or ""),
+            "stage": str(task.get("current_stage") or ""),
+        }
+        heuristic_state = {
+            "visible_completion_seen": flags["visible_completion"],
+            "question_candidate": self.get_task_question_candidate(task_id) or "",
+            "latest_protocol_violation": latest_protocol_violation,
+        }
+        derived_state = {
             "control_state": control_state,
             "approved_summary": approved_summary,
             "next_action": next_action,
             "next_actor": next_actor,
             "claim_level": claim_level,
-            "contract": contract,
+            "missing_receipts": missing_receipts,
+            "contract_id": str(contract_view.get("id") or "single_agent"),
+        }
+        evidence_summary = (
+            f"evidence={evidence_level}; claim={claim_level}; missing_receipts={','.join(missing_receipts) if missing_receipts else 'none'}; "
+            f"next_actor={next_actor or '-'}; action={next_action}"
+        )
+        action_reason = approved_summary
+        user_visible_progress = self._render_user_visible_progress(
+            contract_view,
+            control_state,
+            approved_summary=approved_summary,
+            next_action=next_action,
+            missing_receipts=missing_receipts,
+        )
+
+        return {
+            "truth_level": "derived",
+            "evidence_level": evidence_level,
+            "evidence_summary": evidence_summary,
+            "control_state": control_state,
+            "approved_summary": approved_summary,
+            "next_action": next_action,
+            "next_actor": next_actor,
+            "action_reason": action_reason,
+            "claim_level": claim_level,
+            "user_visible_progress": user_visible_progress,
+            "protocol": protocol_status,
+            "contract": contract_view,
             "missing_receipts": missing_receipts,
             "control_action": self.get_open_control_action(task_id),
             "phase_statuses": phase_statuses,
             "flags": flags,
             "latest_receipt": latest_receipt,
+            "pipeline_recovery": pipeline_recovery,
+            "latest_recovery": latest_recovery_success,
+            "latest_protocol_violation": latest_protocol_violation,
+            "native_state": native_state,
+            "derived_state": derived_state,
+            "heuristic_state": heuristic_state,
         }
 
     def get_current_task(self, *, env_id: str | None = None) -> dict[str, Any] | None:
@@ -1147,6 +1468,26 @@ class MonitorStateStore:
         counts["total"] = sum(counts.values())
         return counts
 
+    def reset_task_registry(self, *, env_id: str | None = None) -> None:
+        with self._connection() as conn:
+            if env_id:
+                task_rows = conn.execute(
+                    "SELECT task_id FROM managed_tasks WHERE env_id = ?",
+                    (env_id,),
+                ).fetchall()
+                task_ids = [str(row["task_id"]) for row in task_rows]
+                conn.execute("DELETE FROM managed_tasks WHERE env_id = ?", (env_id,))
+                conn.execute("DELETE FROM task_control_actions WHERE env_id = ?", (env_id,))
+                if task_ids:
+                    placeholders = ",".join("?" for _ in task_ids)
+                    conn.execute(f"DELETE FROM task_events WHERE task_id IN ({placeholders})", task_ids)
+                    conn.execute(f"DELETE FROM task_contracts WHERE task_id IN ({placeholders})", task_ids)
+            else:
+                conn.execute("DELETE FROM managed_tasks")
+                conn.execute("DELETE FROM task_events")
+                conn.execute("DELETE FROM task_contracts")
+                conn.execute("DELETE FROM task_control_actions")
+
     def summarize_control_plane(self, *, env_id: str | None = None, recent_limit: int = 50) -> dict[str, Any]:
         actions = self.list_task_control_actions(env_id=env_id, limit=recent_limit)
         status_counts = {"pending": 0, "sent": 0, "blocked": 0, "resolved": 0}
@@ -1171,6 +1512,7 @@ class MonitorStateStore:
         recoverable = 0
         blocked = 0
         verified = 0
+        protocol_violations = self.count_task_events("protocol_violation", env_id=env_id)
         for task in tasks:
             control = self.derive_task_control_state(task["task_id"])
             claim = str(control.get("claim_level") or "received_only")
@@ -1197,6 +1539,7 @@ class MonitorStateStore:
                 "verified": verified,
                 "recoverable": recoverable,
                 "blocked": blocked,
+                "protocol_violations": protocol_violations,
                 "claim_counts": claim_counts,
                 "next_actor_counts": next_actor_counts,
             },
@@ -1241,7 +1584,7 @@ class MonitorStateStore:
             ),
             tasks[0],
         )
-        active_updated = int(active.get("updated_at") or 0)
+        active_started = max(int(active.get("created_at") or 0), int(active.get("started_at") or 0))
         late_completed = [
             {
                 "task_id": task["task_id"],
@@ -1250,7 +1593,7 @@ class MonitorStateStore:
             }
             for task in tasks
             if task.get("status") == "completed"
-            and int(task.get("completed_at") or 0) >= active_updated
+            and int(task.get("completed_at") or 0) >= active_started
             and task["task_id"] != active["task_id"]
         ]
         background_tasks = sum(1 for task in tasks if task.get("status") == "background")
@@ -1286,13 +1629,13 @@ class MonitorStateStore:
                 (now, now, session_key, keep_task_id),
             )
 
-    def record_task_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> None:
+    def record_task_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> bool:
         payload_json = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
         event_key = hashlib.sha1(f"{event_type}|{payload_json}".encode("utf-8", errors="ignore")).hexdigest()
         now = int(time.time())
         with self._connection() as conn:
             try:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT OR IGNORE INTO task_events(task_id, event_type, event_key, payload_json, created_at)
                     VALUES (?, ?, ?, ?, ?)
@@ -1306,7 +1649,8 @@ class MonitorStateStore:
                     ),
                 )
             except sqlite3.IntegrityError:
-                return
+                return False
+        return bool(getattr(cursor, "rowcount", 0))
 
     def upsert_learning(
         self,
@@ -1451,6 +1795,93 @@ class MonitorStateStore:
             for row in rows
         ]
 
+    def upsert_watcher_task(self, task: dict[str, Any]) -> None:
+        now = int(time.time())
+        payload = {
+            "watcher_task_id": str(task["watcher_task_id"]),
+            "env_id": str(task.get("env_id") or "primary"),
+            "source_agent": str(task.get("source_agent") or ""),
+            "target_agent": str(task.get("target_agent") or ""),
+            "intent": str(task.get("intent") or ""),
+            "current_state": str(task.get("current_state") or "registered"),
+            "completed_at": int(task.get("completed_at") or 0),
+            "delivered_at": int(task.get("delivered_at") or 0),
+            "last_checked_at": int(task.get("last_checked_at") or 0),
+            "error_count": int(task.get("error_count") or 0),
+            "in_dlq": int(bool(task.get("in_dlq"))),
+            "payload_json": json.dumps(task.get("payload") or {}, ensure_ascii=False),
+            "updated_at": int(task.get("updated_at") or now),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO watcher_tasks(
+                    watcher_task_id, env_id, source_agent, target_agent, intent, current_state,
+                    completed_at, delivered_at, last_checked_at, error_count, in_dlq, payload_json, updated_at
+                )
+                VALUES(
+                    :watcher_task_id, :env_id, :source_agent, :target_agent, :intent, :current_state,
+                    :completed_at, :delivered_at, :last_checked_at, :error_count, :in_dlq, :payload_json, :updated_at
+                )
+                ON CONFLICT(watcher_task_id) DO UPDATE SET
+                    env_id = excluded.env_id,
+                    source_agent = excluded.source_agent,
+                    target_agent = excluded.target_agent,
+                    intent = excluded.intent,
+                    current_state = excluded.current_state,
+                    completed_at = excluded.completed_at,
+                    delivered_at = excluded.delivered_at,
+                    last_checked_at = excluded.last_checked_at,
+                    error_count = excluded.error_count,
+                    in_dlq = excluded.in_dlq,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                payload,
+            )
+
+    def list_watcher_tasks(self, *, env_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM watcher_tasks"
+        params: list[Any] = []
+        if env_id:
+            query += " WHERE env_id = ?"
+            params.append(env_id)
+        query += " ORDER BY updated_at DESC, watcher_task_id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [task for row in rows if (task := self._row_to_watcher_task(row))]
+
+    def summarize_watcher_tasks(self, *, env_id: str | None = None) -> dict[str, Any]:
+        tasks = self.list_watcher_tasks(env_id=env_id, limit=500)
+        summary = {
+            "total": len(tasks),
+            "completed": 0,
+            "delivered": 0,
+            "undelivered": 0,
+            "failed": 0,
+            "dlq": 0,
+            "active": 0,
+        }
+        for item in tasks:
+            state = str(item.get("current_state") or "")
+            completed = int(item.get("completed_at") or 0) > 0
+            delivered = int(item.get("delivered_at") or 0) > 0
+            in_dlq = bool(item.get("in_dlq"))
+            if completed:
+                summary["completed"] += 1
+            if delivered:
+                summary["delivered"] += 1
+            if completed and not delivered:
+                summary["undelivered"] += 1
+            if state in {"failed", "error"}:
+                summary["failed"] += 1
+            if in_dlq:
+                summary["dlq"] += 1
+            if state not in {"delivered", "failed", "error"} and not in_dlq:
+                summary["active"] += 1
+        return summary
+
     def _row_to_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if not row:
             return None
@@ -1464,3 +1895,11 @@ class MonitorStateStore:
         learning = dict(row)
         learning["evidence"] = json.loads(learning.pop("evidence_json") or "{}")
         return learning
+
+    def _row_to_watcher_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        task = dict(row)
+        task["payload"] = json.loads(task.pop("payload_json") or "{}")
+        task["in_dlq"] = bool(task.get("in_dlq"))
+        return task

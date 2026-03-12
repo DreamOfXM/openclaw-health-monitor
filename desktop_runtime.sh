@@ -240,6 +240,19 @@ gateway_pid() {
     listener_pid "$(gateway_port)"
 }
 
+active_gateway_pid() {
+    local active_env pid port
+    active_env="$(active_openclaw_env)"
+    if [ "$active_env" = "official" ]; then
+        port="$(config_value OPENCLAW_OFFICIAL_PORT)"
+        port="${port:-19001}"
+        pid="$(listener_pid "$port" || true)"
+        printf '%s\n' "${pid:-}"
+        return 0
+    fi
+    gateway_pid
+}
+
 ensure_launch_agents_dir() {
     mkdir -p "$HOME/Library/LaunchAgents"
 }
@@ -387,6 +400,11 @@ start_gateway() {
     launchd_kickstart "ai.openclaw.gateway" >> "$LOG_DIR/gateway.log" 2>&1 || true
     sleep 3
     pid="$(gateway_pid || true)"
+    if [ -z "$pid" ]; then
+        run_gateway_service_cmd start >> "$LOG_DIR/gateway.log" 2>&1 || true
+        sleep 3
+        pid="$(gateway_pid || true)"
+    fi
     if [ -z "$pid" ]; then
         echo "Gateway failed to start" >&2
         return 1
@@ -554,7 +572,7 @@ stop_all() {
 
 status_json() {
     local guardian dashboard gateway
-    gateway="$(gateway_pid || true)"
+    gateway="$(active_gateway_pid || true)"
     guardian="$(guardian_pid || true)"
     dashboard="$(dashboard_pid || true)"
     printf '{"gateway":"%s","guardian":"%s","dashboard":"%s"}\n' "${gateway:-}" "${guardian:-}" "${dashboard:-}"
@@ -566,7 +584,7 @@ case "${1:-}" in
         ;;
     start)
         case "${2:-}" in
-            gateway) start_gateway ;;
+            gateway) start_active_gateway ;;
             guardian) start_guardian ;;
             dashboard) start_dashboard ;;
             all) start_all ;;
