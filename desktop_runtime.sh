@@ -175,7 +175,7 @@ guardian_pid() {
 }
 
 dashboard_pid() {
-    launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard_v2/app.py|$BASE_DIR/dashboard.py"
+    launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard_v2/app.py|$BASE_DIR/dashboard_backend.py"
 }
 
 dashboard_reachable() {
@@ -508,7 +508,7 @@ stop_dashboard() {
         stop_pid "$listener" || true
     fi
     pkill -f "$BASE_DIR/dashboard_v2/app.py" 2>/dev/null || true
-    pkill -f "$BASE_DIR/dashboard.py" 2>/dev/null || true
+    pkill -f "$BASE_DIR/dashboard_backend.py" 2>/dev/null || true
     rm -f "$DASHBOARD_PID_FILE"
 }
 

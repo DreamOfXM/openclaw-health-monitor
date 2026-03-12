@@ -5,7 +5,7 @@ import tempfile
 import json
 import time
 
-import dashboard
+import dashboard_backend as dashboard
 from state_store import MonitorStateStore
 
 
@@ -37,9 +37,9 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(summary["items"][1]["name"], "Kernel / Wired")
         self.assertEqual(summary["items"][2]["name"], "Compressed")
 
-    @mock.patch("dashboard.get_process_info")
-    @mock.patch("dashboard.get_process_info_by_pid")
-    @mock.patch("dashboard.load_pid_file")
+    @mock.patch("dashboard_backend.get_process_info")
+    @mock.patch("dashboard_backend.get_process_info_by_pid")
+    @mock.patch("dashboard_backend.load_pid_file")
     def test_get_guardian_process_info_prefers_pid_file(self, load_pid_file, by_pid, by_name):
         load_pid_file.return_value = 4321
         by_pid.return_value = {"pid": 4321, "cpu": 0.1, "mem": 0.2, "cmd": "/usr/bin/python guardian.py"}
@@ -49,9 +49,9 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(info["pid"], 4321)
         by_name.assert_not_called()
 
-    @mock.patch("dashboard.get_process_info")
-    @mock.patch("dashboard.get_process_info_by_pid")
-    @mock.patch("dashboard.load_pid_file")
+    @mock.patch("dashboard_backend.get_process_info")
+    @mock.patch("dashboard_backend.get_process_info_by_pid")
+    @mock.patch("dashboard_backend.load_pid_file")
     def test_get_guardian_process_info_falls_back_to_name_match(self, load_pid_file, by_pid, by_name):
         load_pid_file.return_value = None
         by_pid.return_value = None
@@ -82,10 +82,10 @@ class DashboardMemoryTests(unittest.TestCase):
                 "http://127.0.0.1:19021/#token=abc123&gatewayUrl=ws%3A%2F%2F127.0.0.1%3A19021",
             )
 
-    @mock.patch("dashboard.check_gateway_health_for_env")
-    @mock.patch("dashboard.env_has_control_ui_assets")
-    @mock.patch("dashboard.read_git_head")
-    @mock.patch("dashboard.get_listener_pid")
+    @mock.patch("dashboard_backend.check_gateway_health_for_env")
+    @mock.patch("dashboard_backend.env_has_control_ui_assets")
+    @mock.patch("dashboard_backend.read_git_head")
+    @mock.patch("dashboard_backend.get_listener_pid")
     def test_list_openclaw_environments_marks_active_environment(self, listener_pid, read_git_head, control_ui_ready, health):
         listener_pid.side_effect = [1111, None]
         read_git_head.side_effect = ["abc123", "def456"]
@@ -226,11 +226,11 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertTrue(readiness["ready"])
         self.assertEqual(readiness["status"], "ready")
 
-    @mock.patch("dashboard.check_gateway_health_for_env")
-    @mock.patch("dashboard.env_has_control_ui_assets")
-    @mock.patch("dashboard.read_git_target_head")
-    @mock.patch("dashboard.read_git_head")
-    @mock.patch("dashboard.get_listener_pid")
+    @mock.patch("dashboard_backend.check_gateway_health_for_env")
+    @mock.patch("dashboard_backend.env_has_control_ui_assets")
+    @mock.patch("dashboard_backend.read_git_target_head")
+    @mock.patch("dashboard_backend.read_git_head")
+    @mock.patch("dashboard_backend.get_listener_pid")
     def test_list_openclaw_environments_only_active_running_env_gets_dashboard_link(
         self,
         listener_pid,
@@ -266,11 +266,11 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertTrue(official["running"])
         self.assertEqual(official["dashboard_open_link"], "")
 
-    @mock.patch("dashboard.check_gateway_health_for_env")
-    @mock.patch("dashboard.env_has_control_ui_assets")
-    @mock.patch("dashboard.read_git_target_head")
-    @mock.patch("dashboard.read_git_head")
-    @mock.patch("dashboard.get_listener_pid")
+    @mock.patch("dashboard_backend.check_gateway_health_for_env")
+    @mock.patch("dashboard_backend.env_has_control_ui_assets")
+    @mock.patch("dashboard_backend.read_git_target_head")
+    @mock.patch("dashboard_backend.read_git_head")
+    @mock.patch("dashboard_backend.get_listener_pid")
     def test_list_openclaw_environments_hides_dashboard_link_when_control_ui_missing(
         self,
         listener_pid,
@@ -954,7 +954,7 @@ class DashboardMemoryTests(unittest.TestCase):
             with mock.patch.object(dashboard, "BASE_DIR", base), \
                 mock.patch.object(dashboard, "load_config", return_value=cfg), \
                 mock.patch.object(dashboard, "restart_active_openclaw_environment") as restart_env, \
-                mock.patch("dashboard.SnapshotManager.restore_snapshot") as restore_snapshot:
+                mock.patch("dashboard_backend.SnapshotManager.restore_snapshot") as restore_snapshot:
                 ok, message = dashboard.restore_snapshot_and_restart("20260311-test-official")
         self.assertTrue(ok)
         self.assertIn("未切换当前活动环境", message)
@@ -1012,12 +1012,12 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["tasks"]["recoverable"], 1)
             self.assertEqual(payload["tasks"]["next_actor_counts"]["dev"], 1)
 
-    @mock.patch("dashboard.wait_for_env_listener")
-    @mock.patch("dashboard.run_script")
-    @mock.patch("dashboard.save_config")
-    @mock.patch("dashboard.get_listener_pid", return_value=None)
-    @mock.patch("dashboard.enforce_single_active_listener")
-    @mock.patch("dashboard.restore_environment_after_failed_switch")
+    @mock.patch("dashboard_backend.wait_for_env_listener")
+    @mock.patch("dashboard_backend.run_script")
+    @mock.patch("dashboard_backend.save_config")
+    @mock.patch("dashboard_backend.get_listener_pid", return_value=None)
+    @mock.patch("dashboard_backend.enforce_single_active_listener")
+    @mock.patch("dashboard_backend.restore_environment_after_failed_switch")
     def test_switch_openclaw_environment_rolls_back_when_primary_does_not_start(
         self,
         restore_previous,
@@ -1056,10 +1056,10 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(store.save_runtime_value.call_args_list[0].args[1]["env_id"], "primary")
         self.assertIn("official", [call.args[1]["env_id"] for call in store.save_runtime_value.call_args_list])
 
-    @mock.patch("dashboard.wait_for_env_listener")
-    @mock.patch("dashboard.run_script")
-    @mock.patch("dashboard.save_config")
-    @mock.patch("dashboard.enforce_single_active_listener")
+    @mock.patch("dashboard_backend.wait_for_env_listener")
+    @mock.patch("dashboard_backend.run_script")
+    @mock.patch("dashboard_backend.save_config")
+    @mock.patch("dashboard_backend.enforce_single_active_listener")
     def test_switch_openclaw_environment_succeeds_when_primary_listener_is_ready(
         self,
         single_active,
@@ -1116,10 +1116,10 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(save_config.call_count, 1)
         self.assertEqual(store.save_runtime_value.call_args.args[1]["env_id"], "primary")
 
-    @mock.patch("dashboard.wait_for_env_listener")
-    @mock.patch("dashboard.run_script")
-    @mock.patch("dashboard.get_listener_pid")
-    @mock.patch("dashboard.enforce_single_active_listener")
+    @mock.patch("dashboard_backend.wait_for_env_listener")
+    @mock.patch("dashboard_backend.run_script")
+    @mock.patch("dashboard_backend.get_listener_pid")
+    @mock.patch("dashboard_backend.enforce_single_active_listener")
     def test_restart_active_openclaw_environment_restarts_official_only(
         self,
         single_active,
@@ -1161,10 +1161,10 @@ class DashboardMemoryTests(unittest.TestCase):
         )
         wait_for_env_listener.assert_called_once_with("official")
 
-    @mock.patch("dashboard.wait_for_env_listener")
-    @mock.patch("dashboard.run_script")
-    @mock.patch("dashboard.get_listener_pid")
-    @mock.patch("dashboard.enforce_single_active_listener")
+    @mock.patch("dashboard_backend.wait_for_env_listener")
+    @mock.patch("dashboard_backend.run_script")
+    @mock.patch("dashboard_backend.get_listener_pid")
+    @mock.patch("dashboard_backend.enforce_single_active_listener")
     def test_restart_active_openclaw_environment_restarts_primary_only(
         self,
         single_active,
@@ -1206,11 +1206,11 @@ class DashboardMemoryTests(unittest.TestCase):
         )
         wait_for_env_listener.assert_called_once_with("primary")
 
-    @mock.patch("dashboard.record_change")
-    @mock.patch("dashboard.PromotionController")
-    @mock.patch("dashboard.get_task_registry_payload")
-    @mock.patch("dashboard.list_openclaw_environments")
-    @mock.patch("dashboard.load_config")
+    @mock.patch("dashboard_backend.record_change")
+    @mock.patch("dashboard_backend.PromotionController")
+    @mock.patch("dashboard_backend.get_task_registry_payload")
+    @mock.patch("dashboard_backend.list_openclaw_environments")
+    @mock.patch("dashboard_backend.load_config")
     def test_execute_official_promotion_records_success(
         self,
         load_config,
@@ -1235,7 +1235,7 @@ class DashboardMemoryTests(unittest.TestCase):
         record_change.assert_called_once()
         self.assertIn("官方验证版晋升为当前主用版", record_change.call_args.args[1])
 
-    @mock.patch("dashboard.execute_official_promotion")
+    @mock.patch("dashboard_backend.execute_official_promotion")
     def test_api_promote_environment_returns_preflight_failure_message(self, execute_official_promotion):
         execute_official_promotion.return_value = {
             "status": "failed_preflight",
@@ -1255,8 +1255,8 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed_preflight")
         self.assertIn("官方验证环境未运行", payload["message"])
 
-    @mock.patch("dashboard.get_listener_pid")
-    @mock.patch("dashboard.run_script")
+    @mock.patch("dashboard_backend.get_listener_pid")
+    @mock.patch("dashboard_backend.run_script")
     def test_enforce_single_active_listener_stops_inactive_env(self, run_script, get_listener_pid):
         get_listener_pid.side_effect = [1111, 2222, None]
         with mock.patch.object(

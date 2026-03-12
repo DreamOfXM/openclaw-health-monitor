@@ -210,8 +210,11 @@ Dashboard 负责提供本地操作和诊断视图，当前包括：
 - `guardian.py`
   后台守护进程。负责健康检查、异常识别、主动进度播报、自动恢复、通知和变更记录。
 
-- `dashboard.py`
-  本地 Web UI。负责展示 Gateway / Guardian / Dashboard 状态、最近异常、内存归因、配置快照和操作入口。
+- `dashboard_v2/`
+  当前唯一主控制台前端。负责页面、交互、三视图结构和操作入口。
+
+- `dashboard_backend.py`
+  Dashboard V2 的后端兼容层。继续复用环境、任务、学习、共享状态、快照和版本治理的真实数据接口。
 
 - `desktop_runtime.sh`
   本地总控脚本。负责统一启动、停止、查询：
@@ -689,8 +692,11 @@ For the full architecture and task-state diagrams, see:
 - `guardian.py`
   Background daemon responsible for health checks, anomaly detection, recovery logic, notifications, and change logs.
 
-- `dashboard.py`
-  Local web UI that renders Gateway / Guardian / Dashboard state, recent incidents, memory attribution, snapshots, and operator controls.
+- `dashboard_v2/`
+  The primary control-console frontend. It owns the pages, interaction model, and operator workflows.
+
+- `dashboard_backend.py`
+  The backend compatibility layer behind Dashboard V2. It continues to expose the real environment, task, learning, shared-state, snapshot, and promotion interfaces.
 
 - `desktop_runtime.sh`
   The local runtime controller that starts, stops, and inspects:

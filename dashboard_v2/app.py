@@ -26,7 +26,7 @@ from routes import (
 def _legacy_dashboard():
     import importlib
 
-    return importlib.import_module("dashboard")
+    return importlib.import_module("dashboard_backend")
 
 def create_app():
     """创建Flask应用"""

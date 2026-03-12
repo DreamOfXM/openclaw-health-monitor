@@ -58,7 +58,7 @@
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
 - [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -80,7 +80,7 @@
 
 涉及文件：
 
-- [tests/test_dashboard.py](/Users/hangzhou/openclaw-health-monitor/tests/test_dashboard.py)
+- [tests/test_dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/tests/test_dashboard_backend.py)
 - [tests/test_guardian.py](/Users/hangzhou/openclaw-health-monitor/tests/test_guardian.py)
 
 验收标准：
@@ -108,7 +108,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -131,7 +131,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 
 验收标准：
@@ -233,7 +233,7 @@
 涉及文件：
 
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -267,7 +267,7 @@
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -305,7 +305,7 @@
 涉及文件：
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -326,7 +326,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -379,7 +379,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -463,7 +463,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
 - [shared-state-model.md](/Users/hangzhou/openclaw-health-monitor/docs/shared-state-model.md)
 
@@ -572,7 +572,7 @@
 涉及文件：
 
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 

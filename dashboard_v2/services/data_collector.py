@@ -1,6 +1,6 @@
 """
 数据收集服务
-为 dashboard_v2 统一适配旧版 dashboard.py 的真实数据。
+为 dashboard_v2 统一适配后端兼容层的真实数据。
 """
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class DataCache:
 
 @lru_cache(maxsize=1)
 def _legacy_dashboard():
-    return importlib.import_module("dashboard")
+    return importlib.import_module("dashboard_backend")
 
 
 def _read_json_file(path: Path, default: Any) -> Any:

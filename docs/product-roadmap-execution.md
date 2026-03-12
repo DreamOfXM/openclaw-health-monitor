@@ -65,7 +65,7 @@
 
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
 - [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 
 验收标准：
@@ -100,7 +100,7 @@
 
 涉及模块：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -126,7 +126,7 @@
 涉及模块：
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -244,7 +244,7 @@
 涉及模块：
 
 - OpenClaw config
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -282,7 +282,7 @@
 
 - Agent workspace
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
 
 验收标准：
@@ -310,7 +310,7 @@
 涉及模块：
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
 - [openclaw-bootstrap-evolve-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-bootstrap-evolve-spec.md)
 
@@ -338,7 +338,7 @@
 涉及模块：
 
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -362,7 +362,7 @@
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 

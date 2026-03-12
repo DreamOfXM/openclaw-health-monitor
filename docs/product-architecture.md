@@ -110,7 +110,7 @@ There are three primary runtime pieces in this repository:
 
 Main file:
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 Responsibilities:
 
@@ -312,7 +312,7 @@ What it does:
 
 Primary files:
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
 - [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 
@@ -329,7 +329,7 @@ What it does:
 Primary files:
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 ## 7.3 Task Registry
 
@@ -372,7 +372,7 @@ Primary files:
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 ## 7.6 Recovery and Version Operations
 
@@ -389,7 +389,7 @@ Primary files:
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [snapshot_manager.py](/Users/hangzhou/openclaw-health-monitor/snapshot_manager.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 ## 7.7 Learning and Reflection Supervision
 
@@ -403,7 +403,7 @@ What it does:
 Primary files:
 
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
 
 Ownership note:
@@ -427,7 +427,7 @@ What it shows:
 
 Primary file:
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 ## 8. Storage Model
 
