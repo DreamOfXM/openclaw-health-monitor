@@ -3,16 +3,57 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 
+ALLOWED_PIPELINE_ACTIONS = {"started", "completed", "blocked"}
+RECEIPT_REQUIRED_FIELDS = ("agent", "phase", "action", "evidence")
+
 DEFAULT_TASK_CONTRACTS = {
     "default_contract": "single_agent",
     "contracts": [
         {
+            "id": "a_share_delivery_pipeline",
+            "protocol_version": "hm.v1",
+            "description": "A-share closed-loop sampling / strategy delivery work. Must not claim dev/test progress without real downstream receipts.",
+            "keywords": [
+                "a股",
+                "A股",
+                "沪深",
+                "闭环采样",
+                "采样策略",
+                "股票策略",
+                "选股",
+                "交易日",
+                "涨停",
+                "跌停",
+                "盘口",
+                "k线",
+                "择时",
+            ],
+            "required_receipts": [
+                "pm:started",
+                "pm:completed",
+                "dev:started",
+                "dev:completed",
+                "test:started",
+                "test:completed",
+            ],
+            "terminal_receipts": ["test:completed", "dev:blocked", "test:blocked"],
+            "user_progress_rules": {
+                "planning_only": "A股闭环方案已完成，但开发尚未启动。",
+                "dev_running": "A股闭环实现已启动，当前存在真实开发回执。",
+                "awaiting_test": "A股闭环开发已完成，但测试尚未启动。",
+                "test_running": "A股闭环测试已启动，等待最终测试回执。",
+                "blocked_unverified": "A股闭环任务缺少结构化流水线回执，守护系统已判定为阻塞。"
+            }
+        },
+        {
             "id": "quant_guarded",
+            "protocol_version": "hm.v1",
             "description": "Quant / financial / numerical work that should be backed by calculator and verifier receipts.",
             "keywords": [
                 "量化",
@@ -40,9 +81,11 @@ DEFAULT_TASK_CONTRACTS = {
                 "calculator:completed",
                 "verifier:completed",
             ],
+            "terminal_receipts": ["verifier:completed", "calculator:blocked", "verifier:blocked", "risk:blocked"],
         },
         {
             "id": "delivery_pipeline",
+            "protocol_version": "hm.v1",
             "description": "Product / implementation work that should continue through pm -> dev -> test.",
             "keywords": [
                 "需求",
@@ -71,15 +114,30 @@ DEFAULT_TASK_CONTRACTS = {
                 "test:started",
                 "test:completed",
             ],
+            "terminal_receipts": ["test:completed", "dev:blocked", "test:blocked"],
         },
         {
             "id": "single_agent",
+            "protocol_version": "hm.v1",
             "description": "Ad-hoc work that does not require a multi-agent pipeline contract.",
             "keywords": [],
             "required_receipts": [],
+            "terminal_receipts": ["main:completed", "main:blocked"],
         },
     ],
 }
+
+
+def normalize_pipeline_receipt(receipt: dict[str, Any] | None, *, timestamp: str = "") -> dict[str, str] | None:
+    payload = {str(k).strip(): str(v).strip() for k, v in (receipt or {}).items() if k is not None and v is not None}
+    if any(not payload.get(field) for field in RECEIPT_REQUIRED_FIELDS):
+        return None
+    if payload.get("action") not in ALLOWED_PIPELINE_ACTIONS:
+        return None
+    if not payload.get("ack_id"):
+        raw = f"{payload['agent']}|{payload['phase']}|{payload['action']}|{payload['evidence']}|{timestamp}".encode("utf-8", errors="ignore")
+        payload["ack_id"] = hashlib.sha1(raw).hexdigest()[:16]
+    return payload
 
 
 def contracts_file(base_dir: Path, configured_path: str | None = None) -> Path:
@@ -124,17 +182,16 @@ def infer_task_contract(
         return get_contract_by_id(catalog, None)
 
     lowered = text.lower()
-    best: tuple[int, dict[str, Any]] | None = None
+    best: tuple[int, int, dict[str, Any]] | None = None
     for item in catalog.get("contracts", []):
         keywords = item.get("keywords") or []
         score = sum(1 for keyword in keywords if keyword and keyword.lower() in lowered)
         if score <= 0:
             continue
-        if not best or score > best[0]:
-            best = (score, item)
+        specificity = len(keywords)
+        if not best or score > best[0] or (score == best[0] and specificity < best[1]):
+            best = (score, specificity, item)
 
     if best:
-        return best[1]
-    if existing_contract_id:
-        return get_contract_by_id(catalog, existing_contract_id)
+        return best[2]
     return get_contract_by_id(catalog, None)

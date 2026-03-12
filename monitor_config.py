@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +31,13 @@ DEFAULT_CONFIG = {
     "ENABLE_TASK_REGISTRY": True,
     "TASK_REGISTRY_MAX_ACTIVE": 1,
     "TASK_REGISTRY_RETENTION": 100,
+    "ENABLE_BOOTSTRAP_INIT": True,
+    "BOOTSTRAP_WRITE_MISSING": False,
     "TASK_CONTROL_RECEIPT_GRACE": 180,
     "TASK_CONTROL_FOLLOWUP_COOLDOWN": 300,
     "TASK_CONTROL_MAX_ATTEMPTS": 2,
     "TASK_CONTROL_BLOCK_TIMEOUT": 900,
+    "ENABLE_INTRUSIVE_TASK_CONTROL": False,
     "TASK_CONTRACTS_FILE": "",
     "ENABLE_EVOLUTION_PLANE": True,
     "LEARNING_PROMOTION_THRESHOLD": 3,
@@ -61,6 +66,7 @@ DEFAULT_CONFIG = {
 }
 
 SECRET_KEYS = {"DINGTALK_WEBHOOK", "FEISHU_WEBHOOK"}
+ACTIVE_BINDING_RELATIVE_PATH = Path("data") / "shared-state" / "active-binding.json"
 
 
 def _coerce_value(raw: str) -> Any:
@@ -130,6 +136,95 @@ def save_local_config_value(base_dir: Path, key: str, value: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def get_env_specs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return the static environment registry."""
+    primary_port = int(config.get("GATEWAY_PORT", 18789))
+    official_port = int(config.get("OPENCLAW_OFFICIAL_PORT", 19001))
+    primary_home = Path(str(config.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
+    primary_code = Path(str(config.get("OPENCLAW_CODE", str(Path.home() / "openclaw-workspace" / "openclaw"))))
+    official_state = Path(str(config.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official"))))
+    official_code = Path(str(config.get("OPENCLAW_OFFICIAL_CODE", str(Path.home() / "openclaw-workspace" / "openclaw-official"))))
+    return {
+        "primary": {
+            "env_id": "primary",
+            "role": "stable",
+            "name": "当前主用版",
+            "code_root": str(primary_code),
+            "state_root": str(primary_home),
+            "config_path": str(primary_home / "openclaw.json"),
+            "gateway_label": "ai.openclaw.gateway",
+            "gateway_port": primary_port,
+            "manager_kind": "launchagent",
+        },
+        "official": {
+            "env_id": "official",
+            "role": "validation",
+            "name": "官方验证版",
+            "code_root": str(official_code),
+            "state_root": str(official_state),
+            "config_path": str(official_state / "openclaw.json"),
+            "gateway_label": "ai.openclaw.gateway.official",
+            "gateway_port": official_port,
+            "manager_kind": "official-manager",
+        },
+    }
+
+
+def active_binding_path(base_dir: Path) -> Path:
+    return base_dir / ACTIVE_BINDING_RELATIVE_PATH
+
+
+def read_active_binding(base_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+    specs = get_env_specs(config)
+    selected = str(config.get("ACTIVE_OPENCLAW_ENV", "primary")).strip() or "primary"
+    selected = selected if selected in specs else "primary"
+    default_binding = {
+        "active_env": selected,
+        "switch_state": "committed",
+        "binding_version": 1,
+        "updated_at": int(time.time()),
+        "expected": dict(specs[selected]),
+    }
+    path = active_binding_path(base_dir)
+    if not path.exists():
+        return default_binding
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        env_id = str(data.get("active_env") or selected).strip() or selected
+        if env_id not in specs:
+            return default_binding
+        expected = data.get("expected") if isinstance(data.get("expected"), dict) else {}
+        merged_expected = dict(specs[env_id])
+        merged_expected.update(expected)
+        return {
+            "active_env": env_id,
+            "switch_state": str(data.get("switch_state") or "committed"),
+            "binding_version": int(data.get("binding_version") or 1),
+            "updated_at": int(data.get("updated_at") or int(time.time())),
+            "expected": merged_expected,
+        }
+    except Exception:
+        return default_binding
+
+
+def write_active_binding(base_dir: Path, config: dict[str, Any], env_id: str, *, switch_state: str = "committed") -> dict[str, Any]:
+    specs = get_env_specs(config)
+    if env_id not in specs:
+        raise ValueError(f"unknown env_id: {env_id}")
+    current = read_active_binding(base_dir, config)
+    binding = {
+        "active_env": env_id,
+        "switch_state": switch_state,
+        "binding_version": int(current.get("binding_version") or 0) + 1,
+        "updated_at": int(time.time()),
+        "expected": dict(specs[env_id]),
+    }
+    path = active_binding_path(base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(binding, ensure_ascii=False, indent=2), encoding="utf-8")
+    return binding
 
 
 def sanitize_config_for_ui(config: dict[str, Any]) -> dict[str, Any]:
