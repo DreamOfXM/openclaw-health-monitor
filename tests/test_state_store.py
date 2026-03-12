@@ -32,6 +32,17 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(changes[0]["type"], "config")
             self.assertTrue((base / "data" / "monitor.db").exists())
 
+    def test_append_runtime_event_keeps_recent_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+
+            for idx in range(5):
+                store.append_runtime_event("restart_events:official", {"seq": idx}, limit=3)
+
+            events = store.load_runtime_value("restart_events:official", [])
+            self.assertEqual([item["seq"] for item in events], [2, 3, 4])
+
     def test_task_registry_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

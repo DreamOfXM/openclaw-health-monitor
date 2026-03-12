@@ -175,7 +175,7 @@ guardian_pid() {
 }
 
 dashboard_pid() {
-    launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard.py"
+    launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard_v2/app.py|$BASE_DIR/dashboard.py"
 }
 
 dashboard_reachable() {
@@ -302,7 +302,7 @@ install_dashboard_launch_agent() {
   <key>ProgramArguments</key>
   <array>
     <string>${python_bin}</string>
-    <string>${BASE_DIR}/dashboard.py</string>
+    <string>${BASE_DIR}/dashboard_v2/app.py</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${BASE_DIR}</string>
@@ -489,6 +489,7 @@ stop_dashboard() {
     if [ -n "$listener" ]; then
         stop_pid "$listener" || true
     fi
+    pkill -f "$BASE_DIR/dashboard_v2/app.py" 2>/dev/null || true
     pkill -f "$BASE_DIR/dashboard.py" 2>/dev/null || true
     rm -f "$DASHBOARD_PID_FILE"
 }

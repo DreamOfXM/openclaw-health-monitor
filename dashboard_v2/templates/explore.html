@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw Health Monitor - 详情</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/explore.css') }}">
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <span class="logo-icon">🛡️</span>
+                <span class="logo-text">Health Monitor</span>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-item">总览</a>
+                <a href="/explore" class="nav-item active">详情</a>
+                <a href="/manage" class="nav-item">管理</a>
+            </nav>
+            <div class="header-actions">
+                <span id="active-env" class="env-badge">--</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <!-- 左侧导航 -->
+        <aside class="explore-sidebar">
+            <div class="sidebar-section">
+                <h3 class="sidebar-title">详情导航</h3>
+                <nav class="sidebar-nav">
+                    <button class="nav-btn active" data-tab="environments">
+                        <span class="nav-icon">🖥️</span>
+                        <span class="nav-label">环境</span>
+                    </button>
+                    <button class="nav-btn" data-tab="tasks">
+                        <span class="nav-icon">📋</span>
+                        <span class="nav-label">任务</span>
+                    </button>
+                    <button class="nav-btn" data-tab="agents">
+                        <span class="nav-icon">🤖</span>
+                        <span class="nav-label">代理</span>
+                    </button>
+                    <button class="nav-btn" data-tab="learnings">
+                        <span class="nav-icon">📚</span>
+                        <span class="nav-label">学习</span>
+                    </button>
+                </nav>
+            </div>
+        </aside>
+
+        <!-- 右侧内容区 -->
+        <div class="explore-content">
+            <!-- 环境标签 -->
+            <div id="tab-environments" class="tab-content active">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">🖥️</span>
+                        环境详情
+                    </h2>
+                    <button class="btn btn-secondary" id="refresh-env">🔄 刷新</button>
+                </div>
+                
+                <div class="env-grid">
+                    <div class="env-card-large" id="primary-env">
+                        <div class="env-card-header">
+                            <h3 class="env-name">PRIMARY</h3>
+                            <span id="primary-status-badge" class="env-status-badge standby">--</span>
+                        </div>
+                        <div class="env-details">
+                            <div class="detail-row">
+                                <span class="detail-label">代码路径</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="primary-code-path">--</code>
+                                    <button class="btn-copy" data-target="primary-code-path" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">状态路径</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="primary-state-path">--</code>
+                                    <button class="btn-copy" data-target="primary-state-path" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">Git Commit</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="primary-git">--</code>
+                                    <button class="btn-copy" data-target="primary-git" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">Listener PID</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="primary-pid">--</code>
+                                    <button class="btn-copy" data-target="primary-pid" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">Token前缀</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="primary-token">--</code>
+                                    <button class="btn-copy" data-target="primary-token" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="env-card-large" id="official-env">
+                        <div class="env-card-header">
+                            <h3 class="env-name">OFFICIAL</h3>
+                            <span id="official-status-badge" class="env-status-badge standby">--</span>
+                        </div>
+                        <div class="env-details">
+                            <div class="detail-row">
+                                <span class="detail-label">代码路径</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="official-code-path">--</code>
+                                    <button class="btn-copy" data-target="official-code-path" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">状态路径</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="official-state-path">--</code>
+                                    <button class="btn-copy" data-target="official-state-path" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">Git Commit</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="official-git">--</code>
+                                    <button class="btn-copy" data-target="official-git" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">Listener PID</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="official-pid">--</code>
+                                    <button class="btn-copy" data-target="official-pid" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">Token前缀</span>
+                                <div class="detail-value-wrapper">
+                                    <code class="detail-value" id="official-token">--</code>
+                                    <button class="btn-copy" data-target="official-token" title="复制">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 环境对比 -->
+                <div class="comparison-section">
+                    <h3 class="subsection-title">环境对比</h3>
+                    <table class="comparison-table">
+                        <thead>
+                            <tr>
+                                <th>维度</th>
+                                <th>Primary</th>
+                                <th>Official</th>
+                                <th>差异</th>
+                            </tr>
+                        </thead>
+                        <tbody id="comparison-body">
+                            <tr>
+                                <td>代码版本</td>
+                                <td id="compare-primary-version">--</td>
+                                <td id="compare-official-version">--</td>
+                                <td id="compare-version-diff">--</td>
+                            </tr>
+                            <tr>
+                                <td>运行时间</td>
+                                <td id="compare-primary-uptime">--</td>
+                                <td id="compare-official-uptime">--</td>
+                                <td id="compare-uptime-diff">--</td>
+                            </tr>
+                            <tr>
+                                <td>健康评分</td>
+                                <td id="compare-primary-health">--</td>
+                                <td id="compare-official-health">--</td>
+                                <td id="compare-health-diff">--</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 任务标签 -->
+            <div id="tab-tasks" class="tab-content">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">📋</span>
+                        任务链路
+                    </h2>
+                    <div class="section-actions">
+                        <button class="btn btn-secondary" id="refresh-tasks">🔄 刷新</button>
+                        <button class="btn" id="show-blocked">⚠️ 仅看阻塞</button>
+                    </div>
+                </div>
+
+                <div class="task-filters">
+                    <button class="filter-btn active" data-filter="all">全部</button>
+                    <button class="filter-btn" data-filter="running">运行中</button>
+                    <button class="filter-btn" data-filter="blocked">阻塞</button>
+                    <button class="filter-btn" data-filter="completed">已完成</button>
+                </div>
+
+                <div class="tasks-list" id="tasks-list">
+                    <div class="loading">加载任务数据中...</div>
+                </div>
+            </div>
+
+            <!-- 代理标签 -->
+            <div id="tab-agents" class="tab-content">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">🤖</span>
+                        代理活动
+                    </h2>
+                    <button class="btn btn-secondary" id="refresh-agents">🔄 刷新</button>
+                </div>
+
+                <div class="agents-grid" id="agents-grid">
+                    <div class="loading">加载代理数据中...</div>
+                </div>
+            </div>
+
+            <!-- 学习标签 -->
+            <div id="tab-learnings" class="tab-content">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">📚</span>
+                        学习监督
+                    </h2>
+                    <button class="btn btn-secondary" id="refresh-learnings">🔄 刷新</button>
+                </div>
+
+                <div class="learnings-stats">
+                    <div class="stat-card stat-card-clickable active" data-learning-view="items">
+                        <div class="stat-value" id="learning-count">--</div>
+                        <div class="stat-label">学习项</div>
+                    </div>
+                    <div class="stat-card stat-card-clickable" data-learning-view="reflections">
+                        <div class="stat-value" id="reflection-count">--</div>
+                        <div class="stat-label">反思记录</div>
+                    </div>
+                    <div class="stat-card stat-card-clickable" data-learning-view="promoted">
+                        <div class="stat-value" id="promoted-count">--</div>
+                        <div class="stat-label">已晋升</div>
+                    </div>
+                </div>
+
+                <div class="learning-detail-header">
+                    <h3 class="subsection-title" id="learning-detail-title">学习项明细</h3>
+                </div>
+                <div class="learnings-list" id="learnings-list">
+                    <div class="loading">加载学习数据...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="footer-content">
+            <span>OpenClaw Health Monitor v2.0</span>
+            <span id="last-update" class="last-update">最后更新: --</span>
+        </div>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/base.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/explore.js') }}"></script>
+</body>
+</html>

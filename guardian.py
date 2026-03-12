@@ -14,16 +14,28 @@ import subprocess
 import threading
 import resource
 import hashlib
+import shlex
 import re
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-from monitor_config import DEFAULT_CONFIG, load_config as load_shared_config
+from monitor_config import (
+    DEFAULT_CONFIG,
+    get_env_specs as get_registered_env_specs,
+    load_config as load_shared_config,
+    read_active_binding,
+    write_active_binding,
+)
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
-from task_contracts import infer_task_contract, load_task_contract_catalog
+from task_contracts import infer_task_contract, load_task_contract_catalog, normalize_pipeline_receipt
+from bootstrap_evolution import (
+    CONTEXT_LIFECYCLE_BASELINE,
+    derive_watcher_task_id,
+    ensure_bootstrap_workspace,
+)
 
 # ========== 配置 ==========
 BASE_DIR = Path(__file__).parent
@@ -64,30 +76,496 @@ def load_config():
     CONFIG = load_shared_config(BASE_DIR)
 
 
+def active_binding() -> dict[str, Any]:
+    return read_active_binding(BASE_DIR, CONFIG)
+
+
 def active_env_id() -> str:
-    env_id = str(CONFIG.get("ACTIVE_OPENCLAW_ENV", "primary")).strip() or "primary"
+    env_id = str(active_binding().get("active_env") or CONFIG.get("ACTIVE_OPENCLAW_ENV", "primary")).strip() or "primary"
     return env_id if env_id in {"primary", "official"} else "primary"
+
+
+def commit_active_binding(env_id: str) -> None:
+    if env_id not in {"primary", "official"}:
+        return
+    try:
+        write_active_binding(BASE_DIR, CONFIG, env_id, switch_state="committed")
+    except Exception:
+        pass
+    try:
+        spec = all_env_specs()[env_id]
+        STORE.save_runtime_value(
+            "active_openclaw_env",
+            {
+                "env_id": env_id,
+                "updated_at": int(time.time()),
+                "switch_state": "committed",
+                "gateway_label": spec["gateway_label"],
+                "gateway_port": spec["port"],
+                "config_path": str(spec["config_path"]),
+            },
+        )
+    except Exception:
+        pass
 
 
 def current_env_spec() -> dict[str, Any]:
     env_id = active_env_id()
-    if env_id == "official":
-        return {
-            "id": "official",
-            "home": Path(str(CONFIG.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official")))),
-            "code": Path(str(CONFIG.get("OPENCLAW_OFFICIAL_CODE", str(Path.home() / "openclaw-workspace" / "openclaw-official")))),
-            "port": int(CONFIG.get("OPENCLAW_OFFICIAL_PORT", 19001)),
-        }
+    spec = get_registered_env_specs(CONFIG)[env_id]
     return {
-        "id": "primary",
-        "home": Path(str(CONFIG.get("OPENCLAW_HOME", str(Path.home() / ".openclaw")))),
-        "code": Path(str(CONFIG.get("OPENCLAW_CODE", str(Path.home() / "openclaw-workspace" / "openclaw")))),
-        "port": int(CONFIG.get("GATEWAY_PORT", 18789)),
+        "id": env_id,
+        "home": Path(spec["state_root"]),
+        "code": Path(spec["code_root"]),
+        "port": int(spec["gateway_port"]),
+        "gateway_label": spec["gateway_label"],
+        "config_path": Path(spec["config_path"]),
     }
+
+
+def all_env_specs() -> dict[str, dict[str, Any]]:
+    specs = get_registered_env_specs(CONFIG)
+    return {
+        env_id: {
+            "id": env_id,
+            "home": Path(spec["state_root"]),
+            "code": Path(spec["code_root"]),
+            "port": int(spec["gateway_port"]),
+            "gateway_label": spec["gateway_label"],
+            "config_path": Path(spec["config_path"]),
+        }
+        for env_id, spec in specs.items()
+    }
+
+
+def snapshot_targets() -> list[tuple[str, SnapshotManager]]:
+    primary_home = Path(str(CONFIG.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
+    official_home = Path(str(CONFIG.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official"))))
+    return [
+        ("primary", SnapshotManager(BASE_DIR, primary_home)),
+        ("official", SnapshotManager(BASE_DIR, official_home)),
+    ]
 
 
 def current_gateway_log() -> Path:
     return current_env_spec()["home"] / "logs" / "gateway.log"
+
+
+def ensure_openclaw_bootstrap(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = spec or current_env_spec()
+    home = Path(str(target.get("home") or Path.home() / ".openclaw"))
+    env_id = str(target.get("id") or "primary")
+    status = ensure_bootstrap_workspace(
+        home=home,
+        env_id=env_id,
+        write_missing=bool(CONFIG.get("ENABLE_BOOTSTRAP_INIT", True) and CONFIG.get("BOOTSTRAP_WRITE_MISSING", True)),
+    )
+    STORE.save_runtime_value(f"bootstrap_status:{env_id}", status)
+    return status
+
+
+def _walk_watcher_payload(payload: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 4:
+        return []
+    nodes: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        nodes.append(payload)
+        for value in payload.values():
+            nodes.extend(_walk_watcher_payload(value, depth=depth + 1))
+    elif isinstance(payload, list):
+        for value in payload:
+            nodes.extend(_walk_watcher_payload(value, depth=depth + 1))
+    return nodes
+
+
+
+def _extract_watcher_receipt(payload: dict[str, Any]) -> dict[str, str] | None:
+    for node in _walk_watcher_payload(payload):
+        for key in ("receipt", "pipeline_receipt"):
+            value = node.get(key)
+            if isinstance(value, dict):
+                receipt = normalize_pipeline_receipt(value, timestamp=str(node.get("timestamp") or payload.get("timestamp") or payload.get("completed_at") or ""))
+                if receipt:
+                    return receipt
+        receipt = normalize_pipeline_receipt(
+            node,
+            timestamp=str(node.get("timestamp") or payload.get("timestamp") or payload.get("completed_at") or ""),
+        )
+        if receipt:
+            return receipt
+        for text_key in ("text", "message", "content", "body", "detail", "error", "result"):
+            value = node.get(text_key)
+            if not isinstance(value, str) or "PIPELINE_RECEIPT:" not in value:
+                continue
+            receipt = extract_pipeline_receipt(value)
+            if receipt:
+                return receipt
+    return None
+
+
+
+def _find_watcher_task_by_question_hint(payload: dict[str, Any], *, env_id: str) -> dict[str, Any] | None:
+    hints: list[str] = []
+    for node in _walk_watcher_payload(payload):
+        for key in ("question", "task_question", "last_user_message", "title", "prompt", "request", "intent_text"):
+            value = node.get(key)
+            if isinstance(value, str):
+                normalized = normalize_task_question(value)
+                if normalized != "未知任务":
+                    hints.append(normalized)
+    if not hints:
+        return None
+    active_tasks = [task for task in STORE.list_active_tasks(limit=20) if str(task.get("env_id") or env_id) == env_id]
+    if len(active_tasks) != 1:
+        return None
+    task = active_tasks[0]
+    question = normalize_task_question(task.get("question"))
+    last_user_message = normalize_task_question(task.get("last_user_message"))
+    for hint in hints:
+        if hint in {question, last_user_message}:
+            return task
+        if len(hint) >= 8 and (hint in question or hint in last_user_message or question in hint or last_user_message in hint):
+            return task
+    return None
+
+
+
+def _resolve_watcher_receipt_task(receipt: dict[str, str], payload: dict[str, Any], *, env_id: str) -> dict[str, Any] | None:
+    receipt_task_id = str(receipt.get("task_id") or payload.get("task_id") or "").strip()
+    if receipt_task_id:
+        task = STORE.get_task(receipt_task_id)
+        if task and str(task.get("env_id") or env_id) == env_id:
+            return task
+    for node in _walk_watcher_payload(payload):
+        session_key = str(node.get("session_key") or receipt.get("session_key") or "").strip()
+        if not session_key:
+            continue
+        task = STORE.get_latest_task_for_session(session_key)
+        if task and str(task.get("env_id") or env_id) == env_id:
+            return task
+    return _find_watcher_task_by_question_hint(payload, env_id=env_id)
+
+
+
+def _watcher_receipt_event_payload(receipt: dict[str, str], normalized_payload: dict[str, Any], *, status: str, stage_label: str) -> dict[str, Any]:
+    return {
+        "receipt": receipt,
+        "status": status,
+        "stage": stage_label,
+        "timestamp": normalized_payload.get("timestamp", ""),
+    }
+
+
+
+def _bridge_watcher_receipt(payload: dict[str, Any], *, env_id: str, watcher_task_id: str, source_file: Path) -> str:
+    receipt = _extract_watcher_receipt(payload)
+    if not receipt:
+        return "ignored"
+    task = _resolve_watcher_receipt_task(receipt, payload, env_id=env_id)
+    if not task:
+        return "observed_unbound"
+    task_for_validation = dict(task)
+    if str(task.get("status") or "") == "completed":
+        control = STORE.derive_task_control_state(task["task_id"])
+        if str(control.get("control_state") or "") != "completed_verified":
+            task_for_validation["status"] = "running"
+    accepted, normalized_payload, violations = validate_protocol_event(
+        task_for_validation,
+        "pipeline_receipt",
+        {
+            "receipt": receipt,
+            "timestamp": str(receipt.get("timestamp") or payload.get("timestamp") or payload.get("completed_at") or ""),
+        },
+    )
+    for violation in violations:
+        if violation.get("rejected"):
+            record_protocol_violation(
+                task["task_id"],
+                violation_kind=str(violation.get("violation_kind") or "unknown"),
+                event_type="pipeline_receipt",
+                payload=violation.get("payload") or {},
+                ack_id=str(violation.get("ack_id") or ""),
+            )
+    if not accepted:
+        return "observed_unbound"
+    receipt = dict(normalized_payload.get("receipt") or {})
+    action = str(receipt.get("action") or "")
+    phase = str(receipt.get("phase") or "")
+    status = str(task.get("status") or "running")
+    blocked_reason = str(task.get("blocked_reason") or "")
+    if action == "blocked":
+        status = "blocked"
+        blocked_reason = receipt.get("evidence", "")
+    else:
+        if status in {"blocked", "no_reply", "background"}:
+            status = "running"
+        if blocked_reason == "missing_pipeline_receipt":
+            blocked_reason = ""
+    stage_label = f"{phase}:{action}".strip(":") or str(task.get("current_stage") or "处理中")
+    event_payload = _watcher_receipt_event_payload(
+        receipt,
+        normalized_payload,
+        status=status,
+        stage_label=stage_label,
+    )
+    if not STORE.record_task_event(task["task_id"], "pipeline_receipt", event_payload):
+        return "ignored"
+    STORE.update_task_fields(
+        task["task_id"],
+        status=status,
+        current_stage=stage_label,
+        blocked_reason=blocked_reason,
+        latest_receipt=receipt,
+        last_progress_at=int(time.time()),
+        updated_at=int(time.time()),
+    )
+    return "bridged"
+
+
+
+def sync_shared_context_watcher_tasks(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = spec or current_env_spec()
+    env_id = str(target.get("id") or "primary")
+    monitor_dir = Path(str(target.get("home") or Path.home() / ".openclaw")) / "shared-context" / "monitor-tasks"
+    tasks_file = monitor_dir / "tasks.jsonl"
+    dlq_file = monitor_dir / "dlq.jsonl"
+    imported = 0
+    receipt_bridge = {"bridged": 0, "observed_unbound": 0, "ignored": 0}
+
+    def process_file(path: Path, *, in_dlq: bool = False) -> None:
+        nonlocal imported
+        if not path.exists():
+            return
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            watcher_task_id = derive_watcher_task_id(payload)
+            STORE.upsert_watcher_task(
+                {
+                    "watcher_task_id": watcher_task_id,
+                    "env_id": env_id,
+                    "source_agent": payload.get("source_agent") or payload.get("agent") or "",
+                    "target_agent": payload.get("target_agent") or payload.get("callback_agent") or "",
+                    "intent": payload.get("intent") or payload.get("type") or "",
+                    "current_state": payload.get("current_state") or payload.get("state") or ("dlq" if in_dlq else "registered"),
+                    "completed_at": payload.get("completed_at") or 0,
+                    "delivered_at": payload.get("delivered_at") or 0,
+                    "last_checked_at": payload.get("last_checked_at") or payload.get("checked_at") or 0,
+                    "error_count": payload.get("error_count") or payload.get("attempts") or 0,
+                    "in_dlq": in_dlq or bool(payload.get("in_dlq")),
+                    "payload": payload,
+                }
+            )
+            imported += 1
+            outcome = _bridge_watcher_receipt(payload, env_id=env_id, watcher_task_id=watcher_task_id, source_file=path)
+            receipt_bridge[outcome] = receipt_bridge.get(outcome, 0) + 1
+
+    process_file(tasks_file, in_dlq=False)
+    process_file(dlq_file, in_dlq=True)
+    summary = STORE.summarize_watcher_tasks(env_id=env_id)
+    result = {
+        "env_id": env_id,
+        "monitor_dir": str(monitor_dir),
+        "imported": imported,
+        "summary": summary,
+        "receipt_bridge": receipt_bridge,
+    }
+    STORE.save_runtime_value(f"watcher_summary:{env_id}", result)
+    return result
+
+
+def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                records.append(payload)
+    except Exception:
+        return []
+    return records
+
+
+def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = spec or current_env_spec()
+    env_id = str(target.get("id") or "primary")
+    home = Path(str(target.get("home") or Path.home() / ".openclaw"))
+    now = int(time.time())
+    learnings_dir = home / ".learnings"
+    artifact_files = {
+        "pending": learnings_dir / "pending.jsonl",
+        "promoted": learnings_dir / "promoted.jsonl",
+        "discarded": learnings_dir / "discarded.jsonl",
+        "reflection_runs": learnings_dir / "reflection-runs.jsonl",
+        "reuse_evidence": learnings_dir / "reuse-evidence.jsonl",
+    }
+    artifact_records = {name: _read_jsonl_records(path) for name, path in artifact_files.items()}
+    existing = {name for name, path in artifact_files.items() if path.exists()}
+    required = {"pending", "promoted", "discarded", "reflection_runs"}
+    legacy_learnings = [item for item in STORE.list_learnings(limit=200) if item.get("env_id") == env_id]
+    legacy_reflections = STORE.list_reflection_runs(limit=50)
+    artifact_status = "missing"
+    if required.issubset(existing):
+        artifact_status = "ready"
+    elif existing:
+        artifact_status = "partial"
+    elif legacy_learnings or legacy_reflections:
+        artifact_status = "legacy_store_only"
+
+    learning_records: list[dict[str, Any]] = []
+    if any(artifact_records.values()):
+        for bucket in ("pending", "promoted", "discarded"):
+            learning_records.extend(artifact_records.get(bucket, []))
+    else:
+        learning_records = legacy_learnings
+    reflection_records = artifact_records.get("reflection_runs", []) or legacy_reflections
+    reuse_records = artifact_records.get("reuse_evidence", [])
+
+    def latest_value(records: list[dict[str, Any]], *keys: str) -> int:
+        values = []
+        for item in records:
+            for key in keys:
+                raw = int(item.get(key) or 0)
+                if raw:
+                    values.append(raw)
+                    break
+        return max(values) if values else 0
+
+    latest_learning_at = latest_value(learning_records, "updated_at", "created_at")
+    latest_reflection_at = latest_value(reflection_records, "finished_at", "created_at")
+    memory_path = home / "MEMORY.md"
+    memory_updated_at = int(memory_path.stat().st_mtime) if memory_path.exists() else 0
+    recent_window = [item for item in learning_records if int(item.get("updated_at") or item.get("created_at") or 0) >= now - 7 * 86400]
+    previous_window = [item for item in learning_records if now - 14 * 86400 <= int(item.get("updated_at") or item.get("created_at") or 0) < now - 7 * 86400]
+    if not recent_window and not previous_window:
+        repeat_error_trend = "insufficient_data"
+    elif len(recent_window) < len(previous_window):
+        repeat_error_trend = "down"
+    elif len(recent_window) > len(previous_window):
+        repeat_error_trend = "up"
+    else:
+        repeat_error_trend = "flat"
+
+    def pick_run(run_type: str) -> dict[str, Any] | None:
+        return next((item for item in reflection_records if str(item.get("run_type") or "") == run_type), None)
+
+    def pick_status(item: dict[str, Any] | None) -> str:
+        if not item:
+            return "missing"
+        return str(item.get("status") or (item.get("summary") or {}).get("status") or "unknown")
+
+    daily_reflection = pick_run("daily-reflection") or (reflection_records[0] if reflection_records else None)
+    memory_maintenance = pick_run("memory-maintenance")
+    team_rollup = pick_run("team-rollup")
+
+    return {
+        "generated_at": now,
+        "env_id": env_id,
+        "artifact_status": artifact_status,
+        "learning_freshness": max(now - latest_learning_at, 0) if latest_learning_at else None,
+        "reflection_freshness": max(now - latest_reflection_at, 0) if latest_reflection_at else None,
+        "memory_freshness": max(now - memory_updated_at, 0) if memory_updated_at else None,
+        "promoted_items_count": sum(1 for item in learning_records if str(item.get("status") or "") == "promoted"),
+        "promoted_items_24h": sum(1 for item in learning_records if str(item.get("status") or "") == "promoted" and int(item.get("updated_at") or item.get("created_at") or 0) >= now - 86400),
+        "reuse_evidence_count": len(reuse_records),
+        "reuse_evidence_7d": sum(1 for item in reuse_records if int(item.get("updated_at") or item.get("created_at") or 0) >= now - 7 * 86400),
+        "repeat_error_trend": repeat_error_trend,
+        "last_daily_reflection_at": int((daily_reflection or {}).get("finished_at") or (daily_reflection or {}).get("created_at") or 0),
+        "last_memory_maintenance_at": int((memory_maintenance or {}).get("finished_at") or (memory_maintenance or {}).get("created_at") or 0),
+        "last_team_rollup_at": int((team_rollup or {}).get("finished_at") or (team_rollup or {}).get("created_at") or 0),
+        "daily_reflection_status": pick_status(daily_reflection),
+        "memory_maintenance_status": pick_status(memory_maintenance),
+        "team_rollup_status": pick_status(team_rollup),
+    }
+
+
+def build_self_check_supervision_summary(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = spec or current_env_spec()
+    env_id = str(target.get("id") or "primary")
+    home = Path(str(target.get("home") or Path.home() / ".openclaw"))
+    now = int(time.time())
+    self_check_dir = home / "shared-context" / "self-check"
+    runtime_status_path = self_check_dir / "self-check-runtime-status.json"
+    events_path = self_check_dir / "self-check-events.json"
+
+    runtime_status: dict[str, Any] = {}
+    runtime_status_valid = False
+    if runtime_status_path.exists():
+        try:
+            runtime_status = json.loads(runtime_status_path.read_text(encoding="utf-8"))
+            runtime_status_valid = isinstance(runtime_status, dict) and bool(runtime_status.get("last_self_check_at")) and bool(runtime_status.get("self_check_status"))
+        except Exception:
+            runtime_status = {}
+    if not runtime_status:
+        runtime_status = STORE.load_runtime_value(
+            f"self_check_summary:{env_id}",
+            {
+                "env_id": env_id,
+                "self_check_artifact_status": "missing",
+                "self_check_status": "missing",
+                "last_self_check_at": 0,
+                "last_self_recovery_at": 0,
+                "last_self_recovery_result": "",
+                "delivery_retry_count": 0,
+                "completed_not_delivered_count": 0,
+                "stale_subagent_count": 0,
+            },
+        )
+
+    events_payload: dict[str, Any] = {}
+    events_valid = False
+    if events_path.exists():
+        try:
+            events_payload = json.loads(events_path.read_text(encoding="utf-8"))
+            events_valid = isinstance(events_payload, dict) and isinstance(events_payload.get("events") or [], list)
+        except Exception:
+            events_payload = {}
+    if not events_payload:
+        events_payload = STORE.load_runtime_value(f"self_check_events:{env_id}", {"env_id": env_id, "events": []})
+
+    last_self_check_at = int(runtime_status.get("last_self_check_at") or 0)
+    last_self_recovery_at = int(runtime_status.get("last_self_recovery_at") or 0)
+    recent_events = list(events_payload.get("events") or [])[:20]
+    if runtime_status_path.exists() and events_path.exists() and runtime_status_valid and events_valid:
+        artifact_status = "ready"
+    elif runtime_status_path.exists() or events_path.exists():
+        artifact_status = "invalid"
+    else:
+        artifact_status = str(runtime_status.get("self_check_artifact_status") or "missing")
+
+    return {
+        "generated_at": now,
+        "env_id": env_id,
+        "self_check_artifact_status": artifact_status,
+        "self_check_freshness": max(now - last_self_check_at, 0) if last_self_check_at else None,
+        "last_self_check_at": last_self_check_at,
+        "self_check_status": str(runtime_status.get("self_check_status") or "missing"),
+        "last_self_recovery_freshness": max(now - last_self_recovery_at, 0) if last_self_recovery_at else None,
+        "last_self_recovery_at": last_self_recovery_at,
+        "last_self_recovery_result": str(runtime_status.get("last_self_recovery_result") or ""),
+        "delivery_retry_count": int(runtime_status.get("delivery_retry_count") or 0),
+        "completed_not_delivered_count": int(runtime_status.get("completed_not_delivered_count") or 0),
+        "stale_subagent_count": int(runtime_status.get("stale_subagent_count") or 0),
+        "recent_event_types": [str(item.get("event_type") or "unknown") for item in recent_events[:5]],
+        "events": recent_events,
+    }
+
+
+def should_delegate_learning_ownership_to_openclaw(spec: dict[str, Any] | None = None) -> bool:
+    summary = build_learning_supervision_summary(spec)
+    return str(summary.get("artifact_status") or "") in {"ready", "partial"}
 
 
 def load_alerts():
@@ -139,15 +617,33 @@ def run_cmd(cmd: str) -> tuple:
         return -1, "", str(e)
 
 
-def run_args(args: list[str], timeout: int = 30) -> tuple[int, str, str]:
+def run_args(
+    args: list[str], timeout: int = 30, env: Optional[Dict[str, str]] = None
+) -> tuple[int, str, str]:
     """Run a subprocess without going through a shell."""
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
         return -1, "", "timeout"
     except Exception as e:
         return -1, "", str(e)
+
+
+def openclaw_runtime_env() -> Dict[str, str]:
+    """Build a subprocess env pinned to the active OpenClaw environment."""
+    spec = current_env_spec()
+    env = os.environ.copy()
+    env["OPENCLAW_STATE_DIR"] = str(spec["home"])
+    env["OPENCLAW_CONFIG_PATH"] = str(spec["home"] / "openclaw.json")
+    env["OPENCLAW_GATEWAY_PORT"] = str(spec["port"])
+    return env
 
 
 def get_process_info(name: str) -> Optional[Dict]:
@@ -184,25 +680,19 @@ def get_listener_pid(port: int) -> Optional[int]:
 
 
 def check_gateway_health() -> bool:
-    """检查 Gateway 健康状态"""
+    """检查当前 active env 的 Gateway 健康状态。"""
     spec = current_env_spec()
-    if spec["id"] == "official":
+    retries = CONFIG.get("HEALTH_CHECK_RETRIES", 3)
+    delay = CONFIG.get("HEALTH_CHECK_DELAY", 5)
+    for i in range(retries):
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{spec['port']}/health")
             with urllib.request.urlopen(req, timeout=5) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
-            return bool(payload.get("ok"))
+            if bool(payload.get("ok")):
+                return True
         except Exception:
-            return False
-
-    retries = CONFIG.get("HEALTH_CHECK_RETRIES", 3)
-    delay = CONFIG.get("HEALTH_CHECK_DELAY", 5)
-
-    for i in range(retries):
-        code, stdout, stderr = run_cmd("openclaw gateway health")
-        output = f"{stdout}\n{stderr}".lower()
-        if code == 0 and "gateway target" not in output:
-            return True
+            pass
         if i < retries - 1:
             time.sleep(delay)
     return False
@@ -427,7 +917,7 @@ def extract_pipeline_marker(line: str) -> str | None:
 
 
 def extract_pipeline_receipt(line: str) -> dict[str, str] | None:
-    """Extract a structured PIPELINE_RECEIPT payload from runtime logs."""
+    """Extract and validate a structured PIPELINE_RECEIPT payload from runtime logs."""
     marker = "PIPELINE_RECEIPT:"
     if marker not in line:
         return None
@@ -438,9 +928,8 @@ def extract_pipeline_receipt(line: str) -> dict[str, str] | None:
             continue
         key, value = part.split("=", 1)
         receipt[key.strip()] = value.strip()
-    if not receipt.get("agent"):
-        return None
-    return receipt
+    ts_raw, _ = parse_runtime_timestamp(line)
+    return normalize_pipeline_receipt(receipt, timestamp=ts_raw)
 
 
 def is_visible_completion_message(line: str) -> bool:
@@ -454,6 +943,7 @@ def is_visible_completion_message(line: str) -> bool:
         "dispatching to agent",
         "dispatch complete",
         "pipeline_progress:",
+        "pipeline_receipt:",
         "[gateway]",
         "[feishu]",
         "[plugins]",
@@ -467,13 +957,18 @@ def is_visible_completion_message(line: str) -> bool:
         "gateway closed",
         "error:",
         "config warnings",
+        "当前卡点",
+        "等待 dev",
+        "等待 test",
+        "继续推进",
+        "下一步",
+        "当前关键信息",
     )
     if any(marker in lower for marker in ignore_markers):
         return False
 
     completion_markers = (
         "任务已完成",
-        "已完成：",
         "已全部完成",
         "全部配置完成",
         "当前状态： 已结束",
@@ -600,6 +1095,7 @@ def build_control_plane_followup(
         "await_calculator_receipt": "若 calculator 已开始，请补发 calculator completed/blocked 回执，不要只发口头进度。",
         "require_verifier_receipt": "若精算结果已得出，请继续 verifier，并补发 verifier completed 回执；若无法复核，请明确阻塞原因。",
         "manual_or_session_recovery": "当前任务需要人工恢复或重新发起，请不要再口头宣称链路正在推进。",
+        "await_receipt_after_recovery": "守护系统已发起恢复，请等待新的结构化回执，不要重复播报 final。",
         "require_receipt_or_block": "请立即补发结构化 PIPELINE_RECEIPT；若链路未真正继续，请明确阻塞原因。",
     }.get(next_action, "请立即补发结构化 PIPELINE_RECEIPT；若链路未真正继续，请明确阻塞原因。")
 
@@ -612,6 +1108,118 @@ def build_control_plane_followup(
         f"{action_instruction}"
         "不要再口头宣称团队正在推进，也不要把这条控制消息当成新的用户需求。"
     )
+
+
+def build_pipeline_recovery_message(
+    task: dict[str, Any],
+    control: dict[str, Any],
+    recovery: dict[str, Any],
+    *,
+    idle: int,
+    total: int,
+) -> str:
+    question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+    stage = str(task.get("current_stage") or "处理中")
+    kind = str(recovery.get("kind") or "unknown")
+    rebind_target = str(recovery.get("rebind_target") or "guardian")
+    stale_subagent = str(recovery.get("stale_subagent") or "unknown")
+    last_agent = str(recovery.get("last_dispatched_agent") or "unknown")
+    missing = ", ".join(control.get("missing_receipts") or []) or "none"
+    return (
+        "GUARDIAN_PIPELINE_RECOVERY: 这不是用户新需求，而是守护系统发起的恢复动作。"
+        f"当前 task_id={task['task_id']}，恢复类型={kind}，最后派发节点={last_agent}，"
+        f"疑似失联子代理={stale_subagent}，重绑目标={rebind_target}，当前阶段={stage}，"
+        f"已静默={format_duration_label(idle)}，累计运行={format_duration_label(total)}，"
+        f"缺失回执={missing}。当前问题={question}。"
+        "请优先执行 session recovery / stale subagent detection / active task rebind，"
+        "并在恢复后补发新的结构化 PIPELINE_RECEIPT。禁止重复 final，禁止只给口头说明。"
+    )
+
+
+def record_protocol_violation(
+    task_id: str,
+    *,
+    violation_kind: str,
+    event_type: str,
+    payload: dict[str, Any],
+    ack_id: str = "",
+) -> None:
+    STORE.record_task_event(
+        task_id,
+        "protocol_violation",
+        {
+            "violation_kind": violation_kind,
+            "rejected_event_type": event_type,
+            "ack_id": ack_id,
+            "payload": payload,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
+
+
+def validate_protocol_event(
+    task: dict[str, Any],
+    event_type: str,
+    payload: dict[str, Any],
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    normalized = dict(payload or {})
+    violations: list[dict[str, Any]] = []
+    task_status = str(task.get("status") or "")
+    task_id = str(task.get("task_id") or "")
+    terminal = task_status == "completed" or STORE.has_task_event(task_id, "visible_completion")
+
+    if event_type == "pipeline_receipt":
+        receipt = dict(normalized.get("receipt") or {})
+        if not receipt.get("ack_id"):
+            receipt["ack_id"] = hashlib.sha1(
+                f"{task_id}|{receipt.get('agent','')}|{receipt.get('phase','')}|{receipt.get('action','')}|{normalized.get('timestamp','')}".encode(
+                    "utf-8", errors="ignore"
+                )
+            ).hexdigest()[:16]
+            violations.append(
+                {
+                    "violation_kind": "missing_ack_id_autofilled",
+                    "ack_id": receipt["ack_id"],
+                    "payload": {"receipt": receipt, "timestamp": normalized.get("timestamp", "")},
+                    "rejected": False,
+                }
+            )
+        normalized["receipt"] = receipt
+        if terminal:
+            violations.append(
+                {
+                    "violation_kind": "illegal_terminal_override",
+                    "ack_id": str(receipt.get("ack_id") or ""),
+                    "payload": {"receipt": receipt, "timestamp": normalized.get("timestamp", "")},
+                    "rejected": True,
+                }
+            )
+            return False, normalized, violations
+
+    if event_type == "stage_progress" and terminal:
+        violations.append(
+            {
+                "violation_kind": "illegal_terminal_override",
+                "ack_id": "",
+                "payload": normalized,
+                "rejected": True,
+            }
+        )
+        return False, normalized, violations
+
+    if event_type == "visible_completion":
+        if terminal:
+            violations.append(
+                {
+                    "violation_kind": "duplicate_final",
+                    "ack_id": "",
+                    "payload": normalized,
+                    "rejected": True,
+                }
+            )
+            return False, normalized, violations
+
+    return True, normalized, violations
 
 
 def build_task_id(session_key: str, timestamp: str) -> str:
@@ -638,7 +1246,23 @@ def write_task_registry_snapshot() -> None:
     """Persist a compact task-registry summary for external consumers."""
     if not CONFIG.get("ENABLE_TASK_REGISTRY", True):
         return
-    env_id = current_env_spec()["id"]
+    current_spec = current_env_spec()
+    env_id = current_spec["id"]
+    bootstrap_status = ensure_openclaw_bootstrap(current_spec)
+    watcher_summary = sync_shared_context_watcher_tasks(current_spec)
+    restart_events = STORE.load_runtime_value(f"restart_events:{env_id}", [])
+    if not isinstance(restart_events, list):
+        restart_events = []
+    recent_restart_events = restart_events[-20:]
+    restart_runtime_status = {
+        "generated_at": int(time.time()),
+        "env_id": env_id,
+        "total": len(restart_events),
+        "recent": recent_restart_events,
+        "last": recent_restart_events[-1] if recent_restart_events else None,
+        "last_success": next((item for item in reversed(recent_restart_events) if item.get("status") == "succeeded"), None),
+        "last_failure": next((item for item in reversed(recent_restart_events) if item.get("status") == "failed"), None),
+    }
     current = STORE.get_current_task(env_id=env_id)
     tasks = STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100)))
     filtered = [task for task in tasks if task.get("env_id") == env_id]
@@ -686,11 +1310,16 @@ def write_task_registry_snapshot() -> None:
             "status": facts_current.get("status") if facts_current else None,
             "current_stage": facts_current.get("current_stage") if facts_current else None,
             "approved_summary": (facts_current or {}).get("control", {}).get("approved_summary"),
+            "user_visible_progress": (facts_current or {}).get("control", {}).get("user_visible_progress"),
             "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
+            "evidence_summary": (facts_current or {}).get("control", {}).get("evidence_summary"),
             "control_state": (facts_current or {}).get("control", {}).get("control_state"),
             "next_action": (facts_current or {}).get("control", {}).get("next_action"),
             "next_actor": (facts_current or {}).get("control", {}).get("next_actor"),
+            "action_reason": (facts_current or {}).get("control", {}).get("action_reason"),
             "claim_level": (facts_current or {}).get("control", {}).get("claim_level"),
+            "protocol": (facts_current or {}).get("control", {}).get("protocol") or {},
+            "pipeline_recovery": (facts_current or {}).get("control", {}).get("pipeline_recovery") or {},
             "contract_id": ((facts_current or {}).get("control", {}).get("contract") or {}).get("id"),
             "missing_receipts": (facts_current or {}).get("control", {}).get("missing_receipts") or [],
             "control_action": (facts_current or {}).get("control", {}).get("control_action"),
@@ -708,6 +1337,247 @@ def write_task_registry_snapshot() -> None:
         json.dumps(facts_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    shared_dir = data_dir / "shared-state"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    control_plane = STORE.summarize_control_plane(env_id=env_id)
+    try:
+        gateway_running = check_process_running()
+    except Exception:
+        gateway_running = False
+    try:
+        gateway_healthy = check_gateway_health()
+    except Exception:
+        gateway_healthy = False
+    runtime_health = {
+        "generated_at": int(time.time()),
+        "env_id": env_id,
+        "metrics": get_system_metrics(),
+        "gateway_running": gateway_running,
+        "gateway_healthy": gateway_healthy,
+    }
+    learning_backlog = {
+        "generated_at": int(time.time()),
+        "summary": STORE.summarize_learnings(),
+        "learnings": STORE.list_learnings(statuses=["pending", "reviewed", "promoted"], limit=50),
+        "reflections": STORE.list_reflection_runs(limit=20),
+    }
+    learning_supervision = build_learning_supervision_summary(current_spec)
+    self_check_supervision = build_self_check_supervision_summary(current_spec)
+    promotion_policy = {
+        "generated_at": int(time.time()),
+        "reflection_interval_seconds": int(CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600)),
+        "learning_promotion_threshold": int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3)),
+        "daily_review_expected": True,
+        "rules": [
+            "同类 learning 发生次数达到阈值后自动进入 promoted。",
+            "promoted 项需要保留证据链与最近任务样本。",
+            "每日应生成 memory/YYYY-MM-DD.md，用于沉淀当天 reflection 结果。",
+        ],
+    }
+    context_baseline = {
+        "generated_at": int(time.time()),
+        "target_env": env_id,
+        "recommended_baseline": CONTEXT_LIFECYCLE_BASELINE,
+        "bootstrap_status": bootstrap_status,
+        "watcher_summary": watcher_summary,
+        "restart_runtime_status": restart_runtime_status,
+    }
+    (shared_dir / "task-registry-snapshot.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "control-action-queue.json").write_text(
+        json.dumps(payload.get("control_queue") or [], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "runtime-health.json").write_text(
+        json.dumps(runtime_health, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "learning-backlog.json").write_text(
+        json.dumps(learning_backlog, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "learning-runtime-status.json").write_text(
+        json.dumps(learning_supervision, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "reflection-freshness.json").write_text(
+        json.dumps(
+            {
+                "generated_at": learning_supervision.get("generated_at"),
+                "env_id": learning_supervision.get("env_id"),
+                "last_daily_reflection_at": learning_supervision.get("last_daily_reflection_at"),
+                "last_memory_maintenance_at": learning_supervision.get("last_memory_maintenance_at"),
+                "last_team_rollup_at": learning_supervision.get("last_team_rollup_at"),
+                "daily_reflection_status": learning_supervision.get("daily_reflection_status"),
+                "memory_maintenance_status": learning_supervision.get("memory_maintenance_status"),
+                "team_rollup_status": learning_supervision.get("team_rollup_status"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (shared_dir / "memory-freshness.json").write_text(
+        json.dumps(
+            {
+                "generated_at": learning_supervision.get("generated_at"),
+                "env_id": learning_supervision.get("env_id"),
+                "freshness_seconds": learning_supervision.get("memory_freshness"),
+                "status": "fresh" if (learning_supervision.get("memory_freshness") or 10**9) < 86400 else "stale",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (shared_dir / "reuse-evidence-summary.json").write_text(
+        json.dumps(
+            {
+                "generated_at": learning_supervision.get("generated_at"),
+                "env_id": learning_supervision.get("env_id"),
+                "total": learning_supervision.get("reuse_evidence_count"),
+                "last_7d": learning_supervision.get("reuse_evidence_7d"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (shared_dir / "self-check-runtime-status.json").write_text(
+        json.dumps(self_check_supervision, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "self-check-events.json").write_text(
+        json.dumps(
+            {
+                "generated_at": self_check_supervision.get("generated_at"),
+                "env_id": self_check_supervision.get("env_id"),
+                "events": self_check_supervision.get("events") or [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (shared_dir / "control-plane-summary.json").write_text(
+        json.dumps(control_plane, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "learning-promotion-policy.json").write_text(
+        json.dumps(promotion_policy, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "context-lifecycle-baseline.json").write_text(
+        json.dumps(context_baseline, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "bootstrap-status.json").write_text(
+        json.dumps(bootstrap_status, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "watcher-summary.json").write_text(
+        json.dumps(watcher_summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "restart-runtime-status.json").write_text(
+        json.dumps(restart_runtime_status, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "restart-events.json").write_text(
+        json.dumps(
+            {
+                "generated_at": restart_runtime_status.get("generated_at"),
+                "env_id": env_id,
+                "events": recent_restart_events,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (shared_dir / "README.md").write_text(
+        "# Shared State Model\n\n"
+        "- task-registry-snapshot.json: 当前任务注册表快照\n"
+        "- current-task-facts.json: 当前任务事实摘要\n"
+        "- control-action-queue.json: 待处理控制动作队列\n"
+        "- runtime-health.json: 运行健康与最近异常\n"
+        "- learning-backlog.json: learning / reflection / suggestions\n"
+        "- learning-runtime-status.json: OpenClaw 学习产物状态与 freshness 摘要\n"
+        "- reflection-freshness.json: reflection / maintenance / rollup 最近运行状态\n"
+        "- memory-freshness.json: MEMORY.md 更新时间与 freshness\n"
+        "- reuse-evidence-summary.json: promoted knowledge 复用证据摘要\n"
+        "- self-check-runtime-status.json: OpenClaw 内部 self-check 最近运行与恢复摘要\n"
+        "- self-check-events.json: OpenClaw 内部 self-check 最近事件\n"
+        "- control-plane-summary.json: 控制面统计与解释\n"
+        "- learning-promotion-policy.json: learning promote 规则与阈值\n"
+        "- context-lifecycle-baseline.json: 推荐长期运行基线模板\n"
+        "- bootstrap-status.json: 初始化结构与配置补齐状态\n"
+        "- watcher-summary.json: 任务监督器摘要与 completed/delivered 区分\n"
+        "- restart-runtime-status.json: 最近重启链路摘要与最后成功/失败结果\n"
+        "- restart-events.json: 最近重启事件时间线\n",
+        encoding="utf-8",
+    )
+    env_home = Path(str(current_spec.get("home") or BASE_DIR))
+    monitor_dir = env_home / "shared-context" / "monitor-tasks"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    watcher_items = STORE.list_watcher_tasks(env_id=env_id, limit=200)
+    tasks_lines = [json.dumps(item, ensure_ascii=False) for item in watcher_items]
+    if not tasks_lines and facts_current:
+        tasks_lines = [
+            json.dumps(
+                {
+                    "task_id": facts_current.get("task_id"),
+                    "session_key": facts_current.get("session_key"),
+                    "question": facts_current.get("question"),
+                    "status": facts_current.get("status"),
+                    "current_stage": facts_current.get("current_stage"),
+                    "env_id": env_id,
+                },
+                ensure_ascii=False,
+            )
+        ]
+    (monitor_dir / "tasks.jsonl").write_text(("\n".join(tasks_lines) + ("\n" if tasks_lines else "")), encoding="utf-8")
+    dlq_lines = [json.dumps(item, ensure_ascii=False) for item in watcher_items if item.get("in_dlq")]
+    (monitor_dir / "dlq.jsonl").write_text(("\n".join(dlq_lines) + ("\n" if dlq_lines else "")), encoding="utf-8")
+    # Transitional export only: these files keep the current dashboard/shared-
+    # state views working during migration, but canonical learning artifacts
+    # should move to OpenClaw-owned generation.
+    learnings_dir = BASE_DIR / ".learnings"
+    learnings_dir.mkdir(parents=True, exist_ok=True)
+    env_learnings_dir = env_home / ".learnings"
+    env_learnings_dir.mkdir(parents=True, exist_ok=True)
+    learnings = STORE.list_learnings(limit=200)
+    errors_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("status")) != "promoted"]
+    promoted_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("status")) == "promoted"]
+    feature_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("category")) == "feature_request"]
+    errors_body = "# Errors\n\n" + ("\n".join(errors_lines) if errors_lines else "- 暂无待处理错误模式\n")
+    learnings_body = "# Learnings\n\n" + ("\n".join(promoted_lines or errors_lines[:20]) if (promoted_lines or errors_lines) else "- 暂无学习记录\n")
+    feature_body = "# Feature Requests\n\n" + ("\n".join(feature_lines) if feature_lines else "- 暂无 feature requests\n")
+    (learnings_dir / "ERRORS.md").write_text(errors_body, encoding="utf-8")
+    (learnings_dir / "LEARNINGS.md").write_text(learnings_body, encoding="utf-8")
+    (learnings_dir / "FEATURE_REQUESTS.md").write_text(feature_body, encoding="utf-8")
+    (env_learnings_dir / "ERRORS.md").write_text(errors_body, encoding="utf-8")
+    (env_learnings_dir / "LEARNINGS.md").write_text(learnings_body, encoding="utf-8")
+    (env_learnings_dir / "FEATURE_REQUESTS.md").write_text(feature_body, encoding="utf-8")
+    memory_dir = BASE_DIR / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    env_memory_dir = env_home / "memory"
+    env_memory_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    memory_body = "# Daily Memory\n\n" + json.dumps({"reflection_runs": learning_backlog["reflections"][:5], "summary": learning_backlog["summary"]}, ensure_ascii=False, indent=2)
+    (memory_dir / f"{today}.md").write_text(memory_body + "\n", encoding="utf-8")
+    (env_memory_dir / f"{today}.md").write_text(memory_body + "\n", encoding="utf-8")
+    memory_index = (
+        "# Monitor Memory\n\n"
+        f"- env: {env_id}\n"
+        f"- current_task: {(facts_payload.get('current_task') or {}).get('task_id') or '-'}\n"
+        f"- learning_total: {learning_backlog['summary'].get('total', 0)}\n"
+        f"- promoted: {learning_backlog['summary'].get('promoted', 0)}\n"
+    )
+    (BASE_DIR / "MEMORY.md").write_text(memory_index, encoding="utf-8")
+    (env_home / "MEMORY.md").write_text(memory_index, encoding="utf-8")
 
 
 def derive_learning_key(*parts: str) -> str:
@@ -716,8 +1586,16 @@ def derive_learning_key(*parts: str) -> str:
 
 
 def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
-    """Convert repeated blocked/follow-up outcomes into pending learnings."""
+    """Transitional bridge: export control-plane observations as learning candidates.
+
+    This remains in guardian only as a migration shim. The target architecture
+    moves canonical learning capture back into OpenClaw itself; guardian should
+    eventually emit supervisory observation facts rather than own learning
+    decisions.
+    """
     if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
+        return []
+    if should_delegate_learning_ownership_to_openclaw():
         return []
     env_id = current_env_spec()["id"]
     captured: list[dict] = []
@@ -756,9 +1634,16 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
 
 
 def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
-    """Promote repeated learnings into reviewed/promoted hypotheses."""
+    """Transitional bridge: maintain legacy reflection state during migration.
+
+    The final ownership model requires OpenClaw to run reflection/promote via
+    its own cron. Guardian should eventually record and verify reflection runs,
+    not produce canonical promotion decisions.
+    """
     if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
         return {"status": "disabled", "promoted": 0, "reviewed": 0}
+    if should_delegate_learning_ownership_to_openclaw():
+        return {"status": "delegated", "promoted": 0, "reviewed": 0}
     now = int(time.time())
     interval = int(CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600))
     last_run = int(STORE.load_runtime_value("reflection_last_run_at", 0) or 0)
@@ -812,7 +1697,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
     contract_catalog = load_task_contract_catalog(BASE_DIR, str(CONFIG.get("TASK_CONTRACTS_FILE", "") or ""))
     question_candidates: list[tuple[int, str]] = []
     open_dispatches: dict[str, dict[str, Any]] = {}
+    last_closed_dispatch: dict[str, Any] | None = None
     touched_task_ids: set[str] = set()
+    touched_session_keys: set[str] = set()
 
     def reconcile_task(task_id: str) -> None:
         task = STORE.get_task(task_id)
@@ -846,6 +1733,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             requester_open_id = extract_requester_open_id(line)
             session_key = extract_runtime_session_key(line) or requester_open_id or f"dispatch:{ts_raw}"
             existing = STORE.get_latest_task_for_session(session_key)
+            touched_session_keys.add(session_key)
             question_text = normalize_task_question(nearest_question)
             if question_text == "未知任务" and existing:
                 question_text = normalize_task_question(
@@ -915,8 +1803,29 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             if not current_key:
                 continue
             dispatch = open_dispatches[current_key]
-            dispatch["marker"] = marker
-            dispatch["current_stage"] = normalize_stage_label(marker)
+            accepted, normalized_payload, violations = validate_protocol_event(
+                STORE.get_task(dispatch["task_id"]) or dispatch,
+                "stage_progress",
+                {
+                    "marker": marker,
+                    "stage": normalize_stage_label(marker),
+                    "timestamp": ts_raw,
+                },
+            )
+            for violation in violations:
+                record_protocol_violation(
+                    dispatch["task_id"],
+                    violation_kind=str(violation.get("violation_kind") or "unknown"),
+                    event_type="stage_progress",
+                    payload=violation.get("payload") or {},
+                    ack_id=str(violation.get("ack_id") or ""),
+                )
+            if not accepted:
+                touched_task_ids.add(dispatch["task_id"])
+                reconcile_task(dispatch["task_id"])
+                continue
+            dispatch["marker"] = str(normalized_payload.get("marker") or marker)
+            dispatch["current_stage"] = str(normalized_payload.get("stage") or normalize_stage_label(marker))
             dispatch["last_progress_at"] = int(ts)
             dispatch["updated_at"] = int(ts)
             STORE.update_task_fields(
@@ -926,14 +1835,11 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 updated_at=int(ts),
             )
             touched_task_ids.add(dispatch["task_id"])
+            touched_session_keys.add(dispatch.get("session_key") or "")
             STORE.record_task_event(
                 dispatch["task_id"],
                 "stage_progress",
-                {
-                    "marker": marker,
-                    "stage": dispatch["current_stage"],
-                    "timestamp": ts_raw,
-                },
+                normalized_payload,
             )
             reconcile_task(dispatch["task_id"])
             continue
@@ -944,6 +1850,27 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             if not current_key:
                 continue
             dispatch = open_dispatches[current_key]
+            accepted, normalized_payload, violations = validate_protocol_event(
+                STORE.get_task(dispatch["task_id"]) or dispatch,
+                "pipeline_receipt",
+                {
+                    "receipt": receipt,
+                    "timestamp": ts_raw,
+                },
+            )
+            for violation in violations:
+                record_protocol_violation(
+                    dispatch["task_id"],
+                    violation_kind=str(violation.get("violation_kind") or "unknown"),
+                    event_type="pipeline_receipt",
+                    payload=violation.get("payload") or {},
+                    ack_id=str(violation.get("ack_id") or ""),
+                )
+            if not accepted:
+                touched_task_ids.add(dispatch["task_id"])
+                reconcile_task(dispatch["task_id"])
+                continue
+            receipt = dict(normalized_payload.get("receipt") or {})
             action = receipt.get("action", "")
             phase = receipt.get("phase", "")
             stage_label = f"{phase}:{action}".strip(":")
@@ -975,7 +1902,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "receipt": receipt,
                     "status": status,
                     "stage": dispatch["current_stage"],
-                    "timestamp": ts_raw,
+                    "timestamp": normalized_payload.get("timestamp", ts_raw),
                 },
             )
             reconcile_task(dispatch["task_id"])
@@ -985,6 +1912,22 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             current_key = most_recent_key()
             if current_key:
                 dispatch = open_dispatches.pop(current_key)
+                accepted, normalized_payload, violations = validate_protocol_event(
+                    STORE.get_task(dispatch["task_id"]) or dispatch,
+                    "visible_completion",
+                    {"timestamp": ts_raw, "message": line.strip()},
+                )
+                for violation in violations:
+                    record_protocol_violation(
+                        dispatch["task_id"],
+                        violation_kind=str(violation.get("violation_kind") or "unknown"),
+                        event_type="visible_completion",
+                        payload=violation.get("payload") or {},
+                    )
+                if not accepted:
+                    touched_task_ids.add(dispatch["task_id"])
+                    reconcile_task(dispatch["task_id"])
+                    continue
                 STORE.update_task_fields(
                     dispatch["task_id"],
                     status="completed",
@@ -993,22 +1936,52 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     completed_at=int(ts),
                 )
                 touched_task_ids.add(dispatch["task_id"])
+                touched_session_keys.add(dispatch.get("session_key") or "")
                 STORE.record_task_event(
                     dispatch["task_id"],
                     "visible_completion",
-                    {"timestamp": ts_raw, "message": line.strip()},
+                    normalized_payload,
+                )
+                last_closed_dispatch = dispatch
+                attach_background_result_if_late(
+                    dispatch["task_id"],
+                    dispatch.get("session_key") or "",
+                    completed_at=int(ts),
+                    status="completed",
                 )
                 reconcile_task(dispatch["task_id"])
+            continue
+
+        if is_visible_completion_message(line) and last_closed_dispatch:
+            accepted, normalized_payload, violations = validate_protocol_event(
+                STORE.get_task(last_closed_dispatch["task_id"]) or last_closed_dispatch,
+                "visible_completion",
+                {"timestamp": ts_raw, "message": line.strip()},
+            )
+            for violation in violations:
+                record_protocol_violation(
+                    last_closed_dispatch["task_id"],
+                    violation_kind=str(violation.get("violation_kind") or "unknown"),
+                    event_type="visible_completion",
+                    payload=violation.get("payload") or {},
+                )
+            if not accepted:
+                touched_task_ids.add(last_closed_dispatch["task_id"])
+                reconcile_task(last_closed_dispatch["task_id"])
             continue
 
         if "dispatch complete" in lower and open_dispatches:
             current_key = most_recent_key()
             if not current_key:
                 continue
-            dispatch = open_dispatches.pop(current_key)
-            status = "completed"
-            stage = "已完成"
-            if "queuedfinal=false" in lower or "replies=0" in lower:
+            dispatch = open_dispatches[current_key]
+            queued_final = "queuedfinal=true" in lower
+            has_reply = "replies=0" not in lower
+            status = "running"
+            stage = dispatch.get("current_stage", "处理中")
+            close_dispatch = False
+            if (not queued_final) or (not has_reply):
+                close_dispatch = True
                 status = "no_reply"
                 stage = "完成但无可见回复"
             STORE.update_task_fields(
@@ -1016,9 +1989,10 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 status=status,
                 current_stage=stage,
                 updated_at=int(ts),
-                completed_at=int(ts),
+                completed_at=int(ts) if close_dispatch else int(dispatch.get("completed_at") or 0),
             )
             touched_task_ids.add(dispatch["task_id"])
+            touched_session_keys.add(dispatch.get("session_key") or "")
             STORE.record_task_event(
                 dispatch["task_id"],
                 "dispatch_complete",
@@ -1029,10 +2003,19 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     "line": line.strip(),
                 },
             )
+            if close_dispatch:
+                last_closed_dispatch = open_dispatches.pop(current_key, None)
+                attach_background_result_if_late(
+                    dispatch["task_id"],
+                    dispatch.get("session_key") or "",
+                    completed_at=int(ts),
+                    status=status,
+                )
             reconcile_task(dispatch["task_id"])
     for task_id in touched_task_ids:
         STORE.repair_task_identity(task_id)
         reconcile_task(task_id)
+    reconcile_background_results_for_sessions(touched_session_keys)
     write_task_registry_snapshot()
 
 
@@ -1094,7 +2077,7 @@ def send_guardian_followup(
         args.append("--deliver")
 
     timeout = int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120)) + 30
-    code, stdout, stderr = run_args(args, timeout=timeout)
+    code, stdout, stderr = run_args(args, timeout=timeout, env=openclaw_runtime_env())
     if code == 0:
         log(f"守护追问已发送到会话 {session_key}: {message}")
         return True, None
@@ -1112,8 +2095,10 @@ def send_feishu_progress_push(open_id: str, message: str) -> bool:
     if not open_id:
         return False
     target = open_id if ":" in open_id else f"user:{open_id}"
+    quoted_target = json.dumps(target, ensure_ascii=False)
+    quoted_message = json.dumps(message, ensure_ascii=False)
     code, _, stderr = run_cmd(
-        f'openclaw message send --channel feishu --target "{target}" --message "{message.replace(chr(34), chr(39))}"'
+        f"openclaw message send --channel feishu --target {quoted_target} --message {quoted_message}"
     )
     if code == 0:
         log(f"进度推送已发送到 {target}: {message}")
@@ -1178,6 +2163,138 @@ def trim_runtime_state_map(state: dict[str, dict[str, Any]], keep: int = 500) ->
         reverse=True,
     )[:keep]
     return dict(newest)
+
+
+def should_record_control_plane_anomaly(task_id: str, blocked_reason: str, *, interval: int = 1800) -> bool:
+    seen = STORE.load_runtime_value("control_plane_block_seen", {})
+    key = f"{task_id}:{blocked_reason}"
+    now = int(time.time())
+    last = int(seen.get(key, 0) or 0)
+    if last and now - last < interval:
+        return False
+    seen[key] = now
+    STORE.save_runtime_value("control_plane_block_seen", trim_runtime_seen(seen, keep=500))
+    return True
+
+
+def attach_guardian_progress_fact(
+    session_key: str,
+    *,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    if not session_key:
+        return
+    task = STORE.get_latest_task_for_session(session_key)
+    if not task:
+        return
+    STORE.record_task_event(task["task_id"], event_type, payload)
+
+
+def attach_background_result_if_late(task_id: str, session_key: str, *, completed_at: int, status: str) -> None:
+    if not session_key:
+        return
+    tasks = STORE.list_tasks_for_session(session_key, limit=20)
+    newer_active = next(
+        (
+            item
+            for item in tasks
+            if item["task_id"] != task_id
+            and item.get("status") in {"running", "blocked", "background"}
+            and int(item.get("created_at") or 0) <= completed_at
+        ),
+        None,
+    )
+    if not newer_active:
+        return
+    STORE.update_task_fields(task_id, backgrounded_at=completed_at, updated_at=completed_at)
+    STORE.record_task_event(
+        task_id,
+        "background_result",
+        {
+            "timestamp": datetime.now().isoformat(),
+            "active_task_id": newer_active["task_id"],
+            "active_question": newer_active.get("question") or newer_active.get("last_user_message") or "未知任务",
+            "status": status,
+        },
+    )
+
+
+def reconcile_background_results_for_sessions(session_keys: set[str]) -> None:
+    for session_key in session_keys:
+        if not session_key:
+            continue
+        resolution = STORE.derive_session_resolution(session_key)
+        active_task_id = resolution.get("active_task_id")
+        late_completed = resolution.get("late_completed_tasks") or []
+        for item in late_completed:
+            task_id = str(item.get("task_id") or "")
+            if not task_id or task_id == active_task_id:
+                continue
+            task = STORE.get_task(task_id)
+            if not task:
+                continue
+            completed_at = int(task.get("completed_at") or task.get("updated_at") or time.time())
+            attach_background_result_if_late(
+                task_id,
+                session_key,
+                completed_at=completed_at,
+                status=str(task.get("status") or "completed"),
+            )
+
+
+def enforce_single_active_runtime_guard() -> list[dict[str, Any]]:
+    specs = all_env_specs()
+    active_id = active_env_id()
+    primary_pid = get_listener_pid(int(specs["primary"]["port"]))
+    official_pid = get_listener_pid(int(specs["official"]["port"]))
+    issues: list[dict[str, Any]] = []
+    if primary_pid and official_pid:
+        issues.append(
+            {
+                "code": "dual_listener",
+                "message": "检测到双环境同时监听，已视为 release blocker",
+                "details": {
+                    "active_env": active_id,
+                    "primary_pid": primary_pid,
+                    "official_pid": official_pid,
+                },
+            }
+        )
+        if active_id == "official":
+            run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+        else:
+            run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
+    elif active_id == "primary" and official_pid:
+        issues.append(
+            {
+                "code": "inactive_official_listener",
+                "message": "Primary 为激活环境，但 Official 仍在监听，已尝试停止。",
+                "details": {"active_env": active_id, "official_pid": official_pid},
+            }
+        )
+        run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
+    elif active_id == "official" and primary_pid:
+        issues.append(
+            {
+                "code": "inactive_primary_listener",
+                "message": "Official 为激活环境，但 Primary 仍在监听，已尝试停止。",
+                "details": {"active_env": active_id, "primary_pid": primary_pid},
+            }
+        )
+        run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+
+    if issues:
+        seen = STORE.load_runtime_value("single_active_guard_seen", {})
+        now = int(time.time())
+        for issue in issues:
+            code = str(issue.get("code") or "guard")
+            if code not in seen or now - int(seen.get(code, 0)) > 300:
+                seen[code] = now
+                record_change_log("anomaly", str(issue.get("message") or "single-active guard"), issue.get("details") or {})
+                notify("单活环境告警", str(issue.get("message") or "检测到环境监听异常"), "error")
+        STORE.save_runtime_value("single_active_guard_seen", trim_runtime_seen(seen, keep=50))
+    return issues
 
 
 def collect_open_runtime_dispatches(lines: list[str]) -> list[dict[str, Any]]:
@@ -1564,6 +2681,17 @@ def push_runtime_progress_updates() -> list[dict]:
                 "系统已尝试自动恢复；若后续仍无结果，建议重新发起该任务。"
             )
             if open_id and send_feishu_progress_push(open_id, blocked_message):
+                attach_guardian_progress_fact(
+                    session_key,
+                    event_type="guardian_blocked_notice",
+                    payload={
+                        "idle": idle,
+                        "duration": duration,
+                        "channel": "feishu",
+                        "blocked_reason": blocked_reason,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
                 record_change_log(
                     "anomaly",
                     "守护系统阻塞提示",
@@ -1619,6 +2747,17 @@ def push_runtime_progress_updates() -> list[dict]:
                 fallback_message=fallback_message,
             )
             if channel:
+                attach_guardian_progress_fact(
+                    session_key,
+                    event_type="guardian_progress_push",
+                    payload={
+                        "idle": idle,
+                        "duration": duration,
+                        "channel": channel,
+                        "blocked_reason": failed_reason or "",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
                 record_change_log(
                     "pipeline",
                     "守护系统主动追问",
@@ -1677,6 +2816,17 @@ def push_runtime_progress_updates() -> list[dict]:
                 fallback_message=fallback_message,
             )
             if channel:
+                attach_guardian_progress_fact(
+                    session_key,
+                    event_type="guardian_escalation_push",
+                    payload={
+                        "idle": idle,
+                        "duration": duration,
+                        "channel": channel,
+                        "blocked_reason": failed_reason or blocked_reason or "",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
                 record_change_log(
                     "anomaly",
                     "守护系统升级催办",
@@ -1729,6 +2879,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
     cooldown = int(CONFIG.get("TASK_CONTROL_FOLLOWUP_COOLDOWN", 300))
     max_attempts = max(1, int(CONFIG.get("TASK_CONTROL_MAX_ATTEMPTS", 2)))
     block_timeout = int(CONFIG.get("TASK_CONTROL_BLOCK_TIMEOUT", 900))
+    intrusive_control = bool(CONFIG.get("ENABLE_INTRUSIVE_TASK_CONTROL", False))
     outcomes: list[dict] = []
 
     for task in STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100))):
@@ -1742,6 +2893,8 @@ def enforce_task_registry_control_plane() -> list[dict]:
         if not (contract.get("required_receipts") or []):
             continue
         control_state = str(control.get("control_state") or "")
+        recovery = control.get("pipeline_recovery") or {}
+        recovery_candidate = bool(recovery) and str(control.get("next_action") or "") == "manual_or_session_recovery"
         if control_state not in {
             "received_only",
             "planning_only",
@@ -1751,7 +2904,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
             "dev_running",
             "awaiting_test",
             "test_running",
-        }:
+            "blocked_unverified",
+            "blocked_control_followup_failed",
+        } and not recovery_candidate:
             continue
 
         idle = max(0, now - int(task.get("last_progress_at") or task.get("updated_at") or now))
@@ -1763,13 +2918,272 @@ def enforce_task_registry_control_plane() -> list[dict]:
         if idle < grace:
             continue
 
-        if task.get("status") == "blocked" and str(task.get("blocked_reason") or "") in {
+        if (
+            not recovery_candidate
+            and task.get("status") == "blocked"
+            and str(task.get("blocked_reason") or "") in {
             "missing_pipeline_receipt",
             "control_followup_failed",
-        }:
+            }
+        ):
             continue
 
         should_block = attempts >= max_attempts or total >= block_timeout
+        if recovery_candidate and not intrusive_control:
+            summary = "检测到流水线失联；Health Monitor 默认不主动催办内部协作，请先核对 OpenClaw 原生状态。"
+            STORE.record_task_event(
+                task["task_id"],
+                "ops_attention_needed",
+                {
+                    "reason": "pipeline_recovery_needed",
+                    "control_state": control_state,
+                    "pipeline_recovery": recovery,
+                    "idle": idle,
+                    "total": total,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            if action:
+                details = dict(action.get("details") or {})
+                details.update(
+                    {
+                        "policy": "observe_only",
+                        "truth_level": "derived",
+                        "pipeline_recovery": recovery,
+                    }
+                )
+                STORE.update_control_action(
+                    int(action["id"]),
+                    status="pending",
+                    last_followup_at=now,
+                    summary=summary,
+                    control_state=control_state,
+                    details=details,
+                )
+            record_change_log(
+                "anomaly",
+                "检测到流水线失联，需要人工核对 OpenClaw 原生状态",
+                {
+                    "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                    "task_id": task["task_id"],
+                    "control_state": control_state,
+                    "pipeline_recovery": recovery,
+                    "idle": idle,
+                    "duration": total,
+                    "truth_level": "derived",
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "ops_attention_needed",
+                    "control_state": control_state,
+                    "pipeline_recovery": recovery,
+                }
+            )
+            continue
+
+        if recovery_candidate:
+            session_key = str(task.get("session_key") or "")
+            question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+            if now - last_followup_at < cooldown:
+                continue
+            next_attempts = attempts + 1
+            if not session_key:
+                STORE.update_task_fields(
+                    task["task_id"],
+                    status="blocked",
+                    current_stage="等待恢复执行",
+                    blocked_reason="pipeline_recovery_failed",
+                    updated_at=now,
+                )
+                STORE.record_task_event(
+                    task["task_id"],
+                    "recovery_failed",
+                    {
+                        "recovery_kind": recovery.get("kind") or "",
+                        "rebind_target": recovery.get("rebind_target") or "",
+                        "stale_subagent": recovery.get("stale_subagent") or "",
+                        "attempt": next_attempts,
+                        "error_kind": "missing_session_key",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                if action:
+                    details = dict(action.get("details") or {})
+                    details.update(
+                        {
+                            "recovery_kind": recovery.get("kind") or "",
+                            "recovery_attempt": next_attempts,
+                            "recovery_error": "missing_session_key",
+                        }
+                    )
+                    STORE.update_control_action(
+                        int(action["id"]),
+                        status="blocked",
+                        attempts=next_attempts,
+                        last_followup_at=now,
+                        last_error="missing_session_key",
+                        summary="流水线恢复失败：缺少 session_key，无法自动恢复。",
+                        control_state=control_state,
+                        details=details,
+                    )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "blocked",
+                        "blocked_reason": "pipeline_recovery_failed",
+                        "control_state": control_state,
+                        "pipeline_recovery": recovery,
+                    }
+                )
+                continue
+
+            recovery_message = build_pipeline_recovery_message(
+                task,
+                control,
+                recovery,
+                idle=idle,
+                total=total,
+            )
+            STORE.record_task_event(
+                task["task_id"],
+                "recovery_started",
+                {
+                    "recovery_kind": recovery.get("kind") or "",
+                    "last_dispatched_agent": recovery.get("last_dispatched_agent") or "",
+                    "stale_subagent": recovery.get("stale_subagent") or "",
+                    "rebind_target": recovery.get("rebind_target") or "",
+                    "attempt": next_attempts,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            ok, error_kind = send_guardian_followup(session_key, recovery_message)
+            details = dict((action or {}).get("details") or {})
+            details.update(
+                {
+                    "recovery_kind": recovery.get("kind") or "",
+                    "recovery_attempt": next_attempts,
+                    "recovery_error": error_kind or "",
+                }
+            )
+            if ok:
+                STORE.update_task_fields(
+                    task["task_id"],
+                    status="running",
+                    current_stage=f"恢复中:{recovery.get('kind') or 'pipeline'}",
+                    blocked_reason="",
+                    updated_at=now,
+                )
+                STORE.record_task_event(
+                    task["task_id"],
+                    "recovery_succeeded",
+                    {
+                        "recovery_kind": recovery.get("kind") or "",
+                        "last_dispatched_agent": recovery.get("last_dispatched_agent") or "",
+                        "stale_subagent": recovery.get("stale_subagent") or "",
+                        "rebind_target": recovery.get("rebind_target") or "",
+                        "attempt": next_attempts,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                if action:
+                    STORE.update_control_action(
+                        int(action["id"]),
+                        status="sent",
+                        attempts=next_attempts,
+                        last_followup_at=now,
+                        last_error="",
+                        summary="守护系统已自动发起流水线恢复，等待新的结构化回执。",
+                        control_state=control_state,
+                        details=details,
+                    )
+                record_change_log(
+                    "pipeline",
+                    "守护控制面已自动发起流水线恢复",
+                    {
+                        "question": question,
+                        "task_id": task["task_id"],
+                        "control_state": control_state,
+                        "pipeline_recovery": recovery,
+                        "idle": idle,
+                        "duration": total,
+                    },
+                )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "recovery_sent",
+                        "control_state": control_state,
+                        "pipeline_recovery": recovery,
+                    }
+                )
+            else:
+                STORE.record_task_event(
+                    task["task_id"],
+                    "recovery_failed",
+                    {
+                        "recovery_kind": recovery.get("kind") or "",
+                        "last_dispatched_agent": recovery.get("last_dispatched_agent") or "",
+                        "stale_subagent": recovery.get("stale_subagent") or "",
+                        "rebind_target": recovery.get("rebind_target") or "",
+                        "attempt": next_attempts,
+                        "error_kind": error_kind or "unknown",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                fatal_recovery = next_attempts >= max_attempts or error_kind in {
+                    "session_lock",
+                    "model_auth",
+                    "model_unavailable",
+                    "model_pool_failed",
+                    "unknown",
+                }
+                if fatal_recovery:
+                    STORE.update_task_fields(
+                        task["task_id"],
+                        status="blocked",
+                        current_stage="等待恢复执行",
+                        blocked_reason="pipeline_recovery_failed",
+                        updated_at=now,
+                    )
+                if action:
+                    STORE.update_control_action(
+                        int(action["id"]),
+                        status="blocked" if fatal_recovery else "pending",
+                        attempts=next_attempts,
+                        last_followup_at=now,
+                        last_error=error_kind or "",
+                        summary="守护系统恢复流水线失败。" if fatal_recovery else "守护系统恢复流水线失败，将继续重试。",
+                        control_state=control_state,
+                        details=details,
+                    )
+                if fatal_recovery and should_record_control_plane_anomaly(task["task_id"], "pipeline_recovery_failed"):
+                    record_change_log(
+                        "anomaly",
+                        "守护控制面恢复流水线失败，任务已阻塞",
+                        {
+                            "question": question,
+                            "task_id": task["task_id"],
+                            "control_state": control_state,
+                            "blocked_reason": "pipeline_recovery_failed",
+                            "pipeline_recovery": recovery,
+                            "error_kind": error_kind or "",
+                            "idle": idle,
+                            "duration": total,
+                        },
+                    )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "blocked" if fatal_recovery else "recovery_retry_pending",
+                        "blocked_reason": "pipeline_recovery_failed" if fatal_recovery else "",
+                        "control_state": control_state,
+                        "pipeline_recovery": recovery,
+                    }
+                )
+            continue
+
         if should_block:
             blocked_reason = "missing_pipeline_receipt"
             if attempts >= max_attempts and not task.get("session_key"):
@@ -1792,24 +3206,27 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-            record_change_log(
-                "anomaly",
-                "守护控制面判定任务阻塞",
-                {
-                    "question": task.get("question") or task.get("last_user_message") or "未知任务",
-                    "control_state": control_state,
-                    "idle": idle,
-                    "duration": total,
-                    "blocked_reason": blocked_reason,
-                    "task_id": task["task_id"],
-                },
-            )
+            if should_record_control_plane_anomaly(task["task_id"], blocked_reason):
+                record_change_log(
+                    "anomaly",
+                    "守护控制面判定任务阻塞",
+                    {
+                        "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                        "control_state": control_state,
+                        "idle": idle,
+                        "duration": total,
+                        "blocked_reason": blocked_reason,
+                        "pipeline_recovery": recovery,
+                        "task_id": task["task_id"],
+                    },
+                )
             outcomes.append(
                 {
                     "task_id": task["task_id"],
                     "action": "blocked",
                     "blocked_reason": blocked_reason,
                     "control_state": control_state,
+                    "pipeline_recovery": recovery,
                 }
             )
             if action:
@@ -1827,6 +3244,59 @@ def enforce_task_registry_control_plane() -> list[dict]:
         session_key = str(task.get("session_key") or "")
         question = str(task.get("question") or task.get("last_user_message") or "未知任务")
         stage = str(task.get("current_stage") or "处理中")
+        if not intrusive_control:
+            summary = "Health Monitor 已记录缺失证据，但默认不主动催办 OpenClaw 内部流水线。"
+            STORE.record_task_event(
+                task["task_id"],
+                "ops_attention_needed",
+                {
+                    "reason": "derived_missing_evidence",
+                    "control_state": control_state,
+                    "missing_receipts": control.get("missing_receipts") or [],
+                    "idle": idle,
+                    "total": total,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            if action:
+                details = dict(action.get("details") or {})
+                details.update(
+                    {
+                        "policy": "observe_only",
+                        "truth_level": "derived",
+                        "missing_receipts": control.get("missing_receipts") or [],
+                    }
+                )
+                STORE.update_control_action(
+                    int(action["id"]),
+                    status="pending",
+                    last_followup_at=now,
+                    summary=summary,
+                    control_state=control_state,
+                    details=details,
+                )
+            record_change_log(
+                "pipeline",
+                "控制面记录到缺失证据，建议核对 OpenClaw 原生状态",
+                {
+                    "question": question,
+                    "task_id": task["task_id"],
+                    "control_state": control_state,
+                    "missing_receipts": control.get("missing_receipts") or [],
+                    "idle": idle,
+                    "duration": total,
+                    "truth_level": "derived",
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "ops_attention_needed",
+                    "control_state": control_state,
+                }
+            )
+            continue
+
         if not session_key:
             STORE.update_task_fields(
                 task["task_id"],
@@ -1846,6 +3316,20 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "timestamp": datetime.now().isoformat(),
                 },
             )
+            if should_record_control_plane_anomaly(task["task_id"], "control_followup_failed"):
+                record_change_log(
+                    "anomaly",
+                    "守护控制面无法继续催办，任务已阻塞",
+                    {
+                        "question": question,
+                        "task_id": task["task_id"],
+                        "control_state": control_state,
+                        "blocked_reason": "control_followup_failed",
+                        "pipeline_recovery": recovery,
+                        "idle": idle,
+                        "duration": total,
+                    },
+                )
             outcomes.append(
                 {
                     "task_id": task["task_id"],
@@ -1883,9 +3367,10 @@ def enforce_task_registry_control_plane() -> list[dict]:
         STORE.record_task_event(
             task["task_id"],
             "control_followup",
-            {
-                "control_state": control_state,
-                "attempt": next_attempts,
+                {
+                    "control_state": control_state,
+                    "pipeline_recovery": recovery,
+                    "attempt": next_attempts,
                 "idle": idle,
                 "total": total,
                 "sent": ok,
@@ -1901,6 +3386,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "question": question,
                     "task_id": task["task_id"],
                     "control_state": control_state,
+                    "pipeline_recovery": recovery,
                     "idle": idle,
                     "duration": total,
                 },
@@ -1938,19 +3424,21 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-            record_change_log(
-                "anomaly",
-                "守护控制面催办失败，任务已标记阻塞",
-                {
-                    "question": question,
-                    "task_id": task["task_id"],
-                    "control_state": control_state,
-                    "blocked_reason": "control_followup_failed",
-                    "error_kind": error_kind or "",
-                    "idle": idle,
-                    "duration": total,
-                },
-            )
+            if should_record_control_plane_anomaly(task["task_id"], "control_followup_failed"):
+                record_change_log(
+                    "anomaly",
+                    "守护控制面催办失败，任务已标记阻塞",
+                    {
+                        "question": question,
+                        "task_id": task["task_id"],
+                        "control_state": control_state,
+                        "blocked_reason": "control_followup_failed",
+                        "pipeline_recovery": recovery,
+                        "error_kind": error_kind or "",
+                        "idle": idle,
+                        "duration": total,
+                    },
+                )
             outcomes.append(
                 {
                     "task_id": task["task_id"],
@@ -2068,27 +3556,91 @@ def notify(title: str, message: str, level: str = "info"):
 def restart_gateway():
     """重启 Gateway"""
     spec = current_env_spec()
+    _record_restart_event(
+        source="guardian",
+        target=spec["id"],
+        stage="started",
+        status="running",
+        details={"reason": "guardian_restart_gateway"},
+    )
     log(f"尝试重启 Gateway ({spec['id']})...")
 
     if spec["id"] == "official":
+        run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+        run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
         code, stdout, stderr = run_args([str(OFFICIAL_MANAGER), "start"], timeout=300)
         if code == 0 and check_gateway_health():
+            commit_active_binding("official")
+            _record_restart_event(
+                source="guardian",
+                target="official",
+                stage="completed",
+                status="succeeded",
+                details={"message": "官方验证版 Gateway 重启成功"},
+            )
+            record_change_log("restart", "官方验证版 Gateway 重启成功", {"target_env": "official"})
             log("官方验证版 Gateway 重启成功")
             return True
+        _record_restart_event(
+            source="guardian",
+            target="official",
+            stage="completed",
+            status="failed",
+            details={"error": (stderr or stdout).strip(), "message": "官方验证版 Gateway 重启失败"},
+        )
+        record_change_log(
+            "restart",
+            "官方验证版 Gateway 重启失败",
+            {"target_env": "official", "error": (stderr or stdout).strip()},
+        )
         log(f"官方验证版 Gateway 重启失败: {(stderr or stdout).strip()}", "ERROR")
         return False
 
+    run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
     run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
     code, stdout, stderr = run_args([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
+        _record_restart_event(
+            source="guardian",
+            target="primary",
+            stage="completed",
+            status="failed",
+            details={"error": (stderr or stdout).strip(), "message": "主用版 Gateway 重启失败"},
+        )
+        record_change_log(
+            "restart",
+            "主用版 Gateway 重启失败",
+            {"target_env": "primary", "error": (stderr or stdout).strip()},
+        )
         log(f"主用版 Gateway 重启失败: {(stderr or stdout).strip()}", "ERROR")
         return False
 
     time.sleep(5)
     if check_gateway_health():
+        commit_active_binding("primary")
+        _record_restart_event(
+            source="guardian",
+            target="primary",
+            stage="completed",
+            status="succeeded",
+            details={"message": "主用版 Gateway 重启成功"},
+        )
+        record_change_log("restart", "主用版 Gateway 重启成功", {"target_env": "primary"})
         log("Gateway 重启成功")
         return True
 
+    _record_restart_event(
+        source="guardian",
+        target="primary",
+        stage="completed",
+        status="failed",
+        details={"error": "健康检查未通过", "message": "主用版 Gateway 重启失败"},
+    )
+    record_change_log(
+        "restart",
+        "主用版 Gateway 重启失败",
+        {"target_env": "primary", "error": "健康检查未通过"},
+    )
     log("Gateway 重启失败: 健康检查未通过", "ERROR")
     return False
 
@@ -2201,15 +3753,19 @@ def save_stable_version():
 
 
 def capture_snapshot(label: str) -> bool:
-    """为当前 OpenClaw 关键配置创建快照。"""
+    """为 primary/official OpenClaw 关键配置创建快照。"""
     if not CONFIG.get("ENABLE_SNAPSHOT_RECOVERY", True):
         return False
-    snapshot_dir = SNAPSHOTS.create_snapshot(label)
-    if snapshot_dir is None:
-        return False
+    created: list[str] = []
     keep = int(CONFIG.get("SNAPSHOT_RETENTION", 10))
-    SNAPSHOTS.prune(keep)
-    record_change_log("snapshot", f"创建配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
+    for env_id, manager in snapshot_targets():
+        snapshot_dir = manager.create_snapshot(f"{label}-{env_id}")
+        manager.prune(keep)
+        if snapshot_dir is not None:
+            created.append(snapshot_dir.name)
+    if not created:
+        return False
+    record_change_log("snapshot", "创建配置快照", {"snapshots": created})
     return True
 
 
@@ -2241,6 +3797,33 @@ def record_change_log(change_type: str, message: str, details: Optional[dict] = 
             json.dump(logs, f, indent=2, ensure_ascii=False)
     except:
         pass
+
+
+def _record_restart_event(
+    *,
+    source: str,
+    target: str,
+    stage: str,
+    status: str,
+    details: Optional[dict[str, Any]] = None,
+) -> None:
+    try:
+        STORE.append_runtime_event(
+            f"restart_events:{target}",
+            {
+                "source": source,
+                "target": target,
+                "stage": stage,
+                "status": status,
+                "details": details or {},
+                "timestamp_iso": datetime.now().isoformat(),
+            },
+            limit=100,
+        )
+    except Exception:
+        pass
+
+
 def main():
     raise_nofile_limit()
     load_config()
@@ -2266,6 +3849,7 @@ def main():
             # 进程状态
             process_running = check_process_running()
             gateway_healthy = check_gateway_health()
+            enforce_single_active_runtime_guard()
             
             now = time.time()
             

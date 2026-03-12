@@ -258,6 +258,17 @@ class MonitorStateStore:
     def save_runtime_value(self, key: str, value: Any) -> None:
         self._save_kv("runtime", key, value)
 
+    def append_runtime_event(self, key: str, event: dict[str, Any], *, limit: int = 100) -> list[dict[str, Any]]:
+        events = self.load_runtime_value(key, [])
+        if not isinstance(events, list):
+            events = []
+        normalized = dict(event or {})
+        normalized.setdefault("timestamp", int(time.time()))
+        events.append(normalized)
+        trimmed = events[-limit:]
+        self.save_runtime_value(key, trimmed)
+        return trimmed
+
     def record_change(self, change_type: str, message: str, details: dict[str, Any] | None = None) -> None:
         details = details or {}
         now = time.localtime()
