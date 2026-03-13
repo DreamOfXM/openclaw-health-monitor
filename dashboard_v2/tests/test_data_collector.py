@@ -101,6 +101,28 @@ class TestDataCollector(unittest.TestCase):
 
         self.assertEqual(context["active_env"], "primary")
         self.assertEqual(context["selected_env"]["id"], "primary")
+
+    def test_get_environment_exposes_binding_audit(self):
+        fake_legacy = mock.Mock()
+        fake_legacy.list_openclaw_environments.return_value = []
+        fake_legacy.check_gateway_health_for_env.return_value = True
+        fake_legacy.build_bootstrap_status.return_value = {}
+        fake_legacy.build_context_lifecycle_readiness.return_value = {"status": "ready"}
+        fake_legacy.build_environment_promotion_summary.return_value = {}
+        fake_legacy.build_shared_state_snapshot.return_value = {
+            "binding_audit": {"active_env": "primary", "switch_state": "committed"}
+        }
+        context = {
+            "legacy": fake_legacy,
+            "config": {},
+            "active_env": "primary",
+            "selected_env": {"id": "primary"},
+            "task_registry": {},
+        }
+        with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
+            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}]):
+            env = self.collector._fetch_environment_data()
+        self.assertEqual(env["binding_audit"]["active_env"], "primary")
     
     def test_get_tasks(self):
         """测试获取任务数据"""

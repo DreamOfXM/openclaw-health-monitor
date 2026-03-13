@@ -281,6 +281,7 @@ class DataCollector:
             context_readiness = legacy.build_context_lifecycle_readiness(config)
             watcher_summary = self._shared_state("watcher-summary.json", {})
             restart_runtime_status = self._shared_state("restart-runtime-status.json", {})
+            shared_state = legacy.build_shared_state_snapshot(config)
             environment_integrity = []
             detect_integrity = getattr(legacy, "detect_environment_inconsistencies", None)
             if callable(detect_integrity):
@@ -304,6 +305,7 @@ class DataCollector:
                 },
                 "watcher_summary": watcher_summary,
                 "restart_runtime_status": restart_runtime_status,
+                "binding_audit": shared_state.get("binding_audit") or {},
                 "environment_integrity": environment_integrity,
                 "promotion_summary": promotion_summary,
                 "timestamp": datetime.now().isoformat(),
@@ -321,6 +323,7 @@ class DataCollector:
                 "config_drift": {"mode": "merge_missing", "applied": [], "preserved": [], "status": "error"},
                 "watcher_summary": {},
                 "restart_runtime_status": {},
+                "binding_audit": {},
                 "environment_integrity": [],
                 "promotion_summary": {},
                 "error": str(exc),

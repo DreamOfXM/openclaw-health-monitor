@@ -155,6 +155,30 @@
                 </div>
             </section>
 
+            <section class="manage-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">🚨</span>
+                        绑定巡检
+                    </h2>
+                    <span class="badge badge-danger">高优先级</span>
+                </div>
+
+                <div class="snapshot-card">
+                    <div class="snapshot-create">
+                        <h4>DB 绑定 vs 实际监听</h4>
+                        <p class="hint">优先检查环境绑定漂移、未绑定 listener 和重启后 listener 未拉起问题</p>
+                        <div id="binding-audit-summary" class="env-status-text">加载中...</div>
+                    </div>
+                    <div class="snapshot-list">
+                        <h4>高优先级异常</h4>
+                        <div id="binding-alerts-container" class="snapshots-container">
+                            <div class="loading">加载绑定巡检...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- 配置管理 -->
             <section class="manage-section">
                 <div class="section-header">

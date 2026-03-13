@@ -1321,6 +1321,32 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertTrue(audit)
             self.assertEqual(audit[-1]["env_id"], "official")
 
+    @mock.patch("guardian.run_args")
+    @mock.patch("guardian.get_listener_pid")
+    def test_patrol_active_binding_runtime_records_unbound_listener(self, get_listener_pid, run_args):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg = {
+                **guardian.DEFAULT_CONFIG,
+                "OPENCLAW_HOME": str(base / ".openclaw"),
+                "OPENCLAW_CODE": str(base / "code-primary"),
+                "OPENCLAW_OFFICIAL_STATE": str(base / ".openclaw-official"),
+                "OPENCLAW_OFFICIAL_CODE": str(base / "code-official"),
+                "GATEWAY_PORT": 18789,
+                "OPENCLAW_OFFICIAL_PORT": 19021,
+            }
+            store = MonitorStateStore(base)
+            get_listener_pid.side_effect = [1111, 2222, None]
+            with mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "CONFIG", cfg), \
+                mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "active_env_id", return_value="primary"):
+                issues = guardian.patrol_active_binding_runtime()
+            self.assertTrue(issues)
+            self.assertEqual(issues[0]["code"], "unbound_listener_official")
+            audit = store.load_runtime_value("binding_audit_events", [])
+            self.assertTrue(audit)
+
     def test_sync_shared_context_watcher_tasks_imports_completed_and_dlq(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

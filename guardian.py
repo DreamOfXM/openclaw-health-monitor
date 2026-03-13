@@ -2421,6 +2421,89 @@ def enforce_single_active_runtime_guard() -> list[dict[str, Any]]:
     return issues
 
 
+def _terminate_pid(pid: Optional[int], label: str, timeout: float = 8.0) -> tuple[bool, str]:
+    if pid is None:
+        return True, f"{label} listener 未运行"
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True, f"{label} listener 已退出"
+    except Exception as exc:
+        return False, f"停止 {label} listener 失败: {exc}"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True, f"已终止 {label} listener(pid={pid})"
+        except Exception:
+            break
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True, f"已终止 {label} listener(pid={pid})"
+    except Exception as exc:
+        return False, f"强制终止 {label} listener 失败: {exc}"
+    return False, f"{label} listener 仍然存活"
+
+
+def patrol_active_binding_runtime() -> list[dict[str, Any]]:
+    specs = all_env_specs()
+    bound_env = active_env_id()
+    issues: list[dict[str, Any]] = []
+    for env_id, spec in specs.items():
+        pid = get_listener_pid(int(spec["port"]))
+        if env_id == bound_env:
+            if pid is None:
+                issues.append(
+                    {
+                        "code": f"bound_env_not_running_{env_id}",
+                        "message": f"DB 绑定环境 {env_id} 未监听",
+                        "details": {"env_id": env_id, "gateway_port": spec["port"]},
+                    }
+                )
+            continue
+        if pid is None:
+            continue
+        run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120) if env_id == "official" else run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+        time.sleep(1)
+        pid_after = get_listener_pid(int(spec["port"]))
+        if pid_after is not None:
+            killed, result = _terminate_pid(pid_after, env_id)
+        else:
+            killed, result = True, f"已停止未绑定环境 {env_id} listener"
+        issues.append(
+            {
+                "code": f"unbound_listener_{env_id}",
+                "message": f"未绑定环境 {env_id} 仍在监听，已执行清退",
+                "details": {"env_id": env_id, "gateway_port": spec["port"], "result": result, "killed": killed},
+            }
+        )
+    if issues:
+        seen = STORE.load_runtime_value("binding_patrol_seen", {})
+        now = int(time.time())
+        for issue in issues:
+            code = str(issue.get("code") or "binding_patrol")
+            if code not in seen or now - int(seen.get(code, 0)) > 300:
+                seen[code] = now
+                record_change_log("anomaly", str(issue.get("message") or "binding patrol"), issue.get("details") or {})
+                notify("绑定巡检告警", str(issue.get("message") or "检测到未绑定 listener"), "error")
+            STORE.append_runtime_event(
+                "binding_audit_events",
+                {
+                    "source": "guardian.patrol",
+                    "env_id": issue.get("details", {}).get("env_id") or "",
+                    "status": issue.get("code") or "observed",
+                    "details": issue.get("details") or {},
+                    "timestamp_iso": datetime.now().isoformat(),
+                },
+                limit=200,
+            )
+        STORE.save_runtime_value("binding_patrol_seen", trim_runtime_seen(seen, keep=50))
+    return issues
+
+
 def collect_open_runtime_dispatches(lines: list[str]) -> list[dict[str, Any]]:
     """Track currently open dispatches and their most recent visible progress."""
     question_candidates: list[tuple[int, str]] = []
@@ -3974,7 +4057,8 @@ def main():
             process_running = check_process_running()
             gateway_healthy = check_gateway_health()
             enforce_single_active_runtime_guard()
-            
+            patrol_active_binding_runtime()
+
             now = time.time()
             
             # 状态变化检测

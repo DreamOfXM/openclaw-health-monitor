@@ -33,8 +33,43 @@ async function loadManageData() {
     await Promise.all([
         loadPromotionStatus(),
         loadSnapshots(),
-        loadConfig()
+        loadConfig(),
+        loadBindingAlerts()
     ]);
+}
+
+async function loadBindingAlerts() {
+    try {
+        const response = await API.getEnvironment(true);
+        if (!response.success) return;
+        const envData = response.data || {};
+        const integrity = envData.environment_integrity || [];
+        const bindingAudit = envData.binding_audit || {};
+        const summaryEl = document.getElementById('binding-audit-summary');
+        const container = document.getElementById('binding-alerts-container');
+        if (summaryEl) {
+            const activeEnv = (envData.active_environment || '--').toUpperCase();
+            const boundEnv = (bindingAudit.active_env || envData.active_environment || '--').toUpperCase();
+            const switchState = bindingAudit.switch_state || 'unknown';
+            summaryEl.textContent = `当前激活: ${activeEnv} | DB绑定: ${boundEnv} | switch_state: ${switchState}`;
+        }
+        if (!container) return;
+        if (!integrity.length) {
+            container.innerHTML = '<div class="empty">未发现绑定漂移或 listener 异常</div>';
+            return;
+        }
+        container.innerHTML = integrity.map(issue => `
+            <div class="snapshot-item">
+                <div class="snapshot-info">
+                    <span class="snapshot-name">${issue.title || issue.code || '绑定异常'}</span>
+                    <span class="snapshot-date">${issue.severity === 'error' ? 'ERROR' : 'WARN'}</span>
+                </div>
+                <div class="env-status-text">${issue.detail || ''}</div>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('加载绑定巡检失败:', error);
+    }
 }
 
 async function loadPromotionStatus() {
