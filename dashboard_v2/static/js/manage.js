@@ -34,14 +34,8 @@ function initManage() {
 
 async function loadManageData() {
     try {
-        const [envResponse, healthResponse, tasksResponse] = await Promise.all([
-            API.getEnvironment(true),
-            API.getHealthScore(false),
-            API.getTasks(false)
-        ]);
+        const envResponse = await API.getEnvironment(true);
         manageEnvironmentData = envResponse.success ? envResponse.data : null;
-        manageHealthScoreData = healthResponse.success ? healthResponse.data : null;
-        manageTaskData = tasksResponse.success ? tasksResponse.data : null;
     } catch (error) {
         console.error('加载管理页主数据失败:', error);
     }
@@ -52,6 +46,22 @@ async function loadManageData() {
         loadConfig(),
         loadBindingAlerts()
     ]);
+
+    void refreshManageSecondaryData();
+}
+
+async function refreshManageSecondaryData() {
+    try {
+        const [healthResponse, tasksResponse] = await Promise.all([
+            API.getHealthScore(false),
+            API.getTasks(false)
+        ]);
+        manageHealthScoreData = healthResponse.success ? healthResponse.data : null;
+        manageTaskData = tasksResponse.success ? tasksResponse.data : null;
+        await loadPromotionStatus();
+    } catch (error) {
+        console.error('加载管理页次级数据失败:', error);
+    }
 }
 
 async function loadBindingAlerts() {
@@ -117,6 +127,8 @@ async function loadPromotionStatus() {
             allPassed = false;
         } else {
             // Official 在运行，检查所有条件
+            const healthReady = Boolean(manageHealthScoreData);
+            const taskReady = Boolean(manageTaskData);
             checks = [
                 {
                     name: 'Official 环境运行正常',
@@ -128,14 +140,16 @@ async function loadPromotionStatus() {
                 },
                 {
                     name: '健康评分 > 80',
-                    passed: Number(healthData.score || 0) >= 80
+                    passed: healthReady ? Number(healthData.score || 0) >= 80 : false,
+                    message: healthReady ? '' : '正在加载评分'
                 },
                 {
                     name: '无阻塞任务',
-                    passed: Number(taskData.blocked_count || 0) === 0
+                    passed: taskReady ? Number(taskData.blocked_count || 0) === 0 : false,
+                    message: taskReady ? '' : '正在加载任务状态'
                 }
             ];
-            allPassed = checks.every(check => check.passed) && Boolean(promotionSummary.safe_to_promote);
+            allPassed = healthReady && taskReady && checks.every(check => check.passed) && Boolean(promotionSummary.safe_to_promote);
         }
 
         const promotionStatusEl = document.getElementById('promotion-status');
