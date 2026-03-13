@@ -1792,12 +1792,54 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
     return captured
 
 
-def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
-    """Transitional bridge: maintain legacy reflection state during migration.
+def promote_learning_to_memory(learning: dict[str, Any]) -> None:
+    """将 promoted learning 写入 MEMORY.md 和 memory/YYYY-MM-DD.md
+    
+    自我学习进化闭环的核心函数：
+    - 自动沉淀学习结果到 MEMORY.md
+    - 自动生成每日反思记录
+    - 不需要人工搬运
+    """
+    category = learning.get("category", "misc")
+    title = learning.get("title", "")
+    detail = learning.get("detail", "")
+    evidence = learning.get("evidence", {})
+    
+    # 写入 memory/YYYY-MM-DD.md
+    today = datetime.now().strftime("%Y-%m-%d")
+    memory_dir = BASE_DIR / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    memory_file = memory_dir / f"{today}.md"
+    
+    with open(memory_file, "a", encoding="utf-8") as f:
+        f.write(f"\n## {category}: {title}\n\n")
+        f.write(f"{detail}\n\n")
+        if evidence:
+            f.write(f"**证据**:\n```\n{json.dumps(evidence, ensure_ascii=False, indent=2)}\n```\n\n")
+    
+    # 写入 MEMORY.md
+    main_memory = BASE_DIR / "MEMORY.md"
+    if not main_memory.exists():
+        main_memory.write_text("# MEMORY.md\n\n", encoding="utf-8")
+    
+    with open(main_memory, "a", encoding="utf-8") as f:
+        f.write(f"\n### {category}\n\n")
+        f.write(f"- **{title}**: {detail}\n")
 
-    The final ownership model requires OpenClaw to run reflection/promote via
-    its own cron. Guardian should eventually record and verify reflection runs,
-    not produce canonical promotion decisions.
+
+def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
+    """自我学习进化闭环的核心函数。
+    
+    功能：
+    1. 检查过去 24 小时的 learnings
+    2. 自动 promote 达到阈值的 learnings
+    3. 将 promoted learnings 写入 MEMORY.md 和 memory/YYYY-MM-DD.md
+    4. 根据学习结果自动改进系统
+    
+    边界原则：
+    - 这是自我学习进化的核心闭环
+    - 不需要人工干预
+    - 自动沉淀、自动改进
     """
     if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
         return {"status": "disabled", "promoted": 0, "reviewed": 0}
@@ -1824,6 +1866,10 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
             category = str(learning.get("category") or "")
             promoted_target = "contract" if category == "control_plane" else "rule"
             promoted += 1
+            
+            # 自动沉淀到 MEMORY.md 和 memory/YYYY-MM-DD.md
+            promote_learning_to_memory(learning)
+            
         STORE.upsert_learning(
             learning_key=str(learning.get("learning_key") or ""),
             env_id=str(learning.get("env_id") or current_env_spec()["id"]),
