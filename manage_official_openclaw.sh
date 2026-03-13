@@ -219,6 +219,27 @@ from pathlib import Path
 
 path = Path("$target_state") / "openclaw.json"
 data = json.loads(path.read_text(encoding="utf-8"))
+
+def rewrite_path_string(value: str, source_root: str, target_root: str) -> str:
+    if value == source_root:
+        return target_root
+    prefix = source_root + "/"
+    if value.startswith(prefix):
+        return target_root + "/" + value[len(prefix):]
+    return value
+
+def rewrite_payload(value):
+    if isinstance(value, str):
+        value = rewrite_path_string(value, "$source_state", "$target_state")
+        value = rewrite_path_string(value, "$source_code", "$target_code")
+        return value
+    if isinstance(value, list):
+        return [rewrite_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: rewrite_payload(item) for key, item in value.items()}
+    return value
+
+data = rewrite_payload(data)
 gateway = data.setdefault("gateway", {})
 auth = gateway.setdefault("auth", {})
 auth["token"] = secrets.token_hex(24)

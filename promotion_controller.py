@@ -111,6 +111,18 @@ def build_preflight(environments: list[dict[str, Any]], task_registry: dict[str,
     }
 
 
+def rewrite_path_string(value: str, source_root: Path, target_root: Path) -> str:
+    source = str(source_root)
+    target = str(target_root)
+    if value == source:
+        return target
+    prefix = f"{source}{os.sep}"
+    if value.startswith(prefix):
+        suffix = value[len(prefix):]
+        return str(Path(target) / suffix)
+    return value
+
+
 class PromotionController:
     def __init__(
         self,
@@ -138,7 +150,9 @@ class PromotionController:
 
     def _rewrite_value(self, value: Any, source_home: Path, target_home: Path, source_code: Path, target_code: Path) -> Any:
         if isinstance(value, str):
-            return value.replace(str(source_home), str(target_home)).replace(str(source_code), str(target_code))
+            value = rewrite_path_string(value, source_home, target_home)
+            value = rewrite_path_string(value, source_code, target_code)
+            return value
         if isinstance(value, list):
             return [self._rewrite_value(v, source_home, target_home, source_code, target_code) for v in value]
         if isinstance(value, dict):
