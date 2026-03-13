@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, List
 from monitor_config import (
     DEFAULT_CONFIG,
     get_env_specs as get_registered_env_specs,
+    is_webhook_url_allowed,
     load_config as load_shared_config,
     read_active_binding,
     write_active_binding,
@@ -98,7 +99,8 @@ def active_binding() -> dict[str, Any]:
 
 
 def active_env_id() -> str:
-    env_id = str(active_binding().get("active_env") or CONFIG.get("ACTIVE_OPENCLAW_ENV", "primary")).strip() or "primary"
+    runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
+    env_id = str((runtime_binding or {}).get("env_id") or "primary").strip() or "primary"
     return env_id if env_id in {"primary", "official"} else "primary"
 
 
@@ -1334,6 +1336,18 @@ def validate_protocol_event(
 
 
 def build_task_id(session_key: str, timestamp: str) -> str:
+    """
+    控制面主键生成函数：生成 task_id。
+
+    边界原则：
+    - task_id 由 helper 控制面生成，不由 OpenClaw 自己生成
+    - session_key -> task_id 绑定由 helper 控制
+    - OpenClaw 只提供 session_key（运行上下文），不决定 task_id
+
+    字段归属：
+    - task_id: helper 生成并拥有
+    - session_key: OpenClaw 提供，helper 持久化绑定
+    """
     raw = f"{session_key}|{timestamp}".encode("utf-8", errors="ignore")
     return hashlib.sha1(raw).hexdigest()[:16]
 
@@ -1354,7 +1368,22 @@ def valid_task_question(text: str | None) -> bool:
 
 
 def write_task_registry_snapshot() -> None:
-    """Persist a compact task-registry summary for external consumers."""
+    """
+    控制面事实导出函数：持久化任务注册表快照。
+
+    边界原则：
+    - current-task-facts.json 由 helper 导出，不由 OpenClaw 自报
+    - 控制面状态由 helper 基于证据判定，不信自由文本
+    - completed != delivered，由 helper 确认
+
+    字段归属：
+    - current-task-facts.json: helper 导出
+    - task-registry-summary.json: helper 导出
+    - approved_summary: helper 生成
+    - control_state: helper 判定
+    - evidence_level: helper 计算
+    - missing_receipts: helper 计算
+    """
     if not CONFIG.get("ENABLE_TASK_REGISTRY", True):
         return
     current_spec = current_env_spec()
@@ -1819,7 +1848,21 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
 
 
 def sync_runtime_task_registry(lines: list[str]) -> None:
-    """Project runtime log activity into a persistent task registry."""
+    """
+    控制面事实提取函数：从运行时日志中提取任务注册表。
+
+    边界原则：
+    - OpenClaw 发 receipt / progress / final（执行面主张）
+    - helper 从日志中提取这些主张，注册到控制面
+    - helper 判断这些主张是否足以升级为控制面事实
+    - OpenClaw 不能自己注册自己，必须由 helper 提取
+
+    字段归属：
+    - task_id: helper 生成
+    - session_key -> task_id 绑定: helper 控制
+    - task_events: helper 记录
+    - task_contracts: helper 存储
+    """
     if not CONFIG.get("ENABLE_TASK_REGISTRY", True):
         return
 
@@ -3739,6 +3782,9 @@ def notify(title: str, message: str, level: str = "info"):
     # 钉钉
     if CONFIG.get("DINGTALK_WEBHOOK"):
         try:
+            allowed, reason = is_webhook_url_allowed(CONFIG["DINGTALK_WEBHOOK"], CONFIG)
+            if not allowed:
+                raise ValueError(reason)
             post_json(
                 CONFIG["DINGTALK_WEBHOOK"],
                 {
@@ -3753,6 +3799,9 @@ def notify(title: str, message: str, level: str = "info"):
     # 飞书
     if CONFIG.get("FEISHU_WEBHOOK"):
         try:
+            allowed, reason = is_webhook_url_allowed(CONFIG["FEISHU_WEBHOOK"], CONFIG)
+            if not allowed:
+                raise ValueError(reason)
             post_json(
                 CONFIG["FEISHU_WEBHOOK"],
                 {"msg_type": "text", "content": f"{title}\n{message}"},

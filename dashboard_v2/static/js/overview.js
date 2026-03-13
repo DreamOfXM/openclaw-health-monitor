@@ -6,8 +6,9 @@ document.addEventListener('DOMContentLoaded', () => {
     initOverview();
 });
 
+let useRealtimePush = true;
+
 async function initOverview() {
-    // 初始加载所有数据
     await Promise.all([
         loadHealthScore(),
         loadMetrics(),
@@ -15,13 +16,15 @@ async function initOverview() {
         loadEvents()
     ]);
     
-    // 设置自动刷新
-    AutoRefresh.start('healthScore', loadHealthScore, AppState.refreshIntervals.healthScore);
-    AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
-    AutoRefresh.start('events', loadEvents, AppState.refreshIntervals.events);
-    AutoRefresh.start('environment', loadEnvironment, AppState.refreshIntervals.environment);
+    if (useRealtimePush && typeof EventSource !== 'undefined') {
+        startRealtimeStreams();
+    } else {
+        AutoRefresh.start('healthScore', loadHealthScore, AppState.refreshIntervals.healthScore);
+        AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
+        AutoRefresh.start('events', loadEvents, AppState.refreshIntervals.events);
+        AutoRefresh.start('environment', loadEnvironment, AppState.refreshIntervals.environment);
+    }
     
-    // 绑定事件折叠按钮
     const toggleBtn = document.getElementById('toggle-events');
     const eventsContainer = document.getElementById('events-container');
     
@@ -32,20 +35,39 @@ async function initOverview() {
         });
     }
     
-    // 绑定设置按钮
     const settingsBtn = document.getElementById('settings-btn');
     if (settingsBtn) {
         settingsBtn.addEventListener('click', showSettingsModal);
     }
     
-    // 绑定设置弹窗按钮
     document.getElementById('settings-close')?.addEventListener('click', hideSettingsModal);
     document.getElementById('settings-cancel')?.addEventListener('click', hideSettingsModal);
     document.getElementById('settings-save')?.addEventListener('click', saveSettings);
     document.querySelector('#settings-modal .modal-overlay')?.addEventListener('click', hideSettingsModal);
     
-    // 加载保存的设置
     loadSettings();
+}
+
+function startRealtimeStreams() {
+    RealtimePush.startHealthStream((data) => {
+        if (data && data.score !== undefined) {
+            updateHealthScoreUI(data);
+        }
+    });
+    
+    RealtimePush.startMetricsStream((data) => {
+        if (data) {
+            updateMetricsUI(data);
+        }
+    });
+    
+    RealtimePush.startEventsStream((events) => {
+        if (events) {
+            updateEventsUI(events);
+        }
+    });
+    
+    AutoRefresh.start('environment', loadEnvironment, AppState.refreshIntervals.environment);
 }
 
 /**
@@ -468,18 +490,20 @@ function loadSettings() {
  * 应用设置
  */
 function applySettings() {
-    // 应用刷新间隔
     AppState.refreshIntervals.healthScore = currentSettings.refreshInterval * 1000;
     AppState.refreshIntervals.metrics = currentSettings.refreshInterval * 1000;
     AppState.refreshIntervals.events = currentSettings.refreshInterval * 1000;
     
-    // 重新启动自动刷新
-    AutoRefresh.stopAll();
-    AutoRefresh.start('healthScore', loadHealthScore, AppState.refreshIntervals.healthScore);
-    AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
-    AutoRefresh.start('events', loadEvents, AppState.refreshIntervals.events);
+    if (useRealtimePush) {
+        RealtimePush.disconnectAll();
+        startRealtimeStreams();
+    } else {
+        AutoRefresh.stopAll();
+        AutoRefresh.start('healthScore', loadHealthScore, AppState.refreshIntervals.healthScore);
+        AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
+        AutoRefresh.start('events', loadEvents, AppState.refreshIntervals.events);
+    }
     
-    // 应用事件时间线显示
     const eventsSection = document.querySelector('.events-section');
     if (eventsSection) {
         eventsSection.style.display = currentSettings.showEvents ? 'block' : 'none';

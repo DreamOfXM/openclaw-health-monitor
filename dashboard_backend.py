@@ -28,6 +28,7 @@ from monitor_config import (
     read_active_binding,
     save_local_config_value,
     sanitize_config_for_ui,
+    validate_config_update,
     write_active_binding,
 )
 from promotion_controller import PromotionController
@@ -2468,6 +2469,10 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
 
 def save_config(key: str, value: str) -> bool:
     """保存配置"""
+    config = load_shared_config(BASE_DIR)
+    allowed, message = validate_config_update(key, value, config)
+    if not allowed:
+        raise ValueError(message)
     create_config_snapshots("before-config-change")
     return save_local_config_value(BASE_DIR, key, value)
     """加载告警历史"""

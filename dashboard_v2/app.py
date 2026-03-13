@@ -1,7 +1,11 @@
 """Dashboard V2 主应用。"""
 import os
 import sys
+import json
+import time
+import threading
 from functools import lru_cache
+from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
@@ -10,7 +14,7 @@ for path in (BASE_DIR, PROJECT_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, Response, stream_with_context
 from routes import (
     health_bp,
     metrics_bp,
@@ -20,6 +24,7 @@ from routes import (
     agents_bp,
     learnings_bp
 )
+from services.websocket_manager import get_ws_manager
 
 
 @lru_cache(maxsize=1)
@@ -74,6 +79,87 @@ def create_app():
     @app.route('/api/status')
     def compatibility_status():
         return _legacy_dashboard().api_status()
+
+    @app.route('/api/stream/health')
+    def stream_health():
+        """SSE endpoint for health updates"""
+        from services.data_collector import get_collector
+        
+        def generate():
+            collector = get_collector()
+            while True:
+                try:
+                    data = collector.get_health_score_data(force_refresh=True)
+                    yield f"data: {json.dumps({'type': 'health', 'data': data, 'timestamp': datetime.now().isoformat()})}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                time.sleep(5)
+        
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection': 'keep-alive'
+            }
+        )
+
+    @app.route('/api/stream/metrics')
+    def stream_metrics():
+        """SSE endpoint for metrics updates"""
+        from services.data_collector import get_collector
+        
+        def generate():
+            collector = get_collector()
+            while True:
+                try:
+                    data = collector.get_metrics(force_refresh=True)
+                    yield f"data: {json.dumps({'type': 'metrics', 'data': data, 'timestamp': datetime.now().isoformat()})}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                time.sleep(3)
+        
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection': 'keep-alive'
+            }
+        )
+
+    @app.route('/api/stream/events')
+    def stream_events():
+        """SSE endpoint for event updates"""
+        from services.data_collector import get_collector
+        
+        def generate():
+            collector = get_collector()
+            last_count = 0
+            while True:
+                try:
+                    events = collector.get_events(limit=20, force_refresh=True)
+                    current_count = len(events)
+                    if current_count != last_count:
+                        yield f"data: {json.dumps({'type': 'events', 'data': events, 'count': current_count, 'timestamp': datetime.now().isoformat()})}\n\n"
+                        last_count = current_count
+                    else:
+                        yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()})}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                time.sleep(5)
+        
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection': 'keep-alive'
+            }
+        )
 
     @app.route('/api/task-registry')
     def compatibility_task_registry():

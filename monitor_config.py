@@ -6,12 +6,14 @@ from __future__ import annotations
 import json
 import os
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG = {
     "DINGTALK_WEBHOOK": "",
     "FEISHU_WEBHOOK": "",
+    "WEBHOOK_ALLOWED_HOSTS": "oapi.dingtalk.com,api.dingtalk.com,open.feishu.cn",
     "ENABLE_MAC_NOTIFY": True,
     "CHECK_INTERVAL": 30,
     "HEALTH_CHECK_RETRIES": 3,
@@ -66,6 +68,7 @@ DEFAULT_CONFIG = {
 }
 
 SECRET_KEYS = {"DINGTALK_WEBHOOK", "FEISHU_WEBHOOK"}
+WEBHOOK_CONFIG_KEYS = {"DINGTALK_WEBHOOK", "FEISHU_WEBHOOK"}
 ACTIVE_BINDING_RELATIVE_PATH = Path("data") / "shared-state" / "active-binding.json"
 
 
@@ -136,6 +139,40 @@ def save_local_config_value(base_dir: Path, key: str, value: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def parse_webhook_allowlist(config: dict[str, Any]) -> set[str]:
+    raw = str(config.get("WEBHOOK_ALLOWED_HOSTS", "") or "").strip()
+    if not raw:
+        return set()
+    return {
+        item.strip().lower()
+        for item in raw.split(",")
+        if item.strip()
+    }
+
+
+def is_webhook_url_allowed(url: str, config: dict[str, Any]) -> tuple[bool, str]:
+    value = str(url or "").strip().strip('"').strip("'")
+    if not value:
+        return True, ""
+    parsed = urllib.parse.urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not host:
+        return False, "Webhook URL 格式无效"
+
+    allowlist = parse_webhook_allowlist(config)
+    if not allowlist:
+        return True, ""
+    if host in allowlist:
+        return True, ""
+    return False, f"Webhook 域名未在白名单中: {host}"
+
+
+def validate_config_update(key: str, value: str, config: dict[str, Any]) -> tuple[bool, str]:
+    if key not in WEBHOOK_CONFIG_KEYS:
+        return True, ""
+    return is_webhook_url_allowed(value, config)
 
 
 def get_env_specs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:

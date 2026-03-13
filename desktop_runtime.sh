@@ -216,8 +216,12 @@ gateway_workdir() {
 }
 
 active_openclaw_env() {
-    local value
-    value="$(config_value ACTIVE_OPENCLAW_ENV)"
+    local value db_path
+    db_path="$BASE_DIR/data/monitor.db"
+    value=""
+    if [ -f "$db_path" ] && command -v sqlite3 >/dev/null 2>&1; then
+        value="$(sqlite3 "$db_path" "SELECT json_extract(value_json, '$.env_id') FROM kv_state WHERE namespace='runtime' AND key='active_openclaw_env' LIMIT 1;" 2>/dev/null | head -n 1 || true)"
+    fi
     value="${value:-primary}"
     if [ "$value" != "official" ]; then
         value="primary"

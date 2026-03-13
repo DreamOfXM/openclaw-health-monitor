@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 import importlib
 import json
+import re
 import sys
+import time
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -88,6 +90,35 @@ def _coerce_number(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _extract_agent_id_from_log_line(line: str) -> Optional[str]:
+    match = re.search(r"session=agent:([^:]+):", line)
+    if match:
+        return match.group(1).strip() or None
+    match = re.search(r"\bagent=([a-zA-Z0-9_-]+)\b", line)
+    if match:
+        return match.group(1).strip() or None
+    return None
+
+
+def _extract_log_timestamp(line: str) -> int:
+    if len(line) < 19:
+        return 0
+    chunk = line[:32]
+    try:
+        if "+" in chunk[19:] or "Z" in chunk:
+            return int(datetime.fromisoformat(chunk.replace("Z", "+00:00")).timestamp())
+        return int(datetime.fromisoformat(chunk).timestamp())
+    except Exception:
+        return 0
+
+
+def _clean_log_detail(line: str) -> str:
+    text = re.sub(r"^\S+\s+\[[^\]]+\]\s+", "", line).strip()
+    text = re.sub(r"^\{.*?\}\s*", "", text).strip()
+    text = re.sub(r"session=agent:[^ ]+\s*", "", text).strip()
+    return text[:220]
 
 
 def _runtime_value(legacy: Any, key: str, default: Any) -> Any:
@@ -458,25 +489,142 @@ class DataCollector:
             "id": item.get("agent_id"),
             "name": item.get("display_name") or item.get("agent_id"),
             "emoji": item.get("emoji") or "",
-            "is_active": True,
+            "is_active": bool(item.get("is_active", False)),
             "last_activity": _iso_from_timestamp(updated_at),
             "last_activity_label": item.get("updated_label") or "-",
             "state_label": item.get("state_label") or "活动中",
             "detail": item.get("detail") or "",
             "task_hint": item.get("task_hint") or "",
-            "sessions": 1,
+            "sessions": int(item.get("sessions") or 0),
+            "recent_sessions": item.get("recent_sessions") or [],
+            "activity_source": item.get("activity_source") or "session",
+            "activity_excerpt": item.get("activity_excerpt") or "",
         }
+
+    def _load_agent_log_activity(self, env_home: Path, *, lookback_seconds: int) -> Dict[str, Dict[str, Any]]:
+        log_path = env_home / "logs" / "gateway.log"
+        if not log_path.exists():
+            return {}
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-1800:]
+        except Exception:
+            return {}
+        cutoff = int(time.time()) - max(60, lookback_seconds)
+        signals: Dict[str, Dict[str, Any]] = {}
+        for line in lines:
+            agent_id = _extract_agent_id_from_log_line(line)
+            if not agent_id:
+                continue
+            ts = _extract_log_timestamp(line)
+            if ts and ts < cutoff:
+                continue
+            current = signals.get(agent_id)
+            if current and ts and current.get("updated_at", 0) > ts:
+                continue
+            signals[agent_id] = {
+                "updated_at": ts or int(log_path.stat().st_mtime),
+                "updated_label": datetime.fromtimestamp(ts or int(log_path.stat().st_mtime)).strftime("%m-%d %H:%M:%S"),
+                "state_label": "日志活跃",
+                "detail": _clean_log_detail(line),
+                "activity_source": "gateway_log",
+                "activity_excerpt": _clean_log_detail(line),
+            }
+        return signals
+
+    def _load_agent_sessions(self, env_home: Path, legacy: Any, catalog: Dict[str, Any], *, recent_limit: int = 5) -> Dict[str, Dict[str, Any]]:
+        agents_dir = env_home / "agents"
+        payload: Dict[str, Dict[str, Any]] = {}
+        known_ids = set(catalog.keys())
+        if agents_dir.exists():
+            known_ids.update(item.name for item in agents_dir.iterdir() if item.is_dir())
+        for agent_id in sorted(known_ids):
+            sessions_dir = agents_dir / agent_id / "sessions"
+            files = []
+            if sessions_dir.exists():
+                files = sorted(
+                    [path for path in sessions_dir.glob("*.jsonl") if path.is_file()],
+                    key=lambda item: item.stat().st_mtime,
+                    reverse=True,
+                )
+            recent_files = files[:recent_limit]
+            recent_sessions = []
+            for path in recent_files:
+                summary = legacy.summarize_agent_session(path, agent_id, catalog.get(agent_id, {}))
+                if not summary:
+                    continue
+                recent_sessions.append(
+                    {
+                        "session_file": summary.get("session_file") or path.name,
+                        "updated_at": int(summary.get("updated_at") or 0),
+                        "updated_label": summary.get("updated_label") or "-",
+                        "state_label": summary.get("state_label") or "活动中",
+                        "detail": summary.get("detail") or "",
+                        "task_hint": summary.get("task_hint") or "",
+                    }
+                )
+            payload[agent_id] = {
+                "agent_id": agent_id,
+                "display_name": (catalog.get(agent_id) or {}).get("name") or agent_id,
+                "emoji": (catalog.get(agent_id) or {}).get("emoji") or "",
+                "updated_at": recent_sessions[0]["updated_at"] if recent_sessions else 0,
+                "updated_label": recent_sessions[0]["updated_label"] if recent_sessions else "-",
+                "state_label": recent_sessions[0]["state_label"] if recent_sessions else "待机",
+                "detail": recent_sessions[0]["detail"] if recent_sessions else "暂无最近会话",
+                "task_hint": recent_sessions[0]["task_hint"] if recent_sessions else "",
+                "sessions": len(files),
+                "recent_sessions": recent_sessions,
+                "is_active": False,
+                "activity_source": "session",
+                "activity_excerpt": recent_sessions[0]["detail"] if recent_sessions else "",
+            }
+        return payload
 
     def _fetch_agents_data(self) -> Dict[str, Any]:
         try:
             context = self._load_runtime_context()
-            activity = context["legacy"].get_active_agent_activity(context["selected_env"], context["config"])
-            agents = [self._normalize_agent(item) for item in (activity.get("agents") or [])]
-            summary = activity.get("summary") or {}
+            legacy = context["legacy"]
+            selected_env = context["selected_env"]
+            config = context["config"]
+            env_home = Path(str(selected_env.get("home") or Path.home() / ".openclaw"))
+            catalog = legacy.load_agent_catalog(selected_env)
+            lookback_seconds = int(config.get("AGENT_ACTIVITY_LOOKBACK_SECONDS", 1800))
+            active_window = int(config.get("AGENT_ACTIVITY_ACTIVE_WINDOW_SECONDS", min(lookback_seconds, 900)))
+            sessions_by_agent = self._load_agent_sessions(env_home, legacy, catalog)
+            log_activity = self._load_agent_log_activity(env_home, lookback_seconds=lookback_seconds)
+            now_ts = int(time.time())
+            merged: list[Dict[str, Any]] = []
+            for agent_id, item in sessions_by_agent.items():
+                log_signal = log_activity.get(agent_id) or {}
+                updated_at = max(int(item.get("updated_at") or 0), int(log_signal.get("updated_at") or 0))
+                is_active = bool(updated_at and (now_ts - updated_at) <= max(60, active_window))
+                merged_item = {
+                    **item,
+                    "updated_at": updated_at,
+                    "updated_label": (
+                        log_signal.get("updated_label")
+                        if int(log_signal.get("updated_at") or 0) >= int(item.get("updated_at") or 0)
+                        else item.get("updated_label")
+                    ) or "-",
+                    "state_label": log_signal.get("state_label") or item.get("state_label") or ("活动中" if is_active else "待机"),
+                    "detail": log_signal.get("detail") or item.get("detail") or "",
+                    "activity_source": log_signal.get("activity_source") or item.get("activity_source") or "session",
+                    "activity_excerpt": log_signal.get("activity_excerpt") or item.get("activity_excerpt") or "",
+                    "is_active": is_active,
+                }
+                merged.append(self._normalize_agent(merged_item))
+
+            merged.sort(
+                key=lambda item: (
+                    0 if item.get("is_active") else 1,
+                    -(int(datetime.fromisoformat(item["last_activity"]).timestamp()) if item.get("last_activity") else 0),
+                    item.get("name") or item.get("id") or "",
+                )
+            )
             return {
-                "active_count": int(summary.get("active_agents", len(agents)) or 0),
-                "recent_sessions": int(summary.get("recent_sessions", 0) or 0),
-                "agents": agents,
+                "active_count": len([item for item in merged if item.get("is_active")]),
+                "recent_sessions": sum(1 for item in merged if item.get("recent_sessions")),
+                "agents": merged,
+                "active_agent_id": next((item.get("id") for item in merged if item.get("is_active")), None),
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as exc:
@@ -484,6 +632,7 @@ class DataCollector:
                 "active_count": 0,
                 "recent_sessions": 0,
                 "agents": [],
+                "active_agent_id": None,
                 "error": str(exc),
                 "timestamp": datetime.now().isoformat(),
             }

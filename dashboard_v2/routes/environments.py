@@ -36,7 +36,7 @@ def get_active_environment():
         return jsonify({
             'success': True,
             'data': {
-                'active': data.get('active_environment', 'primary'),
+                'active': data.get('active_environment', 'unknown'),
                 'healthy': data.get('gateway_healthy', False)
             }
         })

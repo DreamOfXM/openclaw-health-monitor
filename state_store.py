@@ -1023,6 +1023,23 @@ class MonitorStateStore:
         return True
 
     def derive_task_control_state(self, task_id: str) -> dict[str, Any]:
+        """
+        控制面核心判定函数：基于证据推导任务控制状态。
+
+        边界原则：
+        - OpenClaw 负责发 receipt / progress / final（执行面主张）
+        - helper 负责判断这些主张是否足以升级为控制面事实
+        - OpenClaw 不能自证 verified
+        - helper 不能替 OpenClaw 做业务编排
+
+        字段归属：
+        - control_state: helper 最终裁定
+        - claim_level: helper 计算
+        - missing_receipts: helper 计算
+        - next_action: helper 决定
+        - next_actor: helper 决定
+        - approved_summary: helper 生成
+        """
         task = self.get_task(task_id)
         if not task:
             return {

@@ -249,12 +249,123 @@ const AutoRefresh = {
     }
 };
 
+// SSE实时推送管理
+const RealtimePush = {
+    connections: {},
+    reconnectDelay: 3000,
+    maxReconnectDelay: 30000,
+    
+    /**
+     * 连接SSE流
+     */
+    connect(endpoint, onMessage, onError) {
+        if (this.connections[endpoint]) {
+            this.disconnect(endpoint);
+        }
+        
+        const eventSource = new EventSource(endpoint);
+        const self = this;
+        
+        eventSource.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'heartbeat') {
+                    return;
+                }
+                if (onMessage) {
+                    onMessage(data);
+                }
+            } catch (e) {
+                console.error('SSE parse error:', e);
+            }
+        };
+        
+        eventSource.onerror = function(error) {
+            console.error('SSE connection error:', error);
+            eventSource.close();
+            delete self.connections[endpoint];
+            
+            if (onError) {
+                onError(error);
+            }
+            
+            setTimeout(() => {
+                console.log('Reconnecting SSE:', endpoint);
+                self.connect(endpoint, onMessage, onError);
+            }, self.reconnectDelay);
+        };
+        
+        eventSource.onopen = function() {
+            console.log('SSE connected:', endpoint);
+        };
+        
+        this.connections[endpoint] = eventSource;
+        return eventSource;
+    },
+    
+    /**
+     * 断开SSE连接
+     */
+    disconnect(endpoint) {
+        if (this.connections[endpoint]) {
+            this.connections[endpoint].close();
+            delete this.connections[endpoint];
+        }
+    },
+    
+    /**
+     * 断开所有连接
+     */
+    disconnectAll() {
+        Object.keys(this.connections).forEach(endpoint => {
+            this.disconnect(endpoint);
+        });
+    },
+    
+    /**
+     * 启动健康状态实时推送
+     */
+    startHealthStream(onUpdate) {
+        return this.connect('/api/stream/health', (data) => {
+            if (data.type === 'health' && onUpdate) {
+                onUpdate(data.data);
+                AppState.cache.healthScore = data.data;
+                UI.updateLastUpdate();
+            }
+        });
+    },
+    
+    /**
+     * 启动系统指标实时推送
+     */
+    startMetricsStream(onUpdate) {
+        return this.connect('/api/stream/metrics', (data) => {
+            if (data.type === 'metrics' && onUpdate) {
+                onUpdate(data.data);
+                AppState.cache.metrics = data.data;
+                UI.updateLastUpdate();
+            }
+        });
+    },
+    
+    /**
+     * 启动事件实时推送
+     */
+    startEventsStream(onUpdate) {
+        return this.connect('/api/stream/events', (data) => {
+            if ((data.type === 'events' || data.type === 'event') && onUpdate) {
+                onUpdate(data.data, data.count);
+                AppState.cache.events = data.data;
+                UI.updateLastUpdate();
+            }
+        });
+    }
+};
+
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
-    // 初始化最后更新时间
     UI.updateLastUpdate();
     
-    // 绑定刷新按钮
     const refreshBtn = document.getElementById('refresh-btn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
@@ -262,9 +373,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     
-    // 页面卸载时清理
     window.addEventListener('beforeunload', () => {
         AutoRefresh.stopAll();
+        RealtimePush.disconnectAll();
     });
 });
 
@@ -273,3 +384,4 @@ window.AppState = AppState;
 window.API = API;
 window.UI = UI;
 window.AutoRefresh = AutoRefresh;
+window.RealtimePush = RealtimePush;

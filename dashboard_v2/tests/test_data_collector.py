@@ -92,7 +92,11 @@ class TestDataCollector(unittest.TestCase):
         """测试运行时上下文优先读取 committed binding，而不是旧配置里的 ACTIVE_OPENCLAW_ENV。"""
         fake_legacy = mock.Mock()
         fake_legacy.load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "official"}
-        fake_legacy.active_binding.return_value = {"active_env": "primary", "switch_state": "committed"}
+        fake_legacy.STORE.load_runtime_value.side_effect = lambda key, default=None: {
+            "env_id": "primary",
+            "switch_state": "committed",
+            "updated_at": 123,
+        } if key == "active_openclaw_env" else default
         fake_legacy.env_spec.side_effect = lambda env_id, _cfg=None: {"id": env_id}
         fake_legacy.get_task_registry_payload.return_value = {}
 
@@ -101,6 +105,38 @@ class TestDataCollector(unittest.TestCase):
 
         self.assertEqual(context["active_env"], "primary")
         self.assertEqual(context["selected_env"]["id"], "primary")
+        self.assertEqual(context["binding"]["source"], "runtime_db")
+
+    def test_environment_binding_audit_uses_runtime_binding(self):
+        """测试环境绑定展示优先使用 DB/runtime binding，不读取 active-binding.json 作为当前真相。"""
+        fake_legacy = mock.Mock()
+        fake_legacy.load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "official"}
+        fake_legacy.STORE.load_runtime_value.side_effect = lambda key, default=None: {
+            "active_openclaw_env": {
+                "env_id": "primary",
+                "switch_state": "committed",
+                "updated_at": 123,
+            },
+            "binding_audit_events": [{"source": "db"}],
+        }.get(key, default)
+        fake_legacy.env_spec.side_effect = lambda env_id, _cfg=None: {"id": env_id}
+        fake_legacy.get_task_registry_payload.return_value = {}
+        fake_legacy.list_openclaw_environments.return_value = [
+            {"id": "primary", "running": True, "healthy": True},
+            {"id": "official", "running": False, "healthy": False},
+        ]
+        fake_legacy.build_bootstrap_status.return_value = {}
+        fake_legacy.build_context_lifecycle_readiness.return_value = {"status": "ready"}
+        fake_legacy.check_gateway_health_for_env.return_value = True
+        fake_legacy.build_environment_promotion_summary.return_value = {}
+
+        with mock.patch("services.data_collector._legacy_dashboard", return_value=fake_legacy):
+            env = self.collector.get_environment(force_refresh=True)
+
+        self.assertEqual(env["active_environment"], "primary")
+        self.assertEqual(env["binding_audit"]["active_env"], "primary")
+        self.assertEqual(env["binding_audit"]["source"], "runtime_db")
+        self.assertEqual(env["binding_audit"]["recent_events"], [{"source": "db"}])
 
     def test_get_environment_exposes_binding_audit(self):
         fake_legacy = mock.Mock()
@@ -156,6 +192,71 @@ class TestDataCollector(unittest.TestCase):
         self.assertIn('active_count', agents)
         self.assertIn('agents', agents)
         self.assertIn('timestamp', agents)
+        self.assertIn('active_agent_id', agents)
+
+    def test_fetch_agents_returns_all_agents_and_marks_log_active(self):
+        fake_legacy = mock.Mock()
+        fake_legacy.load_agent_catalog.return_value = {
+            "main": {"name": "小忆", "emoji": "🌸"},
+            "dev": {"name": "开发", "emoji": "🛠️"},
+        }
+        context = {
+            "legacy": fake_legacy,
+            "config": {"AGENT_ACTIVITY_ACTIVE_WINDOW_SECONDS": 900},
+            "selected_env": {"id": "primary", "home": "/tmp/fake-openclaw"},
+        }
+        with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
+            mock.patch.object(self.collector, "_load_agent_sessions", return_value={
+                "main": {
+                    "agent_id": "main",
+                    "display_name": "小忆",
+                    "emoji": "🌸",
+                    "updated_at": 100,
+                    "updated_label": "03-14 00:00:00",
+                    "state_label": "待机",
+                    "detail": "暂无最近会话",
+                    "task_hint": "",
+                    "sessions": 0,
+                    "recent_sessions": [],
+                    "is_active": False,
+                    "activity_source": "session",
+                    "activity_excerpt": "",
+                },
+                "dev": {
+                    "agent_id": "dev",
+                    "display_name": "开发",
+                    "emoji": "🛠️",
+                    "updated_at": int(time.time()) - 60,
+                    "updated_label": "03-14 00:01:00",
+                    "state_label": "命令完成",
+                    "detail": "最近会话有更新",
+                    "task_hint": "修复同步链路",
+                    "sessions": 2,
+                    "recent_sessions": [{"session_file": "a.jsonl", "updated_at": int(time.time()) - 60, "updated_label": "03-14 00:01:00", "state_label": "命令完成", "detail": "最近会话有更新", "task_hint": "修复同步链路"}],
+                    "is_active": False,
+                    "activity_source": "session",
+                    "activity_excerpt": "最近会话有更新",
+                },
+            }), \
+            mock.patch.object(self.collector, "_load_agent_log_activity", return_value={
+                "main": {
+                    "updated_at": int(time.time()) - 30,
+                    "updated_label": "03-14 00:01:30",
+                    "state_label": "日志活跃",
+                    "detail": "dispatching to agent",
+                    "activity_source": "gateway_log",
+                    "activity_excerpt": "dispatching to agent",
+                }
+            }):
+            data = self.collector._fetch_agents_data()
+
+        self.assertEqual(len(data["agents"]), 2)
+        self.assertEqual(data["active_agent_id"], "main")
+        self.assertEqual(data["agents"][0]["id"], "main")
+        self.assertTrue(data["agents"][0]["is_active"])
+        self.assertEqual(data["agents"][0]["activity_source"], "gateway_log")
+        self.assertEqual(data["agents"][1]["id"], "dev")
+        self.assertEqual(data["agents"][1]["sessions"], 2)
     
     def test_get_learnings(self):
         """测试获取学习数据"""

@@ -9,6 +9,9 @@ document.addEventListener('DOMContentLoaded', () => {
 let currentTab = 'environments';
 let currentLearningView = 'items';
 let currentLearningData = null;
+let currentAgentView = 'active';
+let currentAgentData = null;
+let selectedAgentId = null;
 
 function initExplore() {
     // 绑定标签切换
@@ -54,6 +57,27 @@ function initExplore() {
                 renderLearningDetails(currentLearningData);
             }
         });
+    });
+
+    const agentSubnavButtons = document.querySelectorAll('.subnav-btn');
+    agentSubnavButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentAgentView = btn.dataset.agentView || 'active';
+            updateAgentViewSelection();
+            if (currentAgentData) {
+                renderAgentView(currentAgentData);
+            }
+        });
+    });
+
+    document.getElementById('agents-grid')?.addEventListener('click', (event) => {
+        const card = event.target.closest('.agent-card');
+        if (!card) return;
+        selectedAgentId = card.dataset.agentId || null;
+        if (currentAgentData) {
+            updateAgentsGrid(currentAgentData.agents || []);
+            renderSelectedAgentDetail(currentAgentData);
+        }
     });
 }
 
@@ -273,19 +297,55 @@ function filterTasks(filter) {
  */
 async function loadAgents(forceRefresh = false) {
     try {
-        const container = document.getElementById('agents-grid');
-        if (forceRefresh && container) {
-            container.innerHTML = '<div class="loading">刷新代理数据中...</div>';
+        const gridContainer = document.getElementById('agents-grid');
+        const sessionsContainer = document.getElementById('sessions-list');
+        if (forceRefresh) {
+            if (gridContainer) gridContainer.innerHTML = '<div class="loading">刷新代理数据中...</div>';
+            if (sessionsContainer) sessionsContainer.innerHTML = '<div class="loading">刷新会话数据中...</div>';
         }
         const response = await API.getAgents(forceRefresh);
         if (!response.success) return;
         
         const data = response.data;
-        updateAgentsGrid(data.agents || []);
+        currentAgentData = data;
+        updateAgentStats(data);
+        renderAgentView(data);
         
     } catch (error) {
         console.error('加载代理失败:', error);
     }
+}
+
+function updateAgentStats(data) {
+    document.getElementById('agent-active-count').textContent = data.active_count || 0;
+    document.getElementById('agent-session-count').textContent = data.recent_sessions || 0;
+    
+    const lastUpdate = data.timestamp ? UI.formatDateTime(data.timestamp) : '--';
+    document.getElementById('agent-last-update').textContent = lastUpdate.split(' ')[1] || lastUpdate;
+}
+
+function renderAgentView(data) {
+    const agents = data.agents || [];
+    if (!selectedAgentId || !agents.some(agent => agent.id === selectedAgentId)) {
+        selectedAgentId = data.active_agent_id || agents[0]?.id || null;
+    }
+    if (currentAgentView === 'sessions') {
+        renderSessionsView(data);
+    } else {
+        updateAgentsGrid(agents);
+        renderSelectedAgentDetail(data);
+    }
+}
+
+function updateAgentViewSelection() {
+    document.querySelectorAll('.subnav-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.agentView === currentAgentView);
+    });
+    
+    document.querySelectorAll('.agent-view').forEach(view => {
+        view.classList.remove('active');
+    });
+    document.getElementById(`agent-view-${currentAgentView}`)?.classList.add('active');
 }
 
 function updateAgentsGrid(agents) {
@@ -297,22 +357,173 @@ function updateAgentsGrid(agents) {
         return;
     }
     
-    const html = agents.map(agent => `
-        <div class="agent-card">
-            <div class="agent-header">
-                <span class="agent-name">${agent.name || agent.id}</span>
-                <span class="agent-status badge badge-${agent.is_active ? 'success' : 'secondary'}">
-                    ${agent.is_active ? '活跃' : '空闲'}
-                </span>
+    const html = agents.map(agent => {
+        const emoji = agent.emoji || '🤖';
+        const stateLabel = agent.state_label || '活动中';
+        const taskHint = agent.task_hint || '';
+        const detail = agent.detail || '';
+        const selected = agent.id === selectedAgentId;
+        
+        return `
+            <div class="agent-card ${agent.is_active ? 'active' : ''} ${selected ? 'selected' : ''}" data-agent-id="${agent.id}">
+                <div class="agent-header">
+                    <div class="agent-identity">
+                        <span class="agent-emoji">${emoji}</span>
+                        <span class="agent-name">${agent.name || agent.id}</span>
+                    </div>
+                    <span class="agent-status badge badge-${agent.is_active ? 'success' : 'secondary'}">
+                        ${agent.is_active ? '活跃' : '空闲'}
+                    </span>
+                </div>
+                <div class="agent-body">
+                    <div class="agent-state">
+                        <span class="state-label">${stateLabel}</span>
+                    </div>
+                    ${taskHint ? `<div class="agent-task"><span class="task-label">任务:</span> ${taskHint}</div>` : ''}
+                    ${detail ? `<div class="agent-detail">${detail}</div>` : ''}
+                    <div class="agent-meta">
+                        <span class="meta-item">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <polyline points="12 6 12 12 16 14"></polyline>
+                            </svg>
+                            ${agent.last_activity_label || UI.formatDateTime(agent.last_activity)}
+                        </span>
+                        <span class="meta-item">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                <circle cx="9" cy="7" r="4"></circle>
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                            </svg>
+                            ${agent.sessions || 0} 会话
+                        </span>
+                    </div>
+                </div>
             </div>
-            <div class="agent-body">
-                <p>最后活动: ${UI.formatDateTime(agent.last_activity)}</p>
-                <p>会话数: ${agent.sessions || 0}</p>
-            </div>
-        </div>
-    `).join('');
+        `;
+    }).join('');
     
     container.innerHTML = html;
+    const activeCard = container.querySelector('.agent-card.active');
+    if (activeCard) {
+        activeCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+}
+
+function renderSelectedAgentDetail(data) {
+    const container = document.getElementById('agent-detail-panel');
+    if (!container) return;
+    const agents = data.agents || [];
+    const agent = agents.find(item => item.id === selectedAgentId) || agents[0];
+    if (!agent) {
+        container.innerHTML = '<div class="empty">暂无代理详情</div>';
+        return;
+    }
+
+    const recentSessions = agent.recent_sessions || [];
+    const header = `
+        <div class="agent-detail-header">
+            <div>
+                <div class="agent-detail-title">${agent.emoji || '🤖'} ${agent.name || agent.id}</div>
+                <div class="agent-detail-subtitle">${agent.is_active ? '当前活跃' : '当前待机'} · ${agent.last_activity_label || '--'}</div>
+            </div>
+            <div class="agent-detail-badge ${agent.is_active ? 'is-active' : ''}">
+                ${agent.activity_source === 'gateway_log' ? '日志驱动' : '会话驱动'}
+            </div>
+        </div>
+        <div class="agent-detail-summary">
+            <div><strong>状态：</strong>${agent.state_label || '活动中'}</div>
+            <div><strong>任务提示：</strong>${agent.task_hint || '暂无'}</div>
+            <div><strong>最近信号：</strong>${agent.activity_excerpt || agent.detail || '暂无'}</div>
+            <div><strong>历史会话：</strong>${agent.sessions || 0}</div>
+        </div>
+    `;
+
+    const sessionsHtml = recentSessions.length === 0
+        ? '<div class="empty">暂无最近会话</div>'
+        : recentSessions.map(session => `
+            <div class="agent-session-entry">
+                <div class="agent-session-top">
+                    <span class="session-file">${session.session_file}</span>
+                    <span class="session-updated">${session.updated_label || '--'}</span>
+                </div>
+                <div class="agent-session-state">${session.state_label || '活动中'}</div>
+                ${session.task_hint ? `<div class="agent-session-task">任务: ${session.task_hint}</div>` : ''}
+                ${session.detail ? `<div class="agent-session-detail">${session.detail}</div>` : ''}
+            </div>
+        `).join('');
+
+    container.innerHTML = `
+        ${header}
+        <div class="agent-sessions-title">最近会话</div>
+        <div class="agent-sessions-detail">${sessionsHtml}</div>
+    `;
+}
+
+function renderSessionsView(data) {
+    const chartContainer = document.getElementById('sessions-chart');
+    const listContainer = document.getElementById('sessions-list');
+    
+    if (!chartContainer || !listContainer) return;
+    
+    const agents = data.agents || [];
+    const totalSessions = data.recent_sessions || agents.reduce((sum, a) => sum + (a.sessions || 0), 0);
+    
+    if (agents.length === 0) {
+        chartContainer.innerHTML = '<div class="empty">暂无会话数据</div>';
+        listContainer.innerHTML = '<div class="empty">暂无会话数据</div>';
+        return;
+    }
+    
+    const maxSessions = Math.max(...agents.map(a => a.sessions || 0), 1);
+    
+    const chartHtml = `
+        <div class="sessions-distribution">
+            <h4 class="chart-title">会话分布</h4>
+            <div class="distribution-bars">
+                ${agents.map(agent => {
+                    const percentage = Math.round(((agent.sessions || 0) / maxSessions) * 100);
+                    return `
+                        <div class="distribution-row">
+                            <span class="dist-label">${agent.emoji || '🤖'} ${agent.name || agent.id}</span>
+                            <div class="dist-bar-wrapper">
+                                <div class="dist-bar" style="width: ${percentage}%"></div>
+                            </div>
+                            <span class="dist-value">${agent.sessions || 0}</span>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+            <div class="chart-summary">
+                <span>总活跃代理: ${data.active_count || agents.length}</span>
+                <span>总会话数: ${totalSessions}</span>
+            </div>
+        </div>
+    `;
+    chartContainer.innerHTML = chartHtml;
+    
+    const sortedAgents = [...agents].sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
+    
+    const listHtml = `
+        <div class="sessions-detail-list">
+            <h4 class="list-title">代理会话详情</h4>
+            ${sortedAgents.map(agent => `
+                <div class="session-item">
+                    <div class="session-header">
+                        <span class="session-agent">${agent.emoji || '🤖'} ${agent.name || agent.id}</span>
+                        <span class="session-count">${agent.sessions || 0} 会话</span>
+                    </div>
+                    <div class="session-info">
+                        <span class="info-item">状态: ${agent.state_label || '活动中'}</span>
+                        <span class="info-item">最后活动: ${agent.last_activity_label || '--'}</span>
+                    </div>
+                    ${agent.task_hint ? `<div class="session-task">任务: ${agent.task_hint}</div>` : ''}
+                </div>
+            `).join('')}
+        </div>
+    `;
+    listContainer.innerHTML = listHtml;
 }
 
 /**

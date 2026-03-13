@@ -63,10 +63,28 @@ class DashboardMemoryTests(unittest.TestCase):
         by_name.assert_called_once_with(r"[g]uardian\.py")
 
     def test_active_env_id_defaults_to_primary(self):
-        with mock.patch.object(dashboard, "active_binding", return_value={}):
+        with mock.patch.object(dashboard.STORE, "load_runtime_value", side_effect=[
+            {},
+            {"env_id": "official"},
+            {"env_id": "weird"},
+        ]):
             self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "primary"}), "primary")
             self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "official"}), "official")
             self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "weird"}), "primary")
+
+    @mock.patch("dashboard_backend.create_config_snapshots")
+    @mock.patch("dashboard_backend.save_local_config_value")
+    @mock.patch("dashboard_backend.load_shared_config")
+    def test_save_config_rejects_webhook_outside_allowlist(self, load_shared_config, save_local_config_value, create_config_snapshots):
+        load_shared_config.return_value = {
+            "WEBHOOK_ALLOWED_HOSTS": "oapi.dingtalk.com,api.dingtalk.com,open.feishu.cn"
+        }
+
+        with self.assertRaisesRegex(ValueError, "白名单"):
+            dashboard.save_config("DINGTALK_WEBHOOK", '"https://example.com/hook"')
+
+        save_local_config_value.assert_not_called()
+        create_config_snapshots.assert_not_called()
 
     def test_env_dashboard_url_includes_token_and_gateway_url(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,7 +158,8 @@ class DashboardMemoryTests(unittest.TestCase):
             "OPENCLAW_OFFICIAL_AUTO_UPDATE": False,
         }
 
-        with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}):
+        with mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "official"}), \
+            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}):
             envs = dashboard.list_openclaw_environments(config)
 
         official = next(item for item in envs if item["id"] == "official")
@@ -345,7 +364,8 @@ class DashboardMemoryTests(unittest.TestCase):
             "OPENCLAW_OFFICIAL_PORT": 19001,
         }
 
-        envs = dashboard.list_openclaw_environments(config)
+        with mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "official"}):
+            envs = dashboard.list_openclaw_environments(config)
         official = next(item for item in envs if item["id"] == "official")
 
         self.assertTrue(official["active"])
@@ -1166,6 +1186,7 @@ class DashboardMemoryTests(unittest.TestCase):
         with mock.patch.object(dashboard, "load_config", side_effect=lambda: dict(cfg)), \
             mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}), \
             mock.patch.object(dashboard, "STORE") as store:
+            store.load_runtime_value.side_effect = lambda key, default=None: {"env_id": "official"} if key == "active_openclaw_env" else default
             ok, message = dashboard.switch_openclaw_environment("primary")
 
         self.assertFalse(ok)
@@ -1260,6 +1281,7 @@ class DashboardMemoryTests(unittest.TestCase):
             mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}), \
             mock.patch.object(dashboard, "write_active_binding") as write_active_binding:
             with mock.patch.object(dashboard, "STORE") as store:
+                store.load_runtime_value.side_effect = lambda key, default=None: {"env_id": "official"} if key == "active_openclaw_env" else default
                 ok, message, old_pid, new_pid, env_id = dashboard.restart_active_openclaw_environment()
 
         self.assertTrue(ok)

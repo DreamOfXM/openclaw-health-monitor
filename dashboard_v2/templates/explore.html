@@ -274,8 +274,46 @@
                     <button class="btn btn-secondary" id="refresh-agents">🔄 刷新</button>
                 </div>
 
-                <div class="agents-grid" id="agents-grid">
-                    <div class="loading">加载代理数据中...</div>
+                <div class="agents-subnav">
+                    <button class="subnav-btn active" data-agent-view="active">活跃代理</button>
+                    <button class="subnav-btn" data-agent-view="sessions">会话分析</button>
+                </div>
+
+                <div class="agents-stats">
+                    <div class="stat-card compact">
+                        <div class="stat-value" id="agent-active-count">--</div>
+                        <div class="stat-label">活跃代理</div>
+                    </div>
+                    <div class="stat-card compact">
+                        <div class="stat-value" id="agent-session-count">--</div>
+                        <div class="stat-label">最近会话</div>
+                    </div>
+                    <div class="stat-card compact">
+                        <div class="stat-value" id="agent-last-update">--</div>
+                        <div class="stat-label">最后更新</div>
+                    </div>
+                </div>
+
+                <div id="agent-view-active" class="agent-view active">
+                    <div class="agents-workspace">
+                        <div class="agents-grid" id="agents-grid">
+                            <div class="loading">加载代理数据中...</div>
+                        </div>
+                        <div class="agent-detail-panel" id="agent-detail-panel">
+                            <div class="loading">请选择代理查看最近会话</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="agent-view-sessions" class="agent-view">
+                    <div class="sessions-panel">
+                        <div class="sessions-chart" id="sessions-chart">
+                            <div class="chart-placeholder">会话分布图表</div>
+                        </div>
+                        <div class="sessions-list" id="sessions-list">
+                            <div class="loading">加载会话数据中...</div>
+                        </div>
+                    </div>
                 </div>
             </div>
 

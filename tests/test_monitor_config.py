@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from monitor_config import load_config, save_local_config_value, sanitize_config_for_ui
+from monitor_config import (
+    is_webhook_url_allowed,
+    load_config,
+    save_local_config_value,
+    sanitize_config_for_ui,
+    validate_config_update,
+)
 
 
 class MonitorConfigTests(unittest.TestCase):
@@ -39,6 +45,32 @@ class MonitorConfigTests(unittest.TestCase):
         self.assertTrue(safe["DINGTALK_WEBHOOK"])
         self.assertFalse(safe["FEISHU_WEBHOOK"])
         self.assertTrue(safe["AUTO_UPDATE"])
+
+    def test_validate_config_update_allows_dingtalk_webhook(self):
+        config = load_config(Path("/Users/hangzhou/openclaw-health-monitor"))
+        allowed, message = validate_config_update(
+            "DINGTALK_WEBHOOK",
+            '"https://oapi.dingtalk.com/robot/send?access_token=test"',
+            config,
+        )
+        self.assertTrue(allowed)
+        self.assertEqual(message, "")
+
+    def test_validate_config_update_rejects_non_allowlisted_webhook(self):
+        config = load_config(Path("/Users/hangzhou/openclaw-health-monitor"))
+        allowed, message = validate_config_update(
+            "DINGTALK_WEBHOOK",
+            '"https://example.com/robot/send?access_token=test"',
+            config,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("白名单", message)
+
+    def test_is_webhook_url_allowed_accepts_feishu_host(self):
+        config = {"WEBHOOK_ALLOWED_HOSTS": "oapi.dingtalk.com,api.dingtalk.com,open.feishu.cn"}
+        allowed, message = is_webhook_url_allowed("https://open.feishu.cn/open-apis/bot/v2/hook/test", config)
+        self.assertTrue(allowed)
+        self.assertEqual(message, "")
 
 
 if __name__ == "__main__":
