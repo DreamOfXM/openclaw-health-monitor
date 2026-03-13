@@ -113,6 +113,23 @@ def record_restart_event(
     )
 
 
+def record_binding_audit_event(
+    *,
+    source: str,
+    env_id: str,
+    status: str,
+    details: Optional[dict[str, Any]] = None,
+):
+    payload = {
+        "source": source,
+        "env_id": env_id,
+        "status": status,
+        "details": details or {},
+        "timestamp_iso": datetime.now().isoformat(),
+    }
+    STORE.append_runtime_event("binding_audit_events", payload, limit=200)
+
+
 def get_recent_changes(days: int = 7) -> list:
     """获取最近变更"""
     db_changes = STORE.list_recent_changes(days=days, limit=100)
@@ -804,7 +821,18 @@ def env_token_prefix(spec: dict) -> str:
 
 def detect_environment_inconsistencies(environments: list[dict], active_env: str) -> list[dict]:
     issues: list[dict] = []
+    binding = active_binding()
+    bound_env = str(binding.get("active_env") or active_env or "primary")
     running = [item for item in environments if item.get("running")]
+    if bound_env != active_env:
+        issues.append(
+            {
+                "severity": "error",
+                "code": "binding_config_mismatch",
+                "title": "DB 绑定与当前激活环境不一致",
+                "detail": f"DB 绑定={bound_env}，当前激活环境={active_env}。",
+            }
+        )
     if len(running) > 1:
         issues.append(
             {
@@ -822,6 +850,24 @@ def detect_environment_inconsistencies(environments: list[dict], active_env: str
                     "code": "active_env_not_running",
                     "title": f"{item.get('id')} 已激活但未监听",
                     "detail": "ACTIVE_OPENCLAW_ENV 与实际 listener 不一致。",
+                }
+            )
+        if item.get("running") and item.get("id") != bound_env:
+            issues.append(
+                {
+                    "severity": "error",
+                    "code": f"unbound_listener_{item.get('id')}",
+                    "title": f"未绑定环境 {item.get('id')} 仍在监听",
+                    "detail": "DB 激活态与实际 listener 不一致，存在路由漂移风险。",
+                }
+            )
+        if item.get("id") == bound_env and not item.get("running"):
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": f"bound_env_not_running_{item.get('id')}",
+                    "title": f"DB 绑定环境 {item.get('id')} 未监听",
+                    "detail": "重启/切换后的绑定已提交，但 listener 未存活。",
                 }
             )
         if active_env == "official" and item.get("id") == "primary" and item.get("running"):
@@ -1256,6 +1302,7 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
     selected_env = env_spec(active_env_id(cfg), cfg)
     selected_home = Path(str(selected_env.get("home") or Path.home() / ".openclaw"))
     environments = list_openclaw_environments(cfg)
+    binding = active_binding(cfg)
     task_registry = get_task_registry_payload(limit=20)
     control_plane = get_control_plane_overview(selected_env["id"])
     learning_center = get_learning_center_payload(limit=20)
@@ -1281,6 +1328,12 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
     return {
         "generated_at": int(time.time()),
         "active_environment": selected_env["id"],
+        "binding_audit": {
+            "active_env": binding.get("active_env") or selected_env["id"],
+            "switch_state": binding.get("switch_state") or "committed",
+            "updated_at": binding.get("updated_at") or 0,
+            "recent_events": STORE.load_runtime_value("binding_audit_events", [])[-20:],
+        },
         "environment_integrity": detect_environment_inconsistencies(environments, selected_env["id"]),
         "current_task_facts": {
             "summary": task_registry.get("summary") or {},
@@ -1434,6 +1487,8 @@ def get_gateway_process_for_env(spec: dict) -> Optional[dict]:
 def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
     cfg = config or load_config()
     current = active_env_id(cfg)
+    binding = active_binding(cfg)
+    bound_env = str(binding.get("active_env") or current or "primary")
     official_ref = str(cfg.get("OPENCLAW_OFFICIAL_REF", "origin/main"))
     official_schedule_plist = Path.home() / "Library" / "LaunchAgents" / "ai.openclaw.official-update.plist"
     environments = []
@@ -1462,6 +1517,8 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "dashboard_url": env_dashboard_url(item),
                 "dashboard_open_link": env_open_link(item) if active and running and control_ui_ready else "",
                 "active": active,
+                "bound": item["id"] == bound_env,
+                "binding_switch_state": str(binding.get("switch_state") or "committed") if item["id"] == bound_env else "inactive",
                 "auto_update_enabled": official_schedule_plist.exists() if item["id"] == "official" else False,
                 "update_hour": cfg.get("OPENCLAW_OFFICIAL_UPDATE_HOUR", 4) if item["id"] == "official" else None,
                 "update_minute": cfg.get("OPENCLAW_OFFICIAL_UPDATE_MINUTE", 30) if item["id"] == "official" else None,
@@ -2496,17 +2553,25 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
 
     def binding_snapshot(env_id: str, state: str) -> None:
         cfg_now = load_config()
-        write_active_binding(BASE_DIR, cfg_now, env_id, switch_state=state)
+        binding = write_active_binding(BASE_DIR, cfg_now, env_id, switch_state=state)
         STORE.save_runtime_value(
             "active_openclaw_env",
             {
                 "env_id": env_id,
                 "updated_at": int(time.time()),
                 "switch_state": state,
+                "binding_version": binding.get("binding_version") or 1,
                 "gateway_label": get_env_specs(cfg_now)[env_id]["gateway_label"],
                 "gateway_port": get_env_specs(cfg_now)[env_id]["port"],
                 "config_path": str(get_env_specs(cfg_now)[env_id]["config_path"]),
+                "expected": binding.get("expected") or {},
             },
+        )
+        record_binding_audit_event(
+            source="dashboard.switch",
+            env_id=env_id,
+            status=state,
+            details={"switch_state": state},
         )
 
     def verify_binding(env_id: str) -> tuple[bool, str]:
@@ -2527,6 +2592,12 @@ def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
             return False, f"{spec['name']} listener 未启动"
         if get_listener_pid(int(inactive_spec["port"])) is not None:
             return False, f"{inactive_spec['name']} listener 仍然存活"
+        record_binding_audit_event(
+            source="dashboard.switch",
+            env_id=env_id,
+            status="verified",
+            details={"gateway_port": spec["port"], "gateway_label": spec["gateway_label"]},
+        )
         return True, "binding verified"
 
     def rollback_and_restore(message: str) -> tuple[bool, str]:
@@ -2589,6 +2660,12 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         status="running",
         details={"old_pid": old_pid_str, "reason": "manual_restart"},
     )
+    record_binding_audit_event(
+        source="dashboard.restart",
+        env_id=target_env,
+        status="restart_started",
+        details={"old_pid": old_pid_str},
+    )
 
     run_script([str(OFFICIAL_MANAGER), "stop"], timeout=120)
     run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
@@ -2631,17 +2708,25 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
     new_pid = get_listener_pid(int(spec["port"]))
     new_pid_str = str(new_pid) if new_pid is not None else None
     if new_pid_str:
-        write_active_binding(BASE_DIR, load_config(), target_env, switch_state="committed")
+        binding = write_active_binding(BASE_DIR, load_config(), target_env, switch_state="committed")
         STORE.save_runtime_value(
             "active_openclaw_env",
             {
                 "env_id": target_env,
                 "updated_at": int(time.time()),
                 "switch_state": "committed",
+                "binding_version": binding.get("binding_version") or 1,
                 "gateway_label": spec["gateway_label"],
                 "gateway_port": spec["port"],
                 "config_path": str(spec["config_path"]),
+                "expected": binding.get("expected") or {},
             },
+        )
+        record_binding_audit_event(
+            source="dashboard.restart",
+            env_id=target_env,
+            status="restart_committed",
+            details={"old_pid": old_pid_str, "new_pid": new_pid_str},
         )
         record_restart_event(
             source="dashboard",

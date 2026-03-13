@@ -1297,6 +1297,30 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertEqual(payload["delivery_failed_count"], 1)
             self.assertEqual(payload["recent_event_types"][0], "final_delivery_failed")
 
+    def test_commit_active_binding_updates_runtime_binding_and_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg = {
+                **guardian.DEFAULT_CONFIG,
+                "OPENCLAW_HOME": str(base / ".openclaw"),
+                "OPENCLAW_CODE": str(base / "code-primary"),
+                "OPENCLAW_OFFICIAL_STATE": str(base / ".openclaw-official"),
+                "OPENCLAW_OFFICIAL_CODE": str(base / "code-official"),
+                "GATEWAY_PORT": 18789,
+                "OPENCLAW_OFFICIAL_PORT": 19021,
+            }
+            store = MonitorStateStore(base)
+            with mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "CONFIG", cfg), \
+                mock.patch.object(guardian, "STORE", store):
+                guardian.commit_active_binding("official")
+            binding = store.load_runtime_value("active_openclaw_env", {})
+            audit = store.load_runtime_value("binding_audit_events", [])
+            self.assertEqual(binding.get("env_id"), "official")
+            self.assertEqual(binding.get("switch_state"), "committed")
+            self.assertTrue(audit)
+            self.assertEqual(audit[-1]["env_id"], "official")
+
     def test_sync_shared_context_watcher_tasks_imports_completed_and_dlq(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

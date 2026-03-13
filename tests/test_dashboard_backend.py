@@ -120,10 +120,23 @@ class DashboardMemoryTests(unittest.TestCase):
             {"id": "primary", "active": True, "running": True},
             {"id": "official", "active": False, "running": True},
         ]
-        issues = dashboard.detect_environment_inconsistencies(envs, "primary")
+        with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
+            issues = dashboard.detect_environment_inconsistencies(envs, "primary")
         codes = {item["code"] for item in issues}
         self.assertIn("dual_listener", codes)
         self.assertIn("official_running_while_primary_active", codes)
+        self.assertIn("unbound_listener_official", codes)
+
+    def test_detect_environment_inconsistencies_reports_binding_mismatch(self):
+        envs = [
+            {"id": "primary", "active": True, "running": True},
+            {"id": "official", "active": False, "running": False},
+        ]
+        with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}):
+            issues = dashboard.detect_environment_inconsistencies(envs, "primary")
+        codes = {item["code"] for item in issues}
+        self.assertIn("binding_config_mismatch", codes)
+        self.assertIn("bound_env_not_running_official", codes)
 
     def test_build_model_failure_summary_classifies_auth_failure(self):
         summary = dashboard.build_model_failure_summary(
@@ -1216,7 +1229,7 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(old_pid, "2222")
         self.assertEqual(new_pid, "3333")
         self.assertEqual(env_id, "official")
-        self.assertEqual(store.append_runtime_event.call_count, 2)
+        self.assertEqual(store.append_runtime_event.call_count, 4)
         write_active_binding.assert_called_once()
         self.assertEqual(write_active_binding.call_args.args[2], "official")
         self.assertEqual(write_active_binding.call_args.kwargs["switch_state"], "committed")
@@ -1261,7 +1274,7 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(old_pid, "1111")
         self.assertEqual(new_pid, "4444")
         self.assertEqual(env_id, "primary")
-        self.assertEqual(store.append_runtime_event.call_count, 2)
+        self.assertEqual(store.append_runtime_event.call_count, 4)
         write_active_binding.assert_called_once()
         self.assertEqual(write_active_binding.call_args.args[2], "primary")
         self.assertEqual(write_active_binding.call_args.kwargs["switch_state"], "committed")
@@ -1406,10 +1419,14 @@ class DashboardMemoryTests(unittest.TestCase):
             mock.patch.object(dashboard, "get_system_metrics", return_value={}), \
             mock.patch.object(dashboard, "get_recent_anomalies", return_value=[]), \
             mock.patch.object(dashboard, "build_context_lifecycle_readiness", return_value={"ready": False}), \
+            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary", "switch_state": "committed", "updated_at": 123}), \
+            mock.patch.object(dashboard.STORE, "load_runtime_value", side_effect=lambda key, default=None: [{"status": "verified"}] if key == "binding_audit_events" else default), \
             mock.patch.object(dashboard, "env_spec", return_value={"id": "primary"}):
             payload = dashboard.build_shared_state_snapshot({"REFLECTION_INTERVAL_SECONDS": 3600, "LEARNING_PROMOTION_THRESHOLD": 3})
         self.assertIn("context_lifecycle", payload)
         self.assertIn("learning_promotion_policy", payload)
+        self.assertIn("binding_audit", payload)
+        self.assertEqual(payload["binding_audit"]["active_env"], "primary")
 
 
 if __name__ == "__main__":

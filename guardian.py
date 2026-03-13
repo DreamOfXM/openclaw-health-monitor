@@ -106,8 +106,9 @@ def commit_active_binding(env_id: str) -> None:
     if env_id not in {"primary", "official"}:
         return
     try:
-        write_active_binding(BASE_DIR, CONFIG, env_id, switch_state="committed")
+        binding = write_active_binding(BASE_DIR, CONFIG, env_id, switch_state="committed")
     except Exception:
+        binding = {"expected": {}, "binding_version": 1}
         pass
     try:
         spec = all_env_specs()[env_id]
@@ -117,10 +118,23 @@ def commit_active_binding(env_id: str) -> None:
                 "env_id": env_id,
                 "updated_at": int(time.time()),
                 "switch_state": "committed",
+                "binding_version": binding.get("binding_version") or 1,
                 "gateway_label": spec["gateway_label"],
                 "gateway_port": spec["port"],
                 "config_path": str(spec["config_path"]),
+                "expected": binding.get("expected") or {},
             },
+        )
+        STORE.append_runtime_event(
+            "binding_audit_events",
+            {
+                "source": "guardian.commit",
+                "env_id": env_id,
+                "status": "committed",
+                "details": {"gateway_port": spec["port"], "gateway_label": spec["gateway_label"]},
+                "timestamp_iso": datetime.now().isoformat(),
+            },
+            limit=200,
         )
     except Exception:
         pass
