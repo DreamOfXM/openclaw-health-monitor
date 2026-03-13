@@ -23,7 +23,7 @@ It describes:
 Its real role is to provide an external runtime governance layer for OpenClaw:
 
 - keep OpenClaw continuously operable
-- provide environment control for `primary` and `official`
+- provide environment control for `primary`
 - observe real execution instead of trusting free-form model output
 - detect silent failures, stuck tasks, and reply-loss cases
 - enforce a task/control protocol outside OpenClaw core
@@ -50,8 +50,7 @@ In short:
 ### 2.2 Health Monitor Owns
 
 - process and HTTP health monitoring
-- active-environment selection and switching
-- isolated validation environment lifecycle
+- active-environment management
 - task registry and control actions
 - anomaly detection and runtime diagnosis
 - restart / recovery / rollback policy
@@ -102,7 +101,7 @@ There are three primary runtime pieces in this repository:
 
 - Dashboard: operator surface
 - Guardian: background control-plane worker
-- Environment managers: shell-based runtime controllers for `primary` and `official`
+- Environment manager: shell-based runtime controller for `primary`
 
 ## 4. Runtime Components
 
@@ -159,16 +158,13 @@ Guardian is the core automation loop of the product.
 Main files:
 
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
-- [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 
 Responsibilities:
 
 - start / stop Dashboard
 - start / stop Guardian
 - start / stop current active gateway
-- prepare and update isolated `official` worktree
 - bootstrap launch agents
-- enforce environment-specific gateway startup
 
 ## 4.4 Configuration Layer
 
@@ -214,8 +210,6 @@ The product supports two OpenClaw environments:
 
 - `primary`
   - the current working environment
-- `official`
-  - isolated validation environment tracking the configured remote ref
 
 Environment metadata is resolved in Dashboard via:
 
@@ -229,34 +223,17 @@ Key config fields:
 - `OPENCLAW_HOME`
 - `OPENCLAW_CODE`
 - `GATEWAY_PORT`
-- `OPENCLAW_OFFICIAL_STATE`
-- `OPENCLAW_OFFICIAL_CODE`
-- `OPENCLAW_OFFICIAL_PORT`
-- `OPENCLAW_OFFICIAL_REF`
 
 ### 5.1 Intended Invariant
 
 The intended product invariant is:
 
-- only one environment may be active
-- all start / stop / restart actions must resolve through `ACTIVE_OPENCLAW_ENV`
-- the inactive environment must not keep a running gateway
+- single environment mode
+- all start / stop / restart actions must resolve through `desktop_runtime.sh`
 
 This invariant is now also documented in:
 
 - [internal-requirements.md](/Users/hangzhou/openclaw-health-monitor/docs/internal-requirements.md)
-
-### 5.2 Actual Current Status
-
-The product intends single-active-environment behavior, but this is still an active stabilization area.
-
-Recent fixes already landed for:
-
-- Dashboard restart respecting the active environment
-- Guardian restart respecting the active environment
-- runtime `start gateway` routing through the active-environment controller
-
-However, this remains a live operational risk and should still be treated as a release-critical invariant until all entry points are fully sealed.
 
 ## 6. Environment Lifecycle
 
@@ -268,29 +245,6 @@ It uses:
 
 - code: `/Users/hangzhou/openclaw-workspace/openclaw`
 - state: `~/.openclaw`
-
-### 6.2 Official
-
-`official` is an isolated validation install created from the configured upstream ref.
-
-Manager:
-
-- [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
-
-Flow:
-
-1. ensure worktree
-2. sync selected private state into isolated state dir
-3. rewrite relevant paths from source to target
-4. rotate gateway token
-5. build the isolated repo
-6. launch a dedicated gateway on the official port
-
-### 6.3 Official Dashboard Open Path
-
-The monitor generates environment-specific dashboard URLs from:
-
-- gateway token
 - gateway URL
 - control UI build status
 
@@ -304,17 +258,15 @@ The current product can be viewed as 8 functional modules.
 
 What it does:
 
-- show `primary` and `official`
-- show code path, state path, git head, target head, running and healthy state
-- switch active environment
-- manage official prepare / start / stop / update
-- open the correct dashboard only for the active environment
+- show `primary` environment
+- show code path, state path, git head, running and healthy state
+- restart gateway
+- open the dashboard for the active environment
 
 Primary files:
 
 - [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
-- [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 
 ## 7.2 Runtime Health Monitoring
 
@@ -383,7 +335,6 @@ What it does:
 - create snapshots
 - restore latest or selected snapshots
 - track stable version state
-- update official validation environment
 
 Primary files:
 
@@ -553,26 +504,14 @@ As of now, the product should be understood as:
 More concretely:
 
 - strong: dashboard, guardian loop, task registry, control actions, learning center
-- medium: environment switching, restart discipline, official validation isolation
-- weak: single-active-environment hard guarantee across all possible entry points
+- medium: restart discipline
 - weak: upstream model/provider reliability when custom providers reject auth
 
 ## 12. Known Current Gaps
 
 The main current gaps are the following.
 
-## 12.1 Single-Active-Environment Is Not Fully Sealed
-
-Intended behavior:
-
-- only one of `primary` or `official` should be listening
-
-Current reality:
-
-- some runtime paths have already been fixed
-- but this remains an active regression risk and must continue to be treated as a P0 runtime invariant
-
-## 12.2 Model Invocation Reliability Is Outside the Monitor Boundary
+## 12.1 Model Invocation Reliability Is Outside the Monitor Boundary
 
 The monitor can:
 
