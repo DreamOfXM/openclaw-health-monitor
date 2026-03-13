@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -123,6 +124,12 @@ def rewrite_path_string(value: str, source_root: Path, target_root: Path) -> str
     return value
 
 
+def rewrite_path_tokens(value: str, source_root: Path, target_root: Path) -> str:
+    source = re.escape(str(source_root))
+    pattern = re.compile(rf"{source}(?=$|[\s'\"=:,;/)])")
+    return pattern.sub(str(target_root), value)
+
+
 class PromotionController:
     def __init__(
         self,
@@ -185,6 +192,27 @@ class PromotionController:
             raise RuntimeError(stderr or stdout or "failed to reset primary repo")
         return {"official_head": official_head}
 
+    def build_primary_runtime_artifacts(self) -> dict[str, Any]:
+        primary = self.specs["primary"]
+        code_root = Path(primary["code"])
+        env = dict(os.environ)
+        env["CI"] = "1"
+        code, stdout, stderr = self._run(["pnpm", "install", "--frozen-lockfile"], env=env, timeout=1200)
+        if code != 0:
+            raise RuntimeError(stderr or stdout or "failed to install primary dependencies")
+        code, stdout, stderr = self._run(["pnpm", "build"], env=env, timeout=1800)
+        if code != 0:
+            raise RuntimeError(stderr or stdout or "failed to build primary runtime artifacts")
+        required = [
+            code_root / "dist" / "plugin-sdk" / "index.js",
+            code_root / "dist" / "plugin-sdk" / "feishu.js",
+            code_root / "dist" / "plugin-sdk" / "qwen-portal-auth.js",
+        ]
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise RuntimeError(f"primary runtime artifacts missing after build: {', '.join(missing)}")
+        return {"built": True, "required": [str(path) for path in required]}
+
     def sync_primary_state_from_official(self) -> dict[str, Any]:
         primary = self.specs["primary"]
         official = self.specs["official"]
@@ -233,7 +261,8 @@ class PromotionController:
                 source_file = source / name
                 if source_file.exists():
                     content = source_file.read_text(encoding="utf-8")
-                    content = content.replace(str(official_home), str(primary_home)).replace(str(official_code), str(primary_code))
+                    content = rewrite_path_tokens(content, official_home, primary_home)
+                    content = rewrite_path_tokens(content, official_code, primary_code)
                     (target / name).write_text(content, encoding="utf-8")
 
         return {"primary_config": str(primary_cfg_path)}
@@ -303,12 +332,14 @@ class PromotionController:
 
         try:
             code_sync = self.sync_primary_code_from_official()
+            build_sync = self.build_primary_runtime_artifacts()
             state_sync = self.sync_primary_state_from_official()
             self._save_state({
                 "status": "cutover",
                 "preflight": preflight,
                 "backups": backups,
                 "code_sync": code_sync,
+                "build_sync": build_sync,
                 "state_sync": state_sync,
             })
             cutover = self.cutover_primary()
@@ -319,6 +350,7 @@ class PromotionController:
                 "preflight_warning": proceed_with_warnings,
                 "backups": backups,
                 "code_sync": code_sync,
+                "build_sync": build_sync,
                 "state_sync": state_sync,
                 "cutover": cutover,
                 "verification": verification,

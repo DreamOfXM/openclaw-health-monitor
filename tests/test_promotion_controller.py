@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from promotion_controller import PromotionController, build_preflight, rewrite_path_string
+from promotion_controller import PromotionController, build_preflight, rewrite_path_string, rewrite_path_tokens
 
 
 class FakeStore:
@@ -30,6 +30,18 @@ class PromotionControllerTests(unittest.TestCase):
         self.assertEqual(
             rewrite_path_string("/Users/hangzhou/.openclaw-official/workspace", source, target),
             "/Users/hangzhou/.openclaw-official/workspace",
+        )
+
+    def test_rewrite_path_tokens_updates_embedded_paths_without_double_rewriting(self):
+        source = Path("/Users/hangzhou/.openclaw")
+        target = Path("/Users/hangzhou/.openclaw-official")
+        self.assertEqual(
+            rewrite_path_tokens("home=/Users/hangzhou/.openclaw\n", source, target),
+            "home=/Users/hangzhou/.openclaw-official\n",
+        )
+        self.assertEqual(
+            rewrite_path_tokens("home=/Users/hangzhou/.openclaw-official\n", source, target),
+            "home=/Users/hangzhou/.openclaw-official\n",
         )
 
     def test_build_preflight_accepts_healthy_official(self):
@@ -154,6 +166,7 @@ class PromotionControllerTests(unittest.TestCase):
 
         with mock.patch.object(controller, "capture_backups", return_value={"primary": "snap-a", "official": "snap-b"}), \
             mock.patch.object(controller, "sync_primary_code_from_official", return_value={"official_head": "bbb222"}), \
+            mock.patch.object(controller, "build_primary_runtime_artifacts", return_value={"built": True}), \
             mock.patch.object(controller, "sync_primary_state_from_official", return_value={"primary_config": "cfg"}), \
             mock.patch.object(controller, "cutover_primary", return_value={"message": "started"}), \
             mock.patch.object(controller, "verify_primary", return_value={"checks": [{"name": "main_agent", "ok": True}]}):
@@ -161,6 +174,7 @@ class PromotionControllerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "promoted")
         self.assertEqual(store.saved[-1][1]["status"], "promoted")
+        self.assertTrue(result["build_sync"]["built"])
 
     def test_run_allows_manual_promotion_when_preflight_warns(self):
         store = FakeStore()
@@ -173,6 +187,7 @@ class PromotionControllerTests(unittest.TestCase):
 
         with mock.patch.object(controller, "capture_backups", return_value={"primary": "snap-a", "official": "snap-b"}), \
             mock.patch.object(controller, "sync_primary_code_from_official", return_value={"official_head": "bbb222"}), \
+            mock.patch.object(controller, "build_primary_runtime_artifacts", return_value={"built": True}), \
             mock.patch.object(controller, "sync_primary_state_from_official", return_value={"primary_config": "cfg"}), \
             mock.patch.object(controller, "cutover_primary", return_value={"message": "started"}), \
             mock.patch.object(controller, "verify_primary", return_value={"checks": [{"name": "main_agent", "ok": True}]}):
