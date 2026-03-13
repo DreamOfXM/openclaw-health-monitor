@@ -1,0 +1,20 @@
+# Shared State Model
+
+- task-registry-snapshot.json: 当前任务注册表快照
+- current-task-facts.json: 当前任务事实摘要
+- control-action-queue.json: 待处理控制动作队列
+- runtime-health.json: 运行健康与最近异常
+- learning-backlog.json: learning / reflection / suggestions
+- learning-runtime-status.json: OpenClaw 学习产物状态与 freshness 摘要
+- reflection-freshness.json: reflection / maintenance / rollup 最近运行状态
+- memory-freshness.json: MEMORY.md 更新时间与 freshness
+- reuse-evidence-summary.json: promoted knowledge 复用证据摘要
+- self-check-runtime-status.json: OpenClaw 内部 self-check 最近运行与恢复摘要
+- self-check-events.json: OpenClaw 内部 self-check 最近事件
+- control-plane-summary.json: 控制面统计与解释
+- learning-promotion-policy.json: learning promote 规则与阈值
+- context-lifecycle-baseline.json: 推荐长期运行基线模板
+- bootstrap-status.json: 初始化结构与配置补齐状态
+- watcher-summary.json: 任务监督器摘要与 completed/delivered 区分
+- restart-runtime-status.json: 最近重启链路摘要与最后成功/失败结果
+- restart-events.json: 最近重启事件时间线
