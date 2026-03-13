@@ -276,13 +276,15 @@ class PromotionController:
     def run(self, environments: list[dict[str, Any]], task_registry: dict[str, Any]) -> dict[str, Any]:
         preflight = build_preflight(environments, task_registry)
         self._save_state({"status": "preflight", "preflight": preflight})
-        if not preflight["safe_to_promote"]:
-            result = {"status": "failed_preflight", "preflight": preflight}
-            self._save_state(result)
-            return result
+        proceed_with_warnings = not preflight["safe_to_promote"]
 
         backups = self.capture_backups("before-promotion")
-        self._save_state({"status": "backup", "preflight": preflight, "backups": backups})
+        self._save_state({
+            "status": "backup",
+            "preflight": preflight,
+            "preflight_warning": proceed_with_warnings,
+            "backups": backups,
+        })
         primary_head = preflight.get("primary_git_head", "")
 
         try:
@@ -300,6 +302,7 @@ class PromotionController:
             result = {
                 "status": "promoted",
                 "preflight": preflight,
+                "preflight_warning": proceed_with_warnings,
                 "backups": backups,
                 "code_sync": code_sync,
                 "state_sync": state_sync,
@@ -314,6 +317,7 @@ class PromotionController:
                 "status": "rolled_back",
                 "error": str(exc),
                 "preflight": preflight,
+                "preflight_warning": proceed_with_warnings,
                 "backups": backups,
                 "rollback": rollback,
             }

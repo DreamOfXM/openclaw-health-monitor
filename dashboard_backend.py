@@ -2777,7 +2777,11 @@ def execute_official_promotion() -> dict:
     if backups:
         details["snapshots"] = backups
     if status == "promoted":
-        record_change("version", "官方验证版晋升为当前主用版", details)
+        if result.get("preflight_warning"):
+            details["checks"] = result.get("preflight", {}).get("checks", [])
+            record_change("version", "官方验证版带预警晋升为当前主用版", details)
+        else:
+            record_change("version", "官方验证版晋升为当前主用版", details)
     elif status == "rolled_back":
         details["error"] = result.get("error", "")
         record_change("recover", "官方验证版晋升失败，已回滚主用版", details)

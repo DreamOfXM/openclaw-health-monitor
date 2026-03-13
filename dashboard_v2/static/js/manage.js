@@ -155,7 +155,7 @@ async function loadPromotionStatus() {
                     message: taskReady ? '' : '正在加载任务状态'
                 }
             ];
-            allPassed = healthReady && taskReady && checks.every(check => check.passed) && Boolean(promotionSummary.safe_to_promote);
+            allPassed = healthReady && taskReady && checks.every(check => check.passed);
         }
 
         const promotionStatusEl = document.getElementById('promotion-status');
@@ -171,7 +171,9 @@ async function loadPromotionStatus() {
                     ? 'ℹ️ Official 验证环境未启动'
                     : '❌ Official 环境未运行';
             } else {
-                headline = promotionSummary.headline || (allPassed ? '✅ 可以晋升' : '❌ 条件不满足');
+                headline = allPassed
+                    ? '✅ 可以晋升'
+                    : (promotionSummary.headline || '❌ 条件不满足');
             }
             promotionReadyEl.textContent = headline;
         }
@@ -219,7 +221,11 @@ async function loadPromotionStatus() {
         if (currentEnvStatus) {
             currentEnvStatus.textContent = !isOfficialRunning && activeEnv === 'primary'
                 ? '当前主用版正在运行；如需走验证晋升，请先启动 Official 环境。'
-                : (promotionSummary.recommended_action || '当前激活环境');
+                : (
+                    allPassed
+                        ? '当前检查项已全部通过；如需切换，可直接执行版本晋升。'
+                        : (promotionSummary.recommended_action || '当前激活环境')
+                );
         }
 
         const activeBadge = document.getElementById('active-env');
@@ -469,7 +475,8 @@ async function executePromotion() {
     if (!response.success) {
         throw new Error(response.error || response.data?.message || '晋升失败');
     }
-    showToast(response.data.message || '版本晋升已执行', 'success');
+    const warning = response.data?.preflight_warning;
+    showToast(response.data.message || (warning ? '版本晋升已执行（带预警）' : '版本晋升已执行'), warning ? 'info' : 'success');
     await loadManageData();
 }
 

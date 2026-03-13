@@ -103,6 +103,25 @@ class PromotionControllerTests(unittest.TestCase):
         self.assertEqual(result["status"], "promoted")
         self.assertEqual(store.saved[-1][1]["status"], "promoted")
 
+    def test_run_allows_manual_promotion_when_preflight_warns(self):
+        store = FakeStore()
+        controller = PromotionController(Path("/tmp/base"), store, {})
+        environments = [
+            {"id": "primary", "git_head": "aaa111", "running": False, "healthy": False},
+            {"id": "official", "git_head": "bbb222", "running": True, "healthy": True},
+        ]
+        task_registry = {"summary": {"blocked": 0}, "current": {"control": {"control_state": "blocked_unverified"}}}
+
+        with mock.patch.object(controller, "capture_backups", return_value={"primary": "snap-a", "official": "snap-b"}), \
+            mock.patch.object(controller, "sync_primary_code_from_official", return_value={"official_head": "bbb222"}), \
+            mock.patch.object(controller, "sync_primary_state_from_official", return_value={"primary_config": "cfg"}), \
+            mock.patch.object(controller, "cutover_primary", return_value={"message": "started"}), \
+            mock.patch.object(controller, "verify_primary", return_value={"checks": [{"name": "main_agent", "ok": True}]}):
+            result = controller.run(environments, task_registry)
+
+        self.assertEqual(result["status"], "promoted")
+        self.assertTrue(result["preflight_warning"])
+
 
 if __name__ == "__main__":
     unittest.main()
