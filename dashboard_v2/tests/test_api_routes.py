@@ -6,6 +6,7 @@ import unittest
 import json
 import sys
 import os
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -255,6 +256,18 @@ class TestFlaskRoutes(unittest.TestCase):
             with self.subTest(path=path):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
+
+    def test_promote_returns_structured_preflight_failure_without_http_500(self):
+        with mock.patch('routes.environments.get_collector') as get_collector:
+            get_collector.return_value.promote_environment.return_value = {
+                'status': 'failed_preflight',
+                'preflight': {'safe_to_promote': False},
+            }
+            response = self.client.post('/api/v2/environments/promote', json={'confirmation': 'PROMOTE'})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload['success'])
+        self.assertEqual(payload['data']['status'], 'failed_preflight')
 
 
 if __name__ == '__main__':

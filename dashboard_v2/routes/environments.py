@@ -91,13 +91,16 @@ def promote_environment():
         status = str(result.get('status') or '')
         success = status == 'promoted'
         message = str(result.get('error') or result.get('message') or status or '晋升流程已结束')
+        response_status = 200
+        if status in {'error', 'failed'}:
+            response_status = 500
         return jsonify({
             'success': success,
             'data': {
                 **result,
                 'message': message,
             }
-        }), (200 if success else 500)
+        }), response_status
     except Exception as e:
         return jsonify({
             'success': False,
