@@ -43,7 +43,7 @@
 
 - `schema_version`: 当前 schema 版本，例如 `learning.v1`
 - `record_id`: 当前记录唯一 id
-- `env_id`: `primary` / `official`
+- `env_id`: `primary`
 - `created_at`: unix timestamp
 - `updated_at`: unix timestamp
 - `source`: `openclaw`
@@ -72,7 +72,7 @@
   "source_agent": "main",
   "source_run_id": "run-001",
   "positive_evidence": [
-    {"type": "log", "ref": "logs/openclaw-official.log#receipt-dev-completed"},
+    {"type": "log", "ref": "logs/openclaw.log#receipt-dev-completed"},
     {"type": "watcher", "ref": "watcher:task-123", "note": "completed_not_delivered"}
   ],
   "negative_evidence": [

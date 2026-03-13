@@ -47,38 +47,35 @@
 
 问题：
 
-- 仍存在 `primary` 与 `official` 双监听回归风险
-- 说明仍有入口绕过统一环境调度
+- 需要确保 gateway 启动/停止/重启入口统一
 
 范围：
 
-- 收口所有 gateway start/stop/restart/switch 入口
-- 统一以 `ACTIVE_OPENCLAW_ENV` 为准
+- 收口所有 gateway start/stop/restart 入口
+- 统一以 `desktop_runtime.sh` 为准
 
 涉及文件：
 
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
-- [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
-- 任意入口触发操作后，只存在一个 gateway listener
-- `18789` 与 `19021` 不会同时处于有效运行态
+- 任意入口触发操作后，gateway 正常运行
+- 端口 `18789` 正常监听
 
-### HM-002 单活环境回归测试补齐
+### HM-002 环境监控测试补齐
 
 优先级：`P0`
 
 问题：
 
-- 单活约束如果没有全链路测试，极易回归
+- 环境监控如果没有全链路测试，极易回归
 
 范围：
 
 - 补齐 Dashboard、Guardian、runtime controller 三类入口测试
-- 把双监听视为 release blocker
 
 涉及文件：
 
@@ -87,8 +84,8 @@
 
 验收标准：
 
-- 覆盖环境切换、面板重启、守护重启、gateway 启动
-- 发生双监听时测试失败
+- 覆盖环境重启、守护重启、gateway 启动
+- 发生异常时测试失败
 
 ### HM-003 环境卡片可信化
 
@@ -114,7 +111,7 @@
 
 验收标准：
 
-- 不需要读日志即可区分 `primary` 和 `official`
+- 不需要读日志即可确认当前环境状态
 
 ### HM-004 环境不一致告警
 
@@ -127,9 +124,9 @@
 范围：
 
 - 检测并告警：
-  - `active=official` 但 `primary` 仍监听
-  - `active=primary` 但 `official` 仍监听
-  - `active env` 与 Dashboard 打开入口不一致
+  - gateway 未运行
+  - Guardian 未运行
+  - 配置与实际状态不一致
 
 涉及文件：
 

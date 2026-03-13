@@ -4,8 +4,8 @@
 
 与 [product-architecture-review.md](/Users/hangzhou/openclaw-health-monitor/docs/product-architecture-review.md) 的区别是：
 
-- 评审稿回答“我们是什么”
-- 本文回答“下一步具体做什么”
+- 评审稿回答"我们是什么"
+- 本文回答"下一步具体做什么"
 
 学习反思重构相关执行文档：
 
@@ -46,36 +46,33 @@
 
 目标：
 
-- 系统在任何时刻都清楚“哪套环境在跑”
-- 所有启动、重启、切换行为都只能作用于当前激活环境
-- 不再出现双环境同时监听但系统认知漂移的情况
+- 系统在任何时刻都清楚"哪套环境在跑"
+- 所有启动、重启行为都作用于当前环境
+- 系统状态清晰可控
 
-### P0-1 单活环境硬约束
+### P0-1 环境监控硬约束
 
 问题：
 
-- 当前 `primary` / `official` 仍存在双监听回归风险
-- 说明还有启动入口未完全收口
+- 需要确保 gateway 启停入口统一
 
 交付内容：
 
 - 统一所有 gateway 启停入口
-- 所有 start / stop / restart / switch 都必须走 `ACTIVE_OPENCLAW_ENV`
-- 增加后台自检：发现 `18789` 与 `19021` 同时监听时，记录为 P0 异常
+- 所有 start / stop / restart 都必须走 `desktop_runtime.sh`
+- 增加后台自检：发现 gateway 未运行时，记录为 P0 异常
 
 涉及模块：
 
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
-- [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 - [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 
 验收标准：
 
-- 任意入口触发重启后，只存在一套 gateway listener
-- Dashboard 显示的 active env 与实际 listener 一致
+- 任意入口触发重启后，gateway 正常运行
+- Dashboard 显示的状态与实际一致
 - 自动化测试覆盖：
-  - 切换环境
   - Dashboard 重启
   - Guardian 自动重启
   - runtime `start gateway`
@@ -85,7 +82,6 @@
 问题：
 
 - 现在环境卡片虽然有 code/path/head，但辨识度仍然不足
-- 用户仍可能怀疑“官方验证版是不是其实还是主用版”
 
 交付内容：
 
@@ -97,8 +93,8 @@
   - gateway token 前缀
   - listener pid
 - 加入环境不一致告警：
-  - active=official 但 primary 仍在监听
-  - active=primary 但 official 仍在监听
+  - gateway 未运行
+  - Guardian 未运行
 
 涉及模块：
 
@@ -113,12 +109,12 @@
 
 问题：
 
-- 当前用户容易把“无回复”误判成重启没生效或环境切错
+- 当前用户容易把"无回复"误判成重启没生效或环境切错
 - 实际上可能是 provider 401 / empty response / fallback 问题
 
 交付内容：
 
-- 在 Dashboard 中新增“最新模型调用失败摘要”
+- 在 Dashboard 中新增"最新模型调用失败摘要"
 - 区分：
   - auth failure
   - empty response
@@ -132,7 +128,7 @@
 
 验收标准：
 
-- 用户问“为什么没回复”时，面板可直接给出失败层级
+- 用户问"为什么没回复"时，面板可直接给出失败层级
 
 ---
 
@@ -140,7 +136,7 @@
 
 目标：
 
-- 让系统知道“任务是否真的开始、真的推进、真的完成”
+- 让系统知道"任务是否真的开始、真的推进、真的完成"
 - 把自由文本判断进一步替换为结构化证据
 
 ### P1-1 控制协议 formal 化
@@ -178,7 +174,7 @@
 问题：
 
 - 当前很多任务落在 `received_only / missing_pipeline_receipt`
-- 说明“任务开始”和“任务真正完成”之间证据不够
+- 说明"任务开始"和"任务真正完成"之间证据不够
 
 交付内容：
 
@@ -204,7 +200,7 @@
 
 交付内容：
 
-- 引入“当前活跃任务优先”规则
+- 引入"当前活跃任务优先"规则
 - 旧任务结果只能作为 background result 附着
 - 不允许抢占当前对外首条回复位
 
@@ -222,7 +218,7 @@
 
 问题：
 
-- 当前“任务是否真正完成、是否真正回给用户”仍缺少 OpenClaw 内生闭环模型
+- 当前"任务是否真正完成、是否真正回给用户"仍缺少 OpenClaw 内生闭环模型
 - `health-monitor` 已经能监督很多风险，但不该继续承担主闭环判断
 
 交付内容：
@@ -255,7 +251,7 @@
 
 目标：
 
-- 不只是“看住 OpenClaw”
+- 不只是"看住 OpenClaw"
 - 而是把整个系统推向可持续运行的 Agent OS
 
 ### P2-1 上下文生命周期治理
@@ -281,7 +277,7 @@
 
 验收标准：
 
-- 面板能识别“context lifecycle 配置是否达标”
+- 面板能识别"context lifecycle 配置是否达标"
 - 长 session 不再无限膨胀
 
 ### P2-2 记忆闭环统一化
@@ -331,12 +327,12 @@
 问题：
 
 - 现在已有 learning / reflection / readiness 的局部能力
-- 但还没有形成“可初始化、可验收、可回放”的统一基线
+- 但还没有形成"可初始化、可验收、可回放"的统一基线
 
 交付内容：
 
 - 工作区初始化能力
-- 配置“合并补齐”策略
+- 配置"合并补齐"策略
 - bootstrap status / config drift 输出
 - 独立验收清单与回放材料
 
@@ -349,7 +345,7 @@
 
 验收标准：
 
-- 可对已有 OpenClaw 环境执行“合并补齐”
+- 可对已有 OpenClaw 环境执行"合并补齐"
 - Dashboard 能展示 bootstrap status 和 config drift
 - 有单独的验收/回放清单可逐条核对
 
@@ -382,7 +378,7 @@
 
 问题：
 
-- 当前缺少“completed != delivered”的最小监督闭环
+- 当前缺少"completed != delivered"的最小监督闭环
 
 交付内容：
 
@@ -443,7 +439,7 @@
 
 - 任意时刻只允许一套 gateway 有效运行
 - 环境切换与重启行为完全可预测
-- 用户能直接区分“环境问题”和“模型问题”
+- 用户能直接区分"环境问题"和"模型问题"
 
 ### P1 完成定义
 
@@ -470,7 +466,7 @@
 2. 把任务协议做实
 3. 再把长期运行能力补齐
 
-也就是说，下一阶段的判断标准不是“页面看起来更丰富”，而是：
+也就是说，下一阶段的判断标准不是"页面看起来更丰富"，而是：
 
 - 是否更稳定
 - 是否更可信

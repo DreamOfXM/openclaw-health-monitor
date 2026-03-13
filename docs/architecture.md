@@ -12,7 +12,7 @@ flowchart LR
     H[Guardian]
     D[Dashboard]
     S[(monitor.db<br/>SQLite state store)]
-    M[Managed Environments<br/>primary / official]
+    M[Managed Environment<br/>primary]
 
     U -->|messages / queries| G
     G -->|spawn / receipts / progress| A
@@ -21,7 +21,7 @@ flowchart LR
     H -->|health check / log scan| G
     H -->|environment control| M
     H -->|persist tasks / incidents / runtime state| S
-    D -->|read status / switch env / inspect tasks| S
+    D -->|read status / inspect tasks| S
     D -->|operator actions| H
     D -->|environment links| M
     M -->|active target| G
@@ -29,24 +29,16 @@ flowchart LR
 
 ## 2. Managed Environment Model
 
-```mermaid
-flowchart TD
-    P[primary<br/>current working OpenClaw]
-    O[official<br/>isolated upstream validation]
-    C[Environment Selector]
-    H[Guardian]
+Health Monitor operates in **single environment mode**:
 
-    C -->|ACTIVE_OPENCLAW_ENV| P
-    C -->|ACTIVE_OPENCLAW_ENV| O
-    H -->|only guards active env| P
-    H -->|only guards active env| O
-```
+- Only one OpenClaw environment (`primary`) is managed
+- Guardian guards the active environment
+- No environment switching or promotion needed
 
 Rules:
 
-- only one OpenClaw environment is active at a time
 - Guardian follows the active environment recorded in config and SQLite runtime state
-- manual environment switching outside Health Monitor can temporarily desync the panel until the next explicit switch or resync
+- All operations target the `primary` environment
 
 ## 3. External Task Registry
 
@@ -213,5 +205,7 @@ This separation is what allows Health Monitor to remain robust while OpenClaw it
 
 ## 11. Related Design Docs
 
-- `docs/architecture-official-promotion.md`
-  - controlled promotion of validated `official` into stable `primary`
+- `docs/control-plane-boundary-matrix.md`
+  - defines the boundary between OpenClaw (execution plane) and Health Monitor (control plane)
+- `docs/subagent-communication-protocol.md`
+  - communication protocol for subagent coordination
