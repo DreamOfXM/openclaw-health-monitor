@@ -147,6 +147,7 @@ cd ~/openclaw-health-monitor
 - 当前迁移工作分支是 `dashboard-v2-primary-console`；在合并到 `main` 之前，后续控制台维护默认继续在这个分支上进行
 - 本地运行数据不再纳入版本管理：`.learnings/*.md`、`MEMORY.md`、`memory/*.md`、`data/shared-state/*.json`、`data/current-task-facts.json`、`data/task-registry-summary.json`、`data/*.db-shm`、`data/*.db-wal`
 - `data/shared-state/README.md` 仍保留在仓库中，用来说明 shared-state 目录结构；其余运行态 JSON 只作为本机事实源，不作为源码提交内容
+- 持续维护时可参考 `docs/dashboard-v2-maintenance-checklist.md`
 
 ## 功能概览
 
@@ -797,6 +798,7 @@ This avoids two OpenClaw instances competing for the same channels.
 - the current migration branch is `dashboard-v2-primary-console`; until this work lands in `main`, treat that branch as the default place for ongoing console maintenance
 - local runtime artifacts are no longer source-controlled: `.learnings/*.md`, `MEMORY.md`, `memory/*.md`, `data/shared-state/*.json`, `data/current-task-facts.json`, `data/task-registry-summary.json`, `data/*.db-shm`, and `data/*.db-wal`
 - `data/shared-state/README.md` stays in git to document the shared-state contract; the rest of the runtime JSON files remain local machine facts rather than repository source
+- use `docs/dashboard-v2-maintenance-checklist.md` as the quick maintenance baseline
 
 Important:
 
