@@ -6,7 +6,7 @@
 
 ## Title
 
-OpenClaw Health Monitor v0.1.0: local guard, dashboard, and macOS desktop prototype
+OpenClaw Health Monitor v0.1.0: local guard, Dashboard V2 console, and macOS desktop prototype
 
 ## Summary
 
@@ -14,7 +14,7 @@ OpenClaw Health Monitor is an open-source-friendly local guard layer for OpenCla
 This release focuses on three things:
 
 - stable local monitoring and recovery
-- operator-facing dashboard and diagnostics
+- operator-facing Dashboard V2 console and diagnostics
 - a macOS desktop wrapper prototype distributed as `.dmg` and `.app.zip`
 
 ## Highlights
@@ -22,7 +22,7 @@ This release focuses on three things:
 - real Gateway health probes instead of port-only checks
 - SQLite-backed local state store
 - config snapshot recovery as the default safe recovery path
-- dashboard support for snapshot list, create, and restore actions
+- Dashboard V2 support for snapshot list, create, and restore actions
 - runtime anomaly detection for no-reply, stuck stage, and gateway disconnect patterns
 - memory attribution view that separates process Top 15 and system memory
 - local operator scripts: `preflight`, `start`, `status`, `verify`, `stop`
@@ -36,8 +36,8 @@ This release focuses on three things:
 
 ## Known Limits
 
-- the desktop prototype wraps the local dashboard; it is not a fully self-contained app bundle
-- users still need the local Dashboard runtime available when using the current prototype flow
+- the desktop prototype wraps the local Dashboard V2 console; it is not a fully self-contained app bundle
+- users still need the local Dashboard V2 runtime available when using the current prototype flow
 - webhook or token values should not be present in tracked files or release artifacts
 - git history should be reviewed if secrets may have entered commits previously
 
@@ -49,15 +49,21 @@ This release focuses on three things:
 
 ```bash
 cd ~/openclaw-health-monitor
-make test
+.venv/bin/python -m pytest dashboard_v2/tests tests -q
 make pake
 make release
 ```
 
 4. Confirm tracked files do not include runtime artifacts.
 5. Confirm `config.conf` only contains safe placeholders.
-6. Confirm the dashboard starts and loads on a clean machine.
+6. Confirm Dashboard V2 starts and loads on a clean machine.
 7. Confirm the generated `.dmg` and `.app.zip` open correctly on macOS.
+
+## Migration Notes
+
+- `dashboard_v2/` is the primary console frontend for this release line.
+- `dashboard_backend.py` is the compatibility data layer behind the console.
+- local runtime artifacts such as `.learnings/*.md`, `MEMORY.md`, `memory/*.md`, `data/shared-state/*.json`, `data/current-task-facts.json`, `data/task-registry-summary.json`, `data/*.db-shm`, and `data/*.db-wal` should remain outside git history.
 
 ## Suggested Tags
 
