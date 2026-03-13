@@ -2794,6 +2794,7 @@ def manage_official_environment(action: str) -> tuple[bool, str]:
         "stop": "停止官方验证版",
         "update": "更新官方验证版",
         "install-schedule": "安装官方自动更新",
+        "remove-schedule": "关闭官方自动更新",
         "schedule-status": "查看官方自动更新状态",
     }
     if action not in allowed:
@@ -2804,6 +2805,18 @@ def manage_official_environment(action: str) -> tuple[bool, str]:
     code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), action], timeout=timeout)
     message = (stdout or stderr or allowed[action]).strip()
     return code == 0, message
+
+
+def set_official_auto_update_enabled(enabled: bool) -> tuple[bool, str, dict[str, Any]]:
+    normalized = "true" if enabled else "false"
+    if not save_config("OPENCLAW_OFFICIAL_AUTO_UPDATE", normalized):
+        return False, "保存自动更新配置失败", {}
+    action = "install-schedule" if enabled else "remove-schedule"
+    ok, message = manage_official_environment(action)
+    cfg = load_config()
+    envs = list_openclaw_environments(cfg)
+    official = next((item for item in envs if item.get("id") == "official"), {})
+    return ok, message, official
 
 
 # ========== API 端点 ==========

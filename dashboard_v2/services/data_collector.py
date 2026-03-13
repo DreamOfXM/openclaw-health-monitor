@@ -653,6 +653,18 @@ class DataCollector:
         self.invalidate_cache()
         return result
 
+    def set_official_auto_update(self, enabled: bool) -> Dict[str, Any]:
+        legacy = _legacy_dashboard()
+        success, message, official = legacy.set_official_auto_update_enabled(enabled)
+        self.invalidate_cache()
+        return {
+            "success": success,
+            "message": message,
+            "enabled": enabled,
+            "environment": official,
+            "timestamp": datetime.now().isoformat(),
+        }
+
     def invalidate_cache(self, key: Optional[str] = None):
         if key:
             self.cache.invalidate(key)

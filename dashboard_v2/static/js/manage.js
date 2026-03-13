@@ -25,6 +25,12 @@ function initManage() {
     document.getElementById('btn-switch-primary')?.addEventListener('click', () => {
         showConfirmModal('switch', { target: 'primary' });
     });
+    document.getElementById('btn-enable-official-auto-update')?.addEventListener('click', () => {
+        toggleOfficialAutoUpdate(true);
+    });
+    document.getElementById('btn-disable-official-auto-update')?.addEventListener('click', () => {
+        toggleOfficialAutoUpdate(false);
+    });
     document.getElementById('btn-save-config')?.addEventListener('click', saveConfig);
     document.getElementById('btn-confirm-cancel')?.addEventListener('click', hideConfirmModal);
     document.getElementById('btn-confirm-ok')?.addEventListener('click', executeConfirmedAction);
@@ -223,8 +229,43 @@ async function loadPromotionStatus() {
 
         // 更新环境切换按钮高亮状态
         updateSwitchButtons(envData.active_environment, envData.environments || []);
+        updateOfficialAutoUpdate(envData.environments || []);
     } catch (error) {
         console.error('加载晋升状态失败:', error);
+    }
+}
+
+function updateOfficialAutoUpdate(environments = []) {
+    const official = environments.find(item => item.id === 'official') || {};
+    const statusEl = document.getElementById('official-auto-update-status');
+    const detailEl = document.getElementById('official-auto-update-detail');
+    const enableBtn = document.getElementById('btn-enable-official-auto-update');
+    const disableBtn = document.getElementById('btn-disable-official-auto-update');
+    const enabled = Boolean(official.auto_update_enabled);
+    const expected = Boolean(official.auto_update_expected);
+    const installed = Boolean(official.auto_update_installed);
+    const drift = Boolean(official.auto_update_drift);
+    if (statusEl) {
+        statusEl.textContent = enabled ? '已启用' : '已关闭';
+    }
+    if (detailEl) {
+        detailEl.textContent = `配置=${expected ? '开启' : '关闭'} | 调度器=${installed ? '已安装' : '未安装'}${drift ? ' | 存在漂移' : ''}`;
+    }
+    if (enableBtn) enableBtn.disabled = enabled;
+    if (disableBtn) disableBtn.disabled = !enabled;
+}
+
+async function toggleOfficialAutoUpdate(enabled) {
+    try {
+        const response = await API.setOfficialAutoUpdate(enabled);
+        if (!response.success) {
+            throw new Error(response.error || response.data?.message || '切换官方自动更新失败');
+        }
+        showToast(response.data.message || (enabled ? '已启用官方自动更新' : '已关闭官方自动更新'), 'success');
+        await loadManageData();
+    } catch (error) {
+        console.error('切换官方自动更新失败:', error);
+        showToast('切换官方自动更新失败: ' + error.message, 'error');
     }
 }
 

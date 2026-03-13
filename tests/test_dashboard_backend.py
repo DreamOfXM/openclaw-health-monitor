@@ -1442,6 +1442,35 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("拒绝操作未绑定环境", message)
 
+    @mock.patch("dashboard_backend.manage_official_environment")
+    @mock.patch("dashboard_backend.save_config")
+    def test_set_official_auto_update_enabled(self, save_config, manage_official_environment):
+        save_config.return_value = True
+        manage_official_environment.return_value = (True, "Removed official OpenClaw update schedule.")
+        config = {
+            "ACTIVE_OPENCLAW_ENV": "official",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+            "OPENCLAW_OFFICIAL_PORT": 19001,
+            "OPENCLAW_OFFICIAL_AUTO_UPDATE": False,
+        }
+        with mock.patch.object(dashboard, "load_config", return_value=config), \
+            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}), \
+            mock.patch("dashboard_backend.Path.exists", return_value=False), \
+            mock.patch("dashboard_backend.get_listener_pid", side_effect=[1111, 2222]), \
+            mock.patch("dashboard_backend.read_git_head", side_effect=["abc123", "def456"]), \
+            mock.patch("dashboard_backend.env_has_control_ui_assets", side_effect=[True, True]), \
+            mock.patch("dashboard_backend.check_gateway_health_for_env", side_effect=[True, True]):
+            ok, message, official = dashboard.set_official_auto_update_enabled(False)
+        self.assertTrue(ok)
+        self.assertIn("Removed", message)
+        self.assertEqual(official["id"], "official")
+        save_config.assert_called_once_with("OPENCLAW_OFFICIAL_AUTO_UPDATE", "false")
+        manage_official_environment.assert_called_once_with("remove-schedule")
+
     def test_manage_official_environment_blocks_start_when_not_active(self):
         with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"}), \
             mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):

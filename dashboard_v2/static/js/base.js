@@ -126,6 +126,10 @@ const API = {
         return await this.post('/api/v2/environments/promote', { confirmation });
     },
 
+    async setOfficialAutoUpdate(enabled) {
+        return await this.post('/api/v2/environments/official-auto-update', { enabled });
+    },
+
     /**
      * 获取快照列表
      */

@@ -269,6 +269,19 @@ class TestFlaskRoutes(unittest.TestCase):
         self.assertFalse(payload['success'])
         self.assertEqual(payload['data']['status'], 'failed_preflight')
 
+    def test_official_auto_update_toggle_route(self):
+        with mock.patch('routes.environments.get_collector') as get_collector:
+            get_collector.return_value.set_official_auto_update.return_value = {
+                'success': True,
+                'message': '已启用官方自动更新',
+                'enabled': True,
+            }
+            response = self.client.post('/api/v2/environments/official-auto-update', json={'enabled': True})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'])
+        self.assertTrue(payload['data']['enabled'])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

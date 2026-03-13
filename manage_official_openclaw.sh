@@ -520,6 +520,7 @@ install_schedule() {
 </plist>
 EOF
     launchctl bootout "${LAUNCH_DOMAIN}/${SCHEDULE_LABEL}" 2>/dev/null || true
+    launchctl enable "${LAUNCH_DOMAIN}/${SCHEDULE_LABEL}" 2>/dev/null || true
     launchctl bootstrap "$LAUNCH_DOMAIN" "$SCHEDULE_PLIST"
     echo "Installed official OpenClaw update schedule at ${hour}:$(printf '%02d' "$minute")."
 }
