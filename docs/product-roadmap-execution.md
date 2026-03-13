@@ -21,6 +21,8 @@
 - [health-monitor-self-check-supervision-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/health-monitor-self-check-supervision-spec.md)
 - [openclaw-self-check-artifact-schema.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-artifact-schema.md)
 - [openclaw-self-check-runtime-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-runtime-spec.md)
+- [openclaw-main-closure-engineering-plan.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-engineering-plan.md)
+- [openclaw-main-closure-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-work-packages.md)
 
 ---
 
@@ -215,6 +217,37 @@
 
 - 用户新问题不会被旧任务尾包覆盖
 - 旧任务仍可补交付，但不会扰乱当前任务
+
+### P1-4 主任务闭环主链重构
+
+问题：
+
+- 当前“任务是否真正完成、是否真正回给用户”仍缺少 OpenClaw 内生闭环模型
+- `health-monitor` 已经能监督很多风险，但不该继续承担主闭环判断
+
+交付内容：
+
+- 在 OpenClaw 内引入：
+  - `RootTask`
+  - `WorkflowRun`
+  - `Receipt adoption`
+  - `FinalizationRecord`
+  - `ForegroundBinding`
+- 区分：
+  - `WorkflowRun completed`
+  - `RootTask completed`
+  - `delivery_status=delivered | delivery_failed`
+
+涉及文档：
+
+- [openclaw-main-closure-engineering-plan.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-engineering-plan.md)
+- [openclaw-main-closure-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-work-packages.md)
+
+验收标准：
+
+- 子链完成后结果不再蒸发
+- 短句 follow-up 默认不新建 root task
+- `health-monitor` 只报告 adoption / finalizer / delivery 风险，而不再代替主链做最终判定
 
 ---
 

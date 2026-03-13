@@ -20,6 +20,8 @@
 - [health-monitor-self-check-supervision-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/health-monitor-self-check-supervision-spec.md)
 - [openclaw-self-check-artifact-schema.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-artifact-schema.md)
 - [openclaw-self-check-runtime-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-runtime-spec.md)
+- [openclaw-main-closure-engineering-plan.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-engineering-plan.md)
+- [openclaw-main-closure-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-work-packages.md)
 
 目标是把路线图进一步拆成可排期、可指派、可验收的任务清单。
 
@@ -217,7 +219,39 @@
 
 - 新问题不会被旧任务尾包覆盖
 
-### HM-104 控制动作队列解释力提升
+### HM-104 主任务闭环主源切换
+
+优先级：`P1`
+
+问题：
+
+- 当前系统还没有把主任务闭环真相完全放回 OpenClaw
+- 如果继续让 `health-monitor` 补 adoption / completion / final 判断，会重新长成第二个 orchestrator
+
+范围：
+
+- 在 OpenClaw 内实现：
+  - `RootTask`
+  - `WorkflowRun`
+  - `Receipt adoption`
+  - `FinalizationRecord`
+  - `ForegroundBinding`
+- 明确 `final_status` 与 `delivery_status` 的分离
+- 让短句 follow-up 默认绑定 foreground root task
+
+涉及文档：
+
+- [openclaw-main-closure-engineering-plan.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-engineering-plan.md)
+- [openclaw-main-closure-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-main-closure-work-packages.md)
+
+验收标准：
+
+- `WorkflowRun completed != RootTask completed` 成为系统内建规则
+- 子链完成但 adoption 未发生时，主任务不会被误判 completed
+- finalizer 成为 root task 终态唯一入口
+- `health-monitor` 只镜像和告警，不独立写终态
+
+### HM-105 控制动作队列解释力提升
 
 优先级：`P1`
 
