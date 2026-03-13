@@ -707,7 +707,8 @@ class DashboardMemoryTests(unittest.TestCase):
             mock.patch.object(dashboard, "get_learning_center_payload", return_value={"source_mode": "legacy_store", "learnings": []}), \
             mock.patch.object(dashboard, "build_context_lifecycle_readiness", return_value={"status": "ready", "checks": []}), \
             mock.patch.object(dashboard, "build_learning_supervision_snapshot", return_value={"artifact_status": "missing", "repeat_error_trend": "insufficient_data"}), \
-            mock.patch.object(dashboard, "build_self_check_supervision_snapshot", return_value={"self_check_artifact_status": "ready", "self_check_status": "succeeded"}):
+            mock.patch.object(dashboard, "build_self_check_supervision_snapshot", return_value={"self_check_artifact_status": "ready", "self_check_status": "succeeded"}), \
+            mock.patch.object(dashboard, "build_main_closure_supervision_snapshot", return_value={"main_closure_artifact_status": "ready", "delivery_failed_count": 0, "adoption_pending_count": 0}):
             payload = dashboard.get_health_acceptance_payload()
         self.assertEqual(payload["status"], "warning")
         self.assertIn("过渡态", payload["headline"])
@@ -913,6 +914,7 @@ class DashboardMemoryTests(unittest.TestCase):
             mock.patch.object(dashboard, "get_learning_center_payload", return_value={}), \
             mock.patch.object(dashboard, "build_learning_supervision_snapshot", return_value={"generated_at": 1, "env_id": "primary", "memory_freshness": 120, "reuse_evidence_count": 2, "reuse_evidence_7d": 1}), \
             mock.patch.object(dashboard, "build_self_check_supervision_snapshot", return_value={"generated_at": 1, "env_id": "primary", "self_check_status": "succeeded", "events": [], "delivery_retry_count": 1, "completed_not_delivered_count": 0, "stale_subagent_count": 0}), \
+            mock.patch.object(dashboard, "build_main_closure_supervision_snapshot", return_value={"generated_at": 1, "env_id": "primary", "foreground_root_task_id": "rt-1", "events": [], "delivery_failed_count": 0, "adoption_pending_count": 0}), \
             mock.patch.object(dashboard, "get_system_metrics", return_value={}), \
             mock.patch.object(dashboard, "get_recent_anomalies", return_value=[]), \
             mock.patch.object(dashboard, "build_bootstrap_status", return_value={"env_id": "primary", "config_merge": {"applied": ["session.memoryFlush"], "preserved": []}, "context_readiness": {"status": "degraded"}}), \
@@ -927,8 +929,74 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertIn("reuse_evidence_summary", payload)
         self.assertIn("self_check_runtime_status", payload)
         self.assertIn("self_check_events", payload)
+        self.assertIn("main_closure_runtime_status", payload)
+        self.assertIn("main_closure_events", payload)
         self.assertIn("restart_runtime_status", payload)
         self.assertIn("restart_events", payload)
+
+    def test_build_main_closure_supervision_snapshot_reads_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / ".openclaw"
+            closure_dir = home / "shared-context" / "main-closure"
+            closure_dir.mkdir(parents=True)
+            now = int(time.time())
+            (closure_dir / "main-closure-runtime-status.json").write_text(
+                json.dumps(
+                    {
+                        "env_id": "primary",
+                        "foreground_root_task_id": "rt-1",
+                        "active_root_count": 1,
+                        "background_root_count": 1,
+                        "adoption_pending_count": 2,
+                        "finalization_pending_count": 1,
+                        "delivery_failed_count": 1,
+                        "late_result_count": 1,
+                        "binding_source_counts": {"followup_default": 2},
+                        "roots": [{"root_task_id": "rt-1", "status": "active"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (closure_dir / "main-closure-events.json").write_text(
+                json.dumps(
+                    {
+                        "events": [
+                            {"event_type": "receipt_adopted", "created_at": now - 20},
+                            {"event_type": "final_delivery_failed", "created_at": now - 10},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(dashboard, "active_env_id", return_value="primary"), \
+                mock.patch.object(dashboard, "env_spec", return_value={"id": "primary", "home": home}):
+                payload = dashboard.build_main_closure_supervision_snapshot({"ACTIVE_OPENCLAW_ENV": "primary"})
+            self.assertEqual(payload["main_closure_artifact_status"], "ready")
+            self.assertEqual(payload["foreground_root_task_id"], "rt-1")
+            self.assertEqual(payload["delivery_failed_count"], 1)
+            self.assertEqual(payload["recent_event_types"][0], "final_delivery_failed")
+
+    def test_get_health_acceptance_payload_flags_main_closure_delivery_failure(self):
+        with mock.patch.object(dashboard, "load_config", return_value={"TASK_SILENT_TIMEOUT_SECONDS": 900}), \
+            mock.patch.object(dashboard, "active_env_id", return_value="primary"), \
+            mock.patch.object(dashboard, "env_spec", return_value={"id": "primary"}), \
+            mock.patch.object(dashboard.STORE, "summarize_tasks", return_value={"completed": 0, "no_reply": 0}), \
+            mock.patch.object(dashboard.STORE, "summarize_watcher_tasks", return_value={"total": 0, "undelivered": 0}), \
+            mock.patch.object(dashboard.STORE, "list_tasks", return_value=[]), \
+            mock.patch.object(dashboard.STORE, "list_learnings", return_value=[]), \
+            mock.patch.object(dashboard.STORE, "list_reflection_runs", return_value=[]), \
+            mock.patch.object(dashboard, "get_learning_center_payload", return_value={"source_mode": "legacy_store", "learnings": []}), \
+            mock.patch.object(dashboard, "build_context_lifecycle_readiness", return_value={"status": "ready", "checks": []}), \
+            mock.patch.object(dashboard, "build_learning_supervision_snapshot", return_value={"artifact_status": "ready", "repeat_error_trend": "flat"}), \
+            mock.patch.object(dashboard, "build_self_check_supervision_snapshot", return_value={"self_check_artifact_status": "ready", "self_check_status": "succeeded"}), \
+            mock.patch.object(dashboard, "build_main_closure_supervision_snapshot", return_value={"main_closure_artifact_status": "ready", "delivery_failed_count": 1, "adoption_pending_count": 0}):
+            payload = dashboard.get_health_acceptance_payload()
+        self.assertEqual(payload["status"], "critical")
+        self.assertIn("未成功送达", payload["headline"])
+        self.assertEqual(payload["main_closure"]["delivery_failed_count"], 1)
 
     def test_snapshot_env_id_detects_official_suffix(self):
         self.assertEqual(dashboard.snapshot_env_id("20260311-before-config-change-official"), "official")

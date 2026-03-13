@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1248,6 +1249,8 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertTrue((base / "data" / "shared-state" / "reuse-evidence-summary.json").exists())
             self.assertTrue((base / "data" / "shared-state" / "self-check-runtime-status.json").exists())
             self.assertTrue((base / "data" / "shared-state" / "self-check-events.json").exists())
+            self.assertTrue((base / "data" / "shared-state" / "main-closure-runtime-status.json").exists())
+            self.assertTrue((base / "data" / "shared-state" / "main-closure-events.json").exists())
             self.assertTrue((base / "data" / "shared-state" / "restart-runtime-status.json").exists())
             self.assertTrue((base / "data" / "shared-state" / "restart-events.json").exists())
             self.assertTrue((base / "data" / "shared-state" / "README.md").exists())
@@ -1255,6 +1258,44 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertTrue((base / "MEMORY.md").exists())
             self.assertTrue((home / ".learnings" / "ERRORS.md").exists())
             self.assertTrue((home / "shared-context" / "monitor-tasks" / "tasks.jsonl").exists())
+
+    def test_build_main_closure_supervision_summary_reads_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / ".openclaw"
+            closure_dir = home / "shared-context" / "main-closure"
+            closure_dir.mkdir(parents=True)
+            now = int(time.time())
+            (closure_dir / "main-closure-runtime-status.json").write_text(
+                json.dumps(
+                    {
+                        "env_id": "primary",
+                        "foreground_root_task_id": "rt-1",
+                        "active_root_count": 1,
+                        "background_root_count": 1,
+                        "adoption_pending_count": 1,
+                        "finalization_pending_count": 1,
+                        "delivery_failed_count": 1,
+                        "late_result_count": 1,
+                        "binding_source_counts": {"reply_to": 1},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (closure_dir / "main-closure-events.json").write_text(
+                json.dumps(
+                    {"events": [{"event_type": "final_delivery_failed", "created_at": now - 5}]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary", "home": home}):
+                payload = guardian.build_main_closure_supervision_summary()
+            self.assertEqual(payload["main_closure_artifact_status"], "ready")
+            self.assertEqual(payload["foreground_root_task_id"], "rt-1")
+            self.assertEqual(payload["delivery_failed_count"], 1)
+            self.assertEqual(payload["recent_event_types"][0], "final_delivery_failed")
 
     def test_sync_shared_context_watcher_tasks_imports_completed_and_dlq(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -563,6 +563,80 @@ def build_self_check_supervision_summary(spec: dict[str, Any] | None = None) -> 
     }
 
 
+def build_main_closure_supervision_summary(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = spec or current_env_spec()
+    env_id = str(target.get("id") or "primary")
+    home = Path(str(target.get("home") or Path.home() / ".openclaw"))
+    now = int(time.time())
+    closure_dir = home / "shared-context" / "main-closure"
+    runtime_status_path = closure_dir / "main-closure-runtime-status.json"
+    events_path = closure_dir / "main-closure-events.json"
+
+    runtime_status: dict[str, Any] = {}
+    runtime_status_valid = False
+    if runtime_status_path.exists():
+        try:
+            runtime_status = json.loads(runtime_status_path.read_text(encoding="utf-8"))
+            runtime_status_valid = isinstance(runtime_status, dict) and bool(runtime_status.get("foreground_root_task_id") or runtime_status.get("generated_at"))
+        except Exception:
+            runtime_status = {}
+    if not runtime_status:
+        runtime_status = STORE.load_runtime_value(
+            f"main_closure_summary:{env_id}",
+            {
+                "env_id": env_id,
+                "main_closure_artifact_status": "missing",
+                "foreground_root_task_id": "",
+                "active_root_count": 0,
+                "background_root_count": 0,
+                "adoption_pending_count": 0,
+                "finalization_pending_count": 0,
+                "delivery_failed_count": 0,
+                "late_result_count": 0,
+                "binding_source_counts": {},
+            },
+        )
+
+    events_payload: dict[str, Any] = {}
+    events_valid = False
+    if events_path.exists():
+        try:
+            events_payload = json.loads(events_path.read_text(encoding="utf-8"))
+            events_valid = isinstance(events_payload, dict) and isinstance(events_payload.get("events") or [], list)
+        except Exception:
+            events_payload = {}
+    if not events_payload:
+        events_payload = STORE.load_runtime_value(
+            f"main_closure_events:{env_id}",
+            {"env_id": env_id, "events": []},
+        )
+
+    if runtime_status_path.exists() and events_path.exists() and runtime_status_valid and events_valid:
+        artifact_status = "ready"
+    elif runtime_status_path.exists() or events_path.exists():
+        artifact_status = "invalid"
+    else:
+        artifact_status = str(runtime_status.get("main_closure_artifact_status") or "missing")
+
+    recent_events = list(events_payload.get("events") or [])[:20]
+    return {
+        "generated_at": now,
+        "env_id": env_id,
+        "main_closure_artifact_status": artifact_status,
+        "foreground_root_task_id": str(runtime_status.get("foreground_root_task_id") or ""),
+        "active_root_count": int(runtime_status.get("active_root_count") or 0),
+        "background_root_count": int(runtime_status.get("background_root_count") or 0),
+        "adoption_pending_count": int(runtime_status.get("adoption_pending_count") or 0),
+        "finalization_pending_count": int(runtime_status.get("finalization_pending_count") or 0),
+        "delivery_failed_count": int(runtime_status.get("delivery_failed_count") or 0),
+        "late_result_count": int(runtime_status.get("late_result_count") or 0),
+        "binding_source_counts": runtime_status.get("binding_source_counts") or {},
+        "recent_event_types": [str(item.get("event_type") or "unknown") for item in recent_events[:5]],
+        "roots": list(runtime_status.get("roots") or [])[:10],
+        "events": recent_events,
+    }
+
+
 def should_delegate_learning_ownership_to_openclaw(spec: dict[str, Any] | None = None) -> bool:
     summary = build_learning_supervision_summary(spec)
     return str(summary.get("artifact_status") or "") in {"ready", "partial"}
@@ -1363,6 +1437,7 @@ def write_task_registry_snapshot() -> None:
     }
     learning_supervision = build_learning_supervision_summary(current_spec)
     self_check_supervision = build_self_check_supervision_summary(current_spec)
+    main_closure_supervision = build_main_closure_supervision_summary(current_spec)
     promotion_policy = {
         "generated_at": int(time.time()),
         "reflection_interval_seconds": int(CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600)),
@@ -1461,6 +1536,22 @@ def write_task_registry_snapshot() -> None:
         ),
         encoding="utf-8",
     )
+    (shared_dir / "main-closure-runtime-status.json").write_text(
+        json.dumps(main_closure_supervision, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "main-closure-events.json").write_text(
+        json.dumps(
+            {
+                "generated_at": main_closure_supervision.get("generated_at"),
+                "env_id": main_closure_supervision.get("env_id"),
+                "events": main_closure_supervision.get("events") or [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     (shared_dir / "control-plane-summary.json").write_text(
         json.dumps(control_plane, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1510,6 +1601,8 @@ def write_task_registry_snapshot() -> None:
         "- reuse-evidence-summary.json: promoted knowledge 复用证据摘要\n"
         "- self-check-runtime-status.json: OpenClaw 内部 self-check 最近运行与恢复摘要\n"
         "- self-check-events.json: OpenClaw 内部 self-check 最近事件\n"
+        "- main-closure-runtime-status.json: OpenClaw 主闭环 root/adoption/finalization/delivery 摘要\n"
+        "- main-closure-events.json: OpenClaw 主闭环最近事件时间线\n"
         "- control-plane-summary.json: 控制面统计与解释\n"
         "- learning-promotion-policy.json: learning promote 规则与阈值\n"
         "- context-lifecycle-baseline.json: 推荐长期运行基线模板\n"

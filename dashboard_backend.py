@@ -1156,6 +1156,86 @@ def build_self_check_supervision_snapshot(config: Optional[dict] = None) -> dict
     }
 
 
+def build_main_closure_supervision_snapshot(config: Optional[dict] = None) -> dict:
+    cfg = config or load_config()
+    selected_env = env_spec(active_env_id(cfg), cfg)
+    env_id = selected_env["id"]
+    env_home = Path(str(selected_env.get("home") or Path.home() / ".openclaw"))
+    closure_dir = env_home / "shared-context" / "main-closure"
+    runtime_status_path = closure_dir / "main-closure-runtime-status.json"
+    events_path = closure_dir / "main-closure-events.json"
+    now = int(time.time())
+
+    runtime_status: dict[str, Any] = {}
+    runtime_status_valid = False
+    if runtime_status_path.exists():
+        try:
+            runtime_status = json.loads(runtime_status_path.read_text(encoding="utf-8"))
+            runtime_status_valid = isinstance(runtime_status, dict) and bool(runtime_status.get("foreground_root_task_id") or runtime_status.get("generated_at"))
+        except Exception:
+            runtime_status = {}
+
+    events_payload: dict[str, Any] = {}
+    events_valid = False
+    if events_path.exists():
+        try:
+            events_payload = json.loads(events_path.read_text(encoding="utf-8"))
+            events_valid = isinstance(events_payload, dict) and isinstance(events_payload.get("events") or [], list)
+        except Exception:
+            events_payload = {}
+
+    if not runtime_status:
+        runtime_status = STORE.load_runtime_value(
+            f"main_closure_summary:{env_id}",
+            {
+                "env_id": env_id,
+                "main_closure_artifact_status": "missing",
+                "foreground_root_task_id": "",
+                "active_root_count": 0,
+                "background_root_count": 0,
+                "adoption_pending_count": 0,
+                "finalization_pending_count": 0,
+                "delivery_failed_count": 0,
+                "late_result_count": 0,
+                "binding_source_counts": {},
+                "roots": [],
+            },
+        )
+    if not events_payload:
+        events_payload = STORE.load_runtime_value(
+            f"main_closure_events:{env_id}",
+            {"env_id": env_id, "events": []},
+        )
+
+    if runtime_status_path.exists() and events_path.exists() and runtime_status_valid and events_valid:
+        artifact_status = "ready"
+    elif runtime_status_path.exists() or events_path.exists():
+        artifact_status = "invalid"
+    else:
+        artifact_status = str(runtime_status.get("main_closure_artifact_status") or "missing")
+    recent_events = sorted(
+        list(events_payload.get("events") or []),
+        key=lambda item: int(item.get("created_at") or 0),
+        reverse=True,
+    )[:8]
+    return {
+        "generated_at": now,
+        "env_id": env_id,
+        "main_closure_artifact_status": artifact_status,
+        "foreground_root_task_id": str(runtime_status.get("foreground_root_task_id") or ""),
+        "active_root_count": int(runtime_status.get("active_root_count") or 0),
+        "background_root_count": int(runtime_status.get("background_root_count") or 0),
+        "adoption_pending_count": int(runtime_status.get("adoption_pending_count") or 0),
+        "finalization_pending_count": int(runtime_status.get("finalization_pending_count") or 0),
+        "delivery_failed_count": int(runtime_status.get("delivery_failed_count") or 0),
+        "late_result_count": int(runtime_status.get("late_result_count") or 0),
+        "binding_source_counts": runtime_status.get("binding_source_counts") or {},
+        "recent_event_types": [str(item.get("event_type") or "unknown") for item in recent_events[:5]],
+        "roots": list(runtime_status.get("roots") or [])[:10],
+        "events": recent_events,
+    }
+
+
 def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
     cfg = config or load_config()
     selected_env = env_spec(active_env_id(cfg), cfg)
@@ -1169,6 +1249,7 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
     bootstrap_status = build_bootstrap_status(cfg)
     learning_supervision = build_learning_supervision_snapshot(cfg)
     self_check_supervision = build_self_check_supervision_snapshot(cfg)
+    main_closure_supervision = build_main_closure_supervision_snapshot(cfg)
     watcher_summary = STORE.load_runtime_value(
         f"watcher_summary:{selected_env['id']}",
         {
@@ -1234,6 +1315,12 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
             "generated_at": self_check_supervision.get("generated_at"),
             "env_id": self_check_supervision.get("env_id"),
             "events": self_check_supervision.get("events") or [],
+        },
+        "main_closure_runtime_status": main_closure_supervision,
+        "main_closure_events": {
+            "generated_at": main_closure_supervision.get("generated_at"),
+            "env_id": main_closure_supervision.get("env_id"),
+            "events": main_closure_supervision.get("events") or [],
         },
         "context_lifecycle": build_context_lifecycle_readiness(cfg),
         "bootstrap_status": bootstrap_status,
@@ -1513,6 +1600,7 @@ def get_health_acceptance_payload(task_limit: int = 200, learning_limit: int = 1
     learning_center = get_learning_center_payload(limit=min(learning_limit, 20))
     learning_supervision = build_learning_supervision_snapshot(cfg)
     self_check_supervision = build_self_check_supervision_snapshot(cfg)
+    main_closure_supervision = build_main_closure_supervision_snapshot(cfg)
     reflection_runs = STORE.list_reflection_runs(limit=6)
     tasks = [task for task in STORE.list_tasks(limit=task_limit) if task.get("env_id") == env_id]
     if str(learning_center.get("source_mode") or "") == "openclaw_artifact":
@@ -1689,6 +1777,20 @@ def get_health_acceptance_payload(task_limit: int = 200, learning_limit: int = 1
         if status == "healthy":
             status = "warning"
         headline = "OpenClaw 内部 self-check 尚未接入，当前仍缺少自检事实"
+    closure_artifact_status = str(main_closure_supervision.get("main_closure_artifact_status") or "missing")
+    if closure_artifact_status == "missing":
+        if status == "healthy":
+            status = "warning"
+        headline = "OpenClaw 主闭环事实尚未接入，当前仍缺少 root/adoption/finalizer 监督"
+    elif closure_artifact_status == "invalid":
+        status = "critical"
+        headline = "OpenClaw 主闭环事实文件存在但格式异常"
+    if int(main_closure_supervision.get("delivery_failed_count") or 0) > 0:
+        status = "critical"
+        headline = "存在已收口但未成功送达的主任务"
+    elif int(main_closure_supervision.get("adoption_pending_count") or 0) > 0 and status == "healthy":
+        status = "warning"
+        headline = "存在 receipt 已到但 adoption 尚未完成的主任务"
 
     assistant_profile = {
         "name": "OpenClaw Health Monitor",
@@ -1739,6 +1841,7 @@ def get_health_acceptance_payload(task_limit: int = 200, learning_limit: int = 1
         },
         "learning_supervision": learning_supervision,
         "self_check": self_check_supervision,
+        "main_closure": main_closure_supervision,
         "baseline": {
             "ready": baseline_ready,
             "status": context_readiness.get("status") or ("ready" if baseline_ready else "degraded"),
