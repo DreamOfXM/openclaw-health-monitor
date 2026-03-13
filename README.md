@@ -140,6 +140,14 @@ cd ~/openclaw-health-monitor
 ./manage_official_openclaw.sh stop
 ```
 
+## 维护约定
+
+- `dashboard_v2/` 是当前唯一主控制台前端；不要再把旧的 `dashboard.py` 当成主 UI 继续扩展
+- `dashboard_backend.py` 是 Dashboard V2 背后的兼容数据层；环境、任务、学习、shared-state 等真实能力继续从这里和 `state_store.py` 提供
+- 当前迁移工作分支是 `dashboard-v2-primary-console`；在合并到 `main` 之前，后续控制台维护默认继续在这个分支上进行
+- 本地运行数据不再纳入版本管理：`.learnings/*.md`、`MEMORY.md`、`memory/*.md`、`data/shared-state/*.json`、`data/current-task-facts.json`、`data/task-registry-summary.json`、`data/*.db-shm`、`data/*.db-wal`
+- `data/shared-state/README.md` 仍保留在仓库中，用来说明 shared-state 目录结构；其余运行态 JSON 只作为本机事实源，不作为源码提交内容
+
 ## 功能概览
 
 ### 1. 本地运行与守护
@@ -781,6 +789,14 @@ Switching is mutually exclusive by default:
 - switching back to the primary environment stops the official validation Gateway
 
 This avoids two OpenClaw instances competing for the same channels.
+
+## Maintenance Notes
+
+- `dashboard_v2/` is the only primary control-console frontend now; do not keep extending the old `dashboard.py` as if it were the main UI
+- `dashboard_backend.py` is the compatibility data layer behind Dashboard V2; real environment, task, learning, and shared-state capabilities still come from there and `state_store.py`
+- the current migration branch is `dashboard-v2-primary-console`; until this work lands in `main`, treat that branch as the default place for ongoing console maintenance
+- local runtime artifacts are no longer source-controlled: `.learnings/*.md`, `MEMORY.md`, `memory/*.md`, `data/shared-state/*.json`, `data/current-task-facts.json`, `data/task-registry-summary.json`, `data/*.db-shm`, and `data/*.db-wal`
+- `data/shared-state/README.md` stays in git to document the shared-state contract; the rest of the runtime JSON files remain local machine facts rather than repository source
 
 Important:
 
