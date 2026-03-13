@@ -888,6 +888,17 @@ def detect_environment_inconsistencies(environments: list[dict], active_env: str
                     "detail": "这会破坏单活环境运行基线。",
                 }
             )
+    official_schedule_plist = Path.home() / "Library" / "LaunchAgents" / "ai.openclaw.official-update.plist"
+    official_auto_update_expected = bool(load_config().get("OPENCLAW_OFFICIAL_AUTO_UPDATE", False))
+    if official_schedule_plist.exists() != official_auto_update_expected:
+        issues.append(
+            {
+                "severity": "warning",
+                "code": "official_auto_update_drift",
+                "title": "官方自动更新配置与系统调度不一致",
+                "detail": f"config={'enabled' if official_auto_update_expected else 'disabled'}，launchd={'installed' if official_schedule_plist.exists() else 'missing'}。",
+            }
+        )
     dedup: dict[str, dict] = {}
     for issue in issues:
         dedup[str(issue.get("code") or len(dedup))] = issue
@@ -1491,6 +1502,7 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
     bound_env = str(binding.get("active_env") or current or "primary")
     official_ref = str(cfg.get("OPENCLAW_OFFICIAL_REF", "origin/main"))
     official_schedule_plist = Path.home() / "Library" / "LaunchAgents" / "ai.openclaw.official-update.plist"
+    official_auto_update_expected = bool(cfg.get("OPENCLAW_OFFICIAL_AUTO_UPDATE", False))
     environments = []
     for item in get_env_specs(cfg).values():
         listener_pid = get_listener_pid(int(item["port"]))
@@ -1519,7 +1531,10 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "active": active,
                 "bound": item["id"] == bound_env,
                 "binding_switch_state": str(binding.get("switch_state") or "committed") if item["id"] == bound_env else "inactive",
-                "auto_update_enabled": official_schedule_plist.exists() if item["id"] == "official" else False,
+                "auto_update_enabled": (official_schedule_plist.exists() and official_auto_update_expected) if item["id"] == "official" else False,
+                "auto_update_expected": official_auto_update_expected if item["id"] == "official" else False,
+                "auto_update_installed": official_schedule_plist.exists() if item["id"] == "official" else False,
+                "auto_update_drift": (official_schedule_plist.exists() != official_auto_update_expected) if item["id"] == "official" else False,
                 "update_hour": cfg.get("OPENCLAW_OFFICIAL_UPDATE_HOUR", 4) if item["id"] == "official" else None,
                 "update_minute": cfg.get("OPENCLAW_OFFICIAL_UPDATE_MINUTE", 30) if item["id"] == "official" else None,
             }

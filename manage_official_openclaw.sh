@@ -80,6 +80,16 @@ official_update_minute() {
     printf '%s\n' "${value:-30}"
 }
 
+official_auto_update_enabled() {
+    local value
+    value="$(config_value OPENCLAW_OFFICIAL_AUTO_UPDATE)"
+    value="$(printf '%s' "${value:-false}" | tr '[:upper:]' '[:lower:]')"
+    case "$value" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 resolve_login_path() {
     /bin/zsh -lc 'printf %s "$PATH"' 2>/dev/null || true
 }
@@ -457,6 +467,11 @@ status_official() {
 }
 
 install_schedule() {
+    if ! official_auto_update_enabled; then
+        remove_schedule >/dev/null 2>&1 || true
+        echo "Official OpenClaw auto-update is disabled by OPENCLAW_OFFICIAL_AUTO_UPDATE=false."
+        return 1
+    fi
     local hour minute script_path
     bootstrap_env
     mkdir -p "$HOME/Library/LaunchAgents"
@@ -509,7 +524,30 @@ EOF
     echo "Installed official OpenClaw update schedule at ${hour}:$(printf '%02d' "$minute")."
 }
 
+remove_schedule() {
+    launchd_bootout "$SCHEDULE_LABEL" "$SCHEDULE_PLIST"
+    launchctl remove "$SCHEDULE_LABEL" 2>/dev/null || true
+    launchctl disable "${LAUNCH_DOMAIN}/${SCHEDULE_LABEL}" 2>/dev/null || true
+    rm -f "$SCHEDULE_PLIST"
+    echo "Removed official OpenClaw update schedule."
+}
+
+reconcile_schedule() {
+    if official_auto_update_enabled; then
+        install_schedule
+    else
+        remove_schedule >/dev/null 2>&1 || true
+    fi
+}
+
 schedule_status() {
+    if ! official_auto_update_enabled; then
+        echo "Official OpenClaw auto-update disabled by config."
+        if [ -f "$SCHEDULE_PLIST" ]; then
+            echo "Schedule plist still exists unexpectedly: $SCHEDULE_PLIST"
+        fi
+        return 0
+    fi
     if [ ! -f "$SCHEDULE_PLIST" ]; then
         echo "Official OpenClaw update schedule not installed."
         return 0
@@ -518,6 +556,7 @@ schedule_status() {
 }
 
 update_official() {
+    reconcile_schedule >/dev/null 2>&1 || true
     prepare_official
 }
 
@@ -532,17 +571,19 @@ Commands:
   status            Show isolated official validation status
   update            Refresh official latest worktree and rebuilt validation env
   install-schedule  Install daily auto-update launchd job
+  remove-schedule   Remove daily auto-update launchd job
   schedule-status   Show auto-update launchd status
 EOF
 }
 
 case "${1:-}" in
-    prepare) prepare_official ;;
-    start) start_official ;;
+    prepare) reconcile_schedule >/dev/null 2>&1 || true; prepare_official ;;
+    start) reconcile_schedule >/dev/null 2>&1 || true; start_official ;;
     stop) stop_official ;;
-    status) status_official ;;
+    status) reconcile_schedule >/dev/null 2>&1 || true; status_official ;;
     update) update_official ;;
     install-schedule) install_schedule ;;
+    remove-schedule) remove_schedule ;;
     schedule-status) schedule_status ;;
     *) usage; exit 1 ;;
 esac

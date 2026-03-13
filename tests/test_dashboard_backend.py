@@ -110,10 +110,48 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertTrue(envs[0]["running"])
         self.assertTrue(envs[0]["healthy"])
         self.assertTrue(envs[0]["control_ui_ready"])
+
+    @mock.patch("dashboard_backend.Path.exists")
+    @mock.patch("dashboard_backend.check_gateway_health_for_env")
+    @mock.patch("dashboard_backend.env_has_control_ui_assets")
+    @mock.patch("dashboard_backend.read_git_head")
+    @mock.patch("dashboard_backend.get_listener_pid")
+    def test_list_openclaw_environments_auto_update_follows_config(
+        self,
+        listener_pid,
+        read_git_head,
+        control_ui_ready,
+        health,
+        path_exists,
+    ):
+        listener_pid.side_effect = [1111, 2222]
+        read_git_head.side_effect = ["abc123", "def456"]
+        control_ui_ready.side_effect = [True, True]
+        health.side_effect = [True, True]
+        path_exists.return_value = True
+        config = {
+            "ACTIVE_OPENCLAW_ENV": "official",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+            "OPENCLAW_OFFICIAL_PORT": 19001,
+            "OPENCLAW_OFFICIAL_AUTO_UPDATE": False,
+        }
+
+        with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}):
+            envs = dashboard.list_openclaw_environments(config)
+
+        official = next(item for item in envs if item["id"] == "official")
+        self.assertFalse(official["auto_update_enabled"])
+        self.assertFalse(official["auto_update_expected"])
+        self.assertTrue(official["auto_update_installed"])
+        self.assertTrue(official["auto_update_drift"])
         self.assertEqual(envs[0]["listener_pid"], 1111)
         self.assertEqual(envs[1]["id"], "official")
-        self.assertFalse(envs[1]["active"])
-        self.assertFalse(envs[1]["running"])
+        self.assertTrue(envs[1]["active"])
+        self.assertTrue(envs[1]["running"])
 
     def test_detect_environment_inconsistencies_reports_dual_listener(self):
         envs = [
