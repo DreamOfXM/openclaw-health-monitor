@@ -15,7 +15,7 @@
 - 单活切换与重启链
 - 任务注册表
 - 任务合同与控制动作
-- 学习 / 反思基础闭环
+- 学习 / 反思监督基础能力
 - 官方验证版晋升控制器
 - Dashboard 控制面基础视图
 
@@ -35,7 +35,7 @@
 
 - 双环境基础模型已经成立：`primary / official`
 - Dashboard 能展示环境、任务、控制面、学习中心等核心区域
-- Guardian 能做异常检测、控制跟进、learning capture、reflection run
+- Guardian 能做异常检测、控制跟进以及学习是否发生的外层观测
 - State Store 已形成任务、合同、控制动作、learning、reflection 的统一存储
 - Promotion Controller 已能支持 `official -> primary` 的晋升链路
 - 全量测试目前通过，说明系统已经不是概念验证
@@ -46,7 +46,7 @@
 - 环境可信展示
 - 模型失败分类
 - 任务证据链
-- 学习闭环的标准化输出
+- 学习闭环的权责收口与标准化输出
 
 这些能力已经进入代码，但还没有达到“长期运行不回归、操作员不怀疑”的状态。
 
@@ -459,13 +459,16 @@ OpenClaw Health Monitor 的目标不再是“展示状态”，而是成为 Open
 
 ### R7. 学习与反思闭环
 
-系统必须把重复问题沉淀为 learning，并定期做 reflection 与 promote。
+系统必须把 learn / reflect / promote / reuse 的主责任放回 OpenClaw，
+同时让 health-monitor 能监督这些动作是否真的发生。
 
 验收标准：
 
-- learnings 可统计 occurrences
-- reflection runs 可追踪
-- promoted items 可展示并关联证据
+- learning 主写入由 OpenClaw 产生
+- reflection runs 可追踪且来源于 OpenClaw cron
+- promoted items 可展示并关联证据与注入位置
+- health-monitor 能判断 `MEMORY.md` 是否更新
+- health-monitor 能判断同类问题后续是否下降
 
 ### R8. 上下文生命周期治理
 

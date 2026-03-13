@@ -27,6 +27,15 @@ config/webhook.local.txt
 alerts.json
 versions.json
 data/*.db
+data/*.db-shm
+data/*.db-wal
+data/current-task-facts.json
+data/task-registry-summary.json
+data/shared-state/*.json
+!data/shared-state/README.md
+/.learnings/*.md
+/MEMORY.md
+/memory/*.md
 snapshots/
 
 # Models

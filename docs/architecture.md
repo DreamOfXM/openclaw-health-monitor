@@ -84,7 +84,8 @@ flowchart LR
     X --> G
 ```
 
-Task contracts are external, configurable, and intentionally non-invasive:
+Task contracts are external, configurable, and intentionally non-invasive.
+They are operator-facing observation templates, not authoritative definitions of OpenClaw internal pipeline truth:
 
 - `delivery_pipeline`
   - expects `pm -> dev -> test` receipts
@@ -93,7 +94,7 @@ Task contracts are external, configurable, and intentionally non-invasive:
 - `single_agent`
   - no strict contract
 
-Guardian does not trust free-form agent text for pipeline truth. It only advances control states when the expected receipts arrive.
+Guardian does not trust free-form agent text for pipeline truth. It should treat contracts as derived evidence templates and avoid actively督办 OpenClaw internal handoffs by default.
 
 ## 5. Task Lifecycle
 
@@ -119,26 +120,26 @@ stateDiagram-v2
 flowchart LR
     S[Derived control state]
     A[(task_control_actions)]
-    F[Guardian follow-up worker]
-    R[Structured receipts]
-    U[Approved user summary]
+    F[Guardian ops worker]
+    R[Native runtime evidence]
+    U[Approved operator summary]
 
     S --> A
     A --> F
-    F -->|follow-up / retry / block| R
+    F -->|observe / alert / recover runtime| R
     R --> S
     S --> U
 ```
 
 Principles:
 
-- the registry is not just a ledger; it emits explicit control actions
-- each control action is persisted in SQLite with attempts, last error, and status
-- Guardian consumes those actions and either:
-  - requests the missing receipt
-  - retries after cooldown
-  - marks the task blocked
-- dashboard and user-facing progress should read the approved state, not free-form agent text
+- the registry is an operator-facing control-plane view, not a second orchestrator
+- each control action is persisted in SQLite with attempts, last error, status, and truth level
+- Guardian should consume those actions as ops guidance:
+  - highlight missing evidence
+  - suggest recovery
+  - mark the task blocked when outer evidence is unsafe
+- dashboard should expose native vs derived state explicitly, and user-facing progress should not depend on free-form agent text
 
 ## 7. Evidence Model
 

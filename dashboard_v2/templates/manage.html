@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw Health Monitor - 管理</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/manage.css') }}">
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <span class="logo-icon">🛡️</span>
+                <span class="logo-text">Health Monitor</span>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-item">总览</a>
+                <a href="/explore" class="nav-item">详情</a>
+                <a href="/manage" class="nav-item active">管理</a>
+            </nav>
+            <div class="header-actions">
+                <span id="active-env" class="env-badge">--</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="manage-grid">
+            <!-- 版本晋升 -->
+            <section class="manage-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">🚀</span>
+                        版本晋升
+                    </h2>
+                    <span class="badge badge-warning">高危操作</span>
+                </div>
+                
+                <div class="promotion-card">
+                    <div class="promotion-status">
+                        <div class="status-item">
+                            <span class="status-label">当前状态</span>
+                            <span id="promotion-status" class="status-value">检查中...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">晋升就绪</span>
+                            <span id="promotion-ready" class="status-value">--</span>
+                        </div>
+                    </div>
+
+                    <div class="promotion-checklist">
+                        <h4>晋升检查清单</h4>
+                        <ul id="promotion-checks">
+                            <li class="check-item pending">
+                                <span class="check-icon">⏳</span>
+                                <span class="check-text">Official环境运行正常</span>
+                            </li>
+                            <li class="check-item pending">
+                                <span class="check-icon">⏳</span>
+                                <span class="check-text">运行时间 > 24小时</span>
+                            </li>
+                            <li class="check-item pending">
+                                <span class="check-icon">⏳</span>
+                                <span class="check-text">健康评分 > 80</span>
+                            </li>
+                            <li class="check-item pending">
+                                <span class="check-icon">⏳</span>
+                                <span class="check-text">无阻塞任务</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div class="promotion-actions">
+                        <button id="btn-promote" class="btn btn-danger btn-large" disabled>
+                            ⚠️ 执行版本晋升
+                        </button>
+                        <p class="action-hint">晋升将把Official版本提升为Primary，需要二次确认</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 快照管理 -->
+            <section class="manage-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">💾</span>
+                        快照管理
+                    </h2>
+                    <span class="badge badge-warning">高危操作</span>
+                </div>
+
+                <div class="snapshot-card">
+                    <div class="snapshot-create">
+                        <h4>创建快照</h4>
+                        <p class="hint">创建当前配置的备份，用于紧急恢复</p>
+                        <div class="input-group">
+                            <input type="text" id="snapshot-label" class="input" placeholder="快照标签（如：v2.1.0-release）">
+                            <button id="btn-create-snapshot" class="btn btn-secondary">创建快照</button>
+                        </div>
+                    </div>
+
+                    <div class="snapshot-list">
+                        <h4>现有快照</h4>
+                        <div id="snapshots-container" class="snapshots-container">
+                            <div class="loading">加载快照列表...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 环境切换 -->
+            <section class="manage-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">🔄</span>
+                        环境切换
+                    </h2>
+                    <span class="badge badge-warning">高危操作</span>
+                </div>
+
+                <div class="switch-card">
+                    <div class="env-current">
+                        <h4>当前环境</h4>
+                        <div class="env-info">
+                            <span id="current-env-name" class="env-name-large">--</span>
+                            <span id="current-env-status" class="env-status-text">--</span>
+                        </div>
+                    </div>
+
+                    <div class="env-switch-actions">
+                        <button id="btn-switch-official" class="btn btn-secondary btn-switch">
+                            切换到 Official
+                        </button>
+                        <button id="btn-switch-primary" class="btn btn-secondary btn-switch">
+                            切换到 Primary
+                        </button>
+                    </div>
+
+                    <div class="console-access">
+                        <h4>OpenClaw 控制台</h4>
+                        <p class="console-hint">访问当前激活环境的Dashboard</p>
+                        <a id="console-dashboard-link" href="#" class="btn btn-info" target="_blank" rel="noopener noreferrer">
+                            <span>🚀</span> 打开控制台
+                        </a>
+                        <p id="console-inactive-msg" class="console-inactive" style="display: none;">
+                            当前环境未激活，无法访问控制台
+                        </p>
+                    </div>
+
+                    <div class="switch-warning">
+                        <p>⚠️ 切换环境将停止当前环境的Gateway并启动另一个</p>
+                        <p>请确保在维护窗口期执行此操作</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 配置管理 -->
+            <section class="manage-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span class="section-icon">⚙️</span>
+                        配置管理
+                    </h2>
+                </div>
+
+                <div class="config-card">
+                    <div class="config-form">
+                        <h4>系统配置</h4>
+                        
+                        <div class="config-item">
+                            <label class="config-label">自动刷新间隔（秒）</label>
+                            <input type="number" id="config-refresh" class="input" value="5" min="1" max="60">
+                        </div>
+
+                        <div class="config-item">
+                            <label class="config-label">钉钉 Webhook URL</label>
+                            <input type="text" id="config-dingtalk" class="input" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+                            <p class="config-hint">用于发送告警到钉钉群</p>
+                        </div>
+
+                        <div class="config-item">
+                            <label class="config-label">飞书 Webhook URL</label>
+                            <input type="text" id="config-feishu" class="input" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/...">
+                            <p class="config-hint">用于发送告警到飞书群</p>
+                        </div>
+
+                        <div class="config-item">
+                            <label class="config-label">通知方式</label>
+                            <div class="checkbox-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="notify-dingtalk" checked>
+                                    <span>钉钉</span>
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="notify-feishu" checked>
+                                    <span>飞书</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="config-item">
+                            <label class="config-label">日志级别</label>
+                            <select id="config-loglevel" class="select">
+                                <option value="debug">Debug</option>
+                                <option value="info" selected>Info</option>
+                                <option value="warning">Warning</option>
+                                <option value="error">Error</option>
+                            </select>
+                        </div>
+
+                        <button id="btn-save-config" class="btn">保存配置</button>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="footer-content">
+            <span>OpenClaw Health Monitor v2.0</span>
+            <span id="last-update" class="last-update">最后更新: --</span>
+        </div>
+    </footer>
+
+    <!-- 高危操作确认对话框 -->
+    <div id="confirm-modal" class="modal">
+        <div class="modal-overlay"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">⚠️ 确认执行高危操作</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-message">您确定要执行此操作吗？</p>
+                <div class="confirm-input" style="display: none;">
+                    <label>请输入确认码以继续：</label>
+                    <input type="text" id="confirm-code" class="input" placeholder="输入确认码">
+                    <p class="confirm-hint">确认码：<code id="confirm-code-hint">PROMOTE</code></p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-confirm-cancel" class="btn btn-secondary">取消</button>
+                <button id="btn-confirm-ok" class="btn btn-danger">确认执行</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/base.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/manage.js') }}"></script>
+</body>
+</html>

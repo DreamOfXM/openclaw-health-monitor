@@ -63,7 +63,8 @@ check_cmd openclaw "openclaw available"
 check_file "$TRACKED_CONFIG" "tracked config present"
 check_file "$LOCAL_CONFIG" "local config present"
 check_file "$BASE_DIR/guardian.py" "guardian.py present"
-check_file "$BASE_DIR/dashboard.py" "dashboard.py present"
+check_file "$BASE_DIR/dashboard_backend.py" "dashboard_backend.py present"
+check_file "$BASE_DIR/dashboard_v2/app.py" "dashboard_v2/app.py present"
 check_file "$BASE_DIR/requirements.txt" "requirements.txt present"
 
 if [ -x "$VENV_PYTHON" ]; then
@@ -75,8 +76,8 @@ fi
 echo
 echo "==> Static checks"
 if [ -x "$VENV_PYTHON" ]; then
-    if "$VENV_PYTHON" -m py_compile "$BASE_DIR/guardian.py" "$BASE_DIR/dashboard.py"; then
-        ok "guardian.py and dashboard.py compile"
+    if "$VENV_PYTHON" -m py_compile "$BASE_DIR/guardian.py" "$BASE_DIR/dashboard_backend.py" "$BASE_DIR/dashboard_v2/app.py"; then
+        ok "guardian.py, dashboard_backend.py, and dashboard_v2/app.py compile"
     else
         fail "python compile failed"
     fi
@@ -106,7 +107,7 @@ fi
 
 echo
 echo "==> Process snapshot"
-pgrep -fl "guardian.py|dashboard.py|openclaw.*gateway" || warn "no guardian/dashboard/gateway processes matched"
+pgrep -fl "guardian.py|dashboard_v2/app.py|dashboard_backend.py|openclaw.*gateway" || warn "no guardian/dashboard/gateway processes matched"
 
 echo
 if [ "$failures" -gt 0 ]; then

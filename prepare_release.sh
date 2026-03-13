@@ -22,7 +22,7 @@ fi
 
 echo
 echo "[2/5] Runtime artifacts"
-find "$BASE_DIR" -maxdepth 2 \( -path "$BASE_DIR/logs/*" -o -path "$BASE_DIR/change-logs/*" -o -path "$BASE_DIR/snapshots/*" -o -path "$BASE_DIR/data/*.db" \) -print 2>/dev/null || true
+find "$BASE_DIR" -maxdepth 2 \( -path "$BASE_DIR/logs/*" -o -path "$BASE_DIR/change-logs/*" -o -path "$BASE_DIR/snapshots/*" -o -path "$BASE_DIR/data/*.db" -o -path "$BASE_DIR/data/*.db-shm" -o -path "$BASE_DIR/data/*.db-wal" -o -path "$BASE_DIR/data/current-task-facts.json" -o -path "$BASE_DIR/data/task-registry-summary.json" -o -path "$BASE_DIR/data/shared-state/*.json" -o -path "$BASE_DIR/.learnings/*.md" -o -path "$BASE_DIR/memory/*.md" -o -path "$BASE_DIR/MEMORY.md" \) -print 2>/dev/null || true
 
 echo
 echo "[3/5] Secret placeholders in tracked config"
@@ -30,7 +30,7 @@ grep -n 'WEBHOOK=' "$BASE_DIR/config.conf" || true
 
 echo
 echo "[4/5] Test suite"
-python3 -m unittest discover -s tests -v
+"$BASE_DIR/.venv/bin/python" -m pytest dashboard_v2/tests tests -q
 
 echo
 echo "[5/5] Git status"

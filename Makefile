@@ -19,7 +19,7 @@ stop:
 	./stop.sh
 
 test:
-	python3 -m unittest discover -s tests
+	.venv/bin/python -m pytest dashboard_v2/tests tests -q
 
 pake:
 	./build_pake_prototype.sh

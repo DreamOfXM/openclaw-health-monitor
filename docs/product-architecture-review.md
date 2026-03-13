@@ -109,7 +109,7 @@ flowchart LR
 
 主要文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
 - [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 
@@ -130,7 +130,7 @@ flowchart LR
 主要文件：
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 当前判断：
 
@@ -189,7 +189,7 @@ flowchart LR
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [snapshot_manager.py](/Users/hangzhou/openclaw-health-monitor/snapshot_manager.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 当前判断：
 
@@ -200,20 +200,20 @@ flowchart LR
 
 目标：
 
-- 把重复阻塞和重复异常沉淀成 learning
-- 做定期 reflection
-- 把重复问题升级成治理经验
+- 让 OpenClaw 自己沉淀 learning / reflection / promote / reuse
+- 让 health-monitor 监督学习是否真的发生
+- 让 promoted memory、reflection runs、reuse evidence 可被审计
 
 主要文件：
 
-- [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
 
 当前判断：
 
-- 已有产品化雏形
-- 但还没形成统一的 Agent 记忆体系
+- 边界已重新定义清楚
+- 但实现仍处于迁移期，guardian 里还有过渡性 learning / reflection 逻辑
 
 ### 模块 G：操作员界面
 
@@ -224,7 +224,7 @@ flowchart LR
 
 主要文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 当前判断：
 

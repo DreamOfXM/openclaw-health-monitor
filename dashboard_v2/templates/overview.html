@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw Health Monitor - 总览</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/overview.css') }}">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <span class="logo-icon">🛡️</span>
+                <span class="logo-text">Health Monitor</span>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-item active">总览</a>
+                <a href="/explore" class="nav-item">详情</a>
+                <a href="/manage" class="nav-item">管理</a>
+            </nav>
+            <div class="header-actions">
+                <span id="active-env" class="env-badge">Loading...</span>
+                <button id="refresh-btn" class="btn-icon">🔄</button>
+                <button id="settings-btn" class="btn-icon">⚙️</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <!-- Hero Section -->
+        <section class="hero">
+            <div class="hero-content">
+                <!-- Health Score -->
+                <div class="hero-left">
+                    <div class="hero-label">系统健康评分</div>
+                    <div class="health-score-container">
+                        <div id="health-score" class="health-score">
+                            <span class="score-value">--</span>
+                            <span class="score-total">/100</span>
+                        </div>
+                        <div id="score-ring" class="score-ring"></div>
+                    </div>
+                    <div id="health-status" class="health-status">
+                        <span class="status-icon">⏳</span>
+                        <span class="status-text">加载中...</span>
+                    </div>
+                </div>
+
+                <!-- Environment & Next Action -->
+                <div class="hero-right compact">
+                    <!-- Environment Card -->
+                    <div class="env-card compact">
+                        <div class="env-header">
+                            <span class="env-label">当前环境</span>
+                            <span id="env-healthy" class="env-status">检测中...</span>
+                        </div>
+                        <div class="env-body">
+                            <div id="env-id" class="env-name">--</div>
+                        </div>
+                    </div>
+
+                    <!-- Next Action Card -->
+                    <div id="next-action-card" class="action-card compact">
+                        <div class="action-header">
+                            <span class="action-label">下一步行动</span>
+                            <span id="action-priority" class="action-priority">--</span>
+                        </div>
+                        <div class="action-body">
+                            <div id="action-message" class="action-message">--</div>
+                            <button id="action-btn" class="btn-action">查看详情</button>
+                        </div>
+                    </div>
+                </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- KPI Strip -->
+        <section class="kpi-strip">
+            <div class="kpi-card">
+                <div class="kpi-header">
+                    <span class="kpi-icon">💻</span>
+                    <span class="kpi-label">CPU</span>
+                </div>
+                <div class="kpi-body">
+                    <div id="cpu-value" class="kpi-value">--%</div>
+                    <div class="kpi-bar">
+                        <div id="cpu-bar" class="progress-bar"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-header">
+                    <span class="kpi-icon">🧠</span>
+                    <span class="kpi-label">内存</span>
+                </div>
+                <div class="kpi-body">
+                    <div id="mem-value" class="kpi-value">--%</div>
+                    <div class="kpi-bar">
+                        <div id="mem-bar" class="progress-bar"></div>
+                    </div>
+                    <div id="mem-detail" class="kpi-detail">-- GB / -- GB</div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-header">
+                    <span class="kpi-icon">📊</span>
+                    <span class="kpi-label">会话</span>
+                </div>
+                <div class="kpi-body">
+                    <div id="sessions-value" class="kpi-value">--</div>
+                    <div class="kpi-bar">
+                        <div id="sessions-bar" class="progress-bar"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-header">
+                    <span class="kpi-icon">🌐</span>
+                    <span class="kpi-label">服务</span>
+                </div>
+                <div class="kpi-body">
+                    <div id="gateway-value" class="kpi-value">--</div>
+                    <div id="gateway-detail" class="kpi-detail">PID: --</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Events Timeline -->
+        <section class="events-section">
+            <div class="section-header">
+                <h2 class="section-title">
+                    <span class="section-icon">📅</span>
+                    最近事件
+                </h2>
+                <button id="toggle-events" class="btn-toggle">折叠</button>
+            </div>
+            <div id="events-container" class="events-container">
+                <div class="events-timeline" id="events-timeline">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <span class="footer-text">OpenClaw Health Monitor v2.0</span>
+            <span id="last-update" class="last-update">最后更新: --</span>
+        </div>
+    </footer>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-overlay"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">⚙️ 快速设置</h3>
+                <button class="modal-close" id="settings-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-section">
+                    <h4>刷新设置</h4>
+                    <div class="config-item">
+                        <label class="config-label">自动刷新间隔（秒）</label>
+                        <select id="settings-refresh" class="select">
+                            <option value="3">3秒</option>
+                            <option value="5" selected>5秒</option>
+                            <option value="10">10秒</option>
+                            <option value="30">30秒</option>
+                            <option value="60">60秒</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h4>通知设置</h4>
+                    <div class="checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="settings-notify-desktop" checked>
+                            <span>桌面通知</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h4>显示设置</h4>
+                    <div class="checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="settings-show-events" checked>
+                            <span>显示事件时间线</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="settings-cancel" class="btn btn-secondary">取消</button>
+                <button id="settings-save" class="btn">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript -->
+    <script src="{{ url_for('static', filename='js/base.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/overview.js') }}"></script>
+</body>
+</html>

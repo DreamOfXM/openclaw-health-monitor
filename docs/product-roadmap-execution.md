@@ -7,6 +7,21 @@
 - 评审稿回答“我们是什么”
 - 本文回答“下一步具体做什么”
 
+学习反思重构相关执行文档：
+
+- [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
+- [guardian-learning-migration-checklist.md](/Users/hangzhou/openclaw-health-monitor/docs/guardian-learning-migration-checklist.md)
+- [openclaw-learning-implementation-design.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-learning-implementation-design.md)
+- [learning-execution-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-execution-work-packages.md)
+- [openclaw-learning-artifact-schema.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-learning-artifact-schema.md)
+- [openclaw-learning-cron-runtime-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-learning-cron-runtime-spec.md)
+- [health-monitor-learning-supervision-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/health-monitor-learning-supervision-spec.md)
+- [openclaw-self-check-heartbeat-design.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-heartbeat-design.md)
+- [openclaw-self-check-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-work-packages.md)
+- [health-monitor-self-check-supervision-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/health-monitor-self-check-supervision-spec.md)
+- [openclaw-self-check-artifact-schema.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-artifact-schema.md)
+- [openclaw-self-check-runtime-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-runtime-spec.md)
+
 ---
 
 ## 1. 总体目标
@@ -50,7 +65,7 @@
 
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
 - [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 
 验收标准：
@@ -85,7 +100,7 @@
 
 涉及模块：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -111,7 +126,7 @@
 涉及模块：
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -229,7 +244,7 @@
 涉及模块：
 
 - OpenClaw config
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -240,8 +255,9 @@
 
 问题：
 
-- 我们已经有 learning / reflection
-- 但没有统一成标准 Agent 记忆结构
+- 目前 learning / reflection 的展示和记录已经存在
+- 但真正 learn / reflect / promote 的责任还没有完全回到 OpenClaw
+- health-monitor 与 OpenClaw 的职责边界需要彻底收口
 
 交付内容：
 
@@ -251,18 +267,58 @@
   - `.learnings/ERRORS.md`
   - `.learnings/LEARNINGS.md`
   - `.learnings/FEATURE_REQUESTS.md`
-- 形成 daily promotion 规则
+- 定义 OpenClaw 内部 cron：
+  - `daily-reflection`
+  - `memory-maintenance`
+  - `team-rollup`
+- 明确 promote 注入目标：
+  - `MEMORY.md`
+  - `AGENTS.md`
+  - `Skills`
+  - watcher / guardrail rules
+- 将 health-monitor 收口为 visibility / audit / verification
 
 涉及模块：
 
 - Agent workspace
-- [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
+- [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
 
 验收标准：
 
-- repeated issue 能自动从 pending 升级到长期记忆
-- `MEMORY.md` 不失控膨胀
+- learning 主写入发生在 OpenClaw 内部
+- reflection 主执行发生在 OpenClaw cron
+- promote 决策由 OpenClaw 产出，而不是由 health-monitor 代判
+- health-monitor 能显示 backlog / reflection history / promoted items / memory freshness
+- `MEMORY.md` 不失控膨胀，且 reuse 证据可追溯
+
+### P2-2A 初始化与自进化基线落地
+
+问题：
+
+- 现在已有 learning / reflection / readiness 的局部能力
+- 但还没有形成“可初始化、可验收、可回放”的统一基线
+
+交付内容：
+
+- 工作区初始化能力
+- 配置“合并补齐”策略
+- bootstrap status / config drift 输出
+- 独立验收清单与回放材料
+
+涉及模块：
+
+- [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
+- [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
+- [openclaw-bootstrap-evolve-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-bootstrap-evolve-spec.md)
+
+验收标准：
+
+- 可对已有 OpenClaw 环境执行“合并补齐”
+- Dashboard 能展示 bootstrap status 和 config drift
+- 有单独的验收/回放清单可逐条核对
 
 ### P2-3 shared-state 模型产品化
 
@@ -282,12 +338,36 @@
 涉及模块：
 
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
 - 共享状态可追踪、可审计、可导出
 - 聊天不再承担状态数据库角色
+
+### P2-4 Task Watcher 最小闭环
+
+问题：
+
+- 当前缺少“completed != delivered”的最小监督闭环
+
+交付内容：
+
+- watcher task 存储
+- shared-context/monitor-tasks 同步
+- DLQ 摘要
+- Dashboard/shared-state watcher summary
+
+涉及模块：
+
+- [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
+- [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
+
+验收标准：
+
+- watcher 能区分 completed 和 delivered
+- DLQ 能被统计和导出
 
 ---
 
@@ -316,6 +396,12 @@
 - P2-2 记忆闭环统一化
 - P2-3 shared-state 模型产品化
 
+### Iteration 5
+
+- 把 learning / reflection 主责任迁回 OpenClaw
+- 把 health-monitor 收口为学习监督与验收层
+- 验证 reuse evidence 与重复错误下降趋势
+
 ---
 
 ## 6. 每阶段完成定义
@@ -335,7 +421,8 @@
 ### P2 完成定义
 
 - 长时间运行不会因为上下文膨胀而退化
-- 记忆与学习能稳定沉淀
+- OpenClaw 能稳定 learn / reflect / promote / reuse
+- Health Monitor 能稳定证明学习是否真的发生
 - Health Monitor 成为真正的外挂 Agent OS 控制层
 
 ---

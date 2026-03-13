@@ -8,8 +8,26 @@
 - [product-architecture-review.md](/Users/hangzhou/openclaw-health-monitor/docs/product-architecture-review.md)
 - [product-roadmap-execution.md](/Users/hangzhou/openclaw-health-monitor/docs/product-roadmap-execution.md)
 - [internal-requirements.md](/Users/hangzhou/openclaw-health-monitor/docs/internal-requirements.md)
+- [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
+- [guardian-learning-migration-checklist.md](/Users/hangzhou/openclaw-health-monitor/docs/guardian-learning-migration-checklist.md)
+- [openclaw-learning-implementation-design.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-learning-implementation-design.md)
+- [learning-execution-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-execution-work-packages.md)
+- [openclaw-learning-artifact-schema.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-learning-artifact-schema.md)
+- [openclaw-learning-cron-runtime-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-learning-cron-runtime-spec.md)
+- [health-monitor-learning-supervision-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/health-monitor-learning-supervision-spec.md)
+- [openclaw-self-check-heartbeat-design.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-heartbeat-design.md)
+- [openclaw-self-check-work-packages.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-work-packages.md)
+- [health-monitor-self-check-supervision-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/health-monitor-self-check-supervision-spec.md)
+- [openclaw-self-check-artifact-schema.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-artifact-schema.md)
+- [openclaw-self-check-runtime-spec.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-runtime-spec.md)
 
 目标是把路线图进一步拆成可排期、可指派、可验收的任务清单。
+
+当前约束：
+
+- `health-monitor` 是外层控制面，不是第二个 orchestrator
+- OpenClaw 原生 session / queue / subagent state 是权威真相
+- task registry、contracts、control actions 仅表达运维观察和治理建议
 
 ---
 
@@ -40,7 +58,7 @@
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
 - [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -62,7 +80,7 @@
 
 涉及文件：
 
-- [tests/test_dashboard.py](/Users/hangzhou/openclaw-health-monitor/tests/test_dashboard.py)
+- [tests/test_dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/tests/test_dashboard_backend.py)
 - [tests/test_guardian.py](/Users/hangzhou/openclaw-health-monitor/tests/test_guardian.py)
 
 验收标准：
@@ -90,7 +108,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -113,7 +131,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 
 验收标准：
@@ -215,7 +233,7 @@
 涉及文件：
 
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -249,7 +267,7 @@
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -287,7 +305,7 @@
 涉及文件：
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -308,7 +326,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -361,7 +379,7 @@
 
 涉及文件：
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
@@ -373,7 +391,7 @@
 
 目标：
 
-- 把当前 learning / reflection 雏形升级成标准化经验体系
+- 把学习主责任迁回 OpenClaw，把 health-monitor 收口为监督与验收层
 
 ### HM-401 标准化 learning 目录协议
 
@@ -381,7 +399,7 @@
 
 问题：
 
-- 当前 learning 存在于 state store，但 Agent 记忆结构不统一
+- 当前 `.learnings / MEMORY / memory` 已有雏形，但 OpenClaw 内部写入协议还不统一
 
 范围：
 
@@ -394,7 +412,8 @@
 
 验收标准：
 
-- learning 有统一写入和 promote 路径
+- learning 有统一写入路径，且主写入发生在 OpenClaw 内部
+- promote 目标位置可显式标记为 `MEMORY.md / AGENTS.md / Skills / guardrail rules`
 
 ### HM-402 每日反思 promote 机制
 
@@ -402,21 +421,111 @@
 
 问题：
 
-- 当前 reflection 已有，但晋升规则还不够标准化
+- 当前 reflection 仍混有外层 guardian 逻辑，主责任没有完全回到 OpenClaw
 
 范围：
 
+- 定义 OpenClaw 内部 cron：
+  - `daily-reflection`
+  - `memory-maintenance`
+  - `team-rollup`
 - 定义 repeated issue 晋升阈值
-- 标准化进入 MEMORY / 合同 / operator guidance 的路径
+- 标准化进入 `MEMORY / AGENTS / Skills / watcher rules` 的路径
 
 涉及文件：
 
-- [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
+- [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
 
 验收标准：
 
-- repeated issue 能自动从 pending 学习项升级
+- reflection 主执行发生在 OpenClaw cron
+- promote 决策由 OpenClaw 产出
+- repeated issue 能从 pending 学习项升级并落地到明确注入位置
+
+### HM-402A 学习监督与验收面
+
+优先级：`P2`
+
+问题：
+
+- 即使 OpenClaw 已开始学习，如果外层无法证明学习真的发生，产品仍然不可信
+
+范围：
+
+- 在 Dashboard / shared-state 中展示：
+  - learning backlog
+  - reflection history
+  - promoted items
+  - memory freshness
+  - reuse evidence
+  - repeat-error trend
+
+涉及文件：
+
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
+- [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
+- [shared-state-model.md](/Users/hangzhou/openclaw-health-monitor/docs/shared-state-model.md)
+
+验收标准：
+
+- health-monitor 能判断今天 reflection cron 是否运行
+- health-monitor 能判断 `MEMORY.md` 是否更新
+- health-monitor 能展示同类问题后续是否下降
+
+### HM-403 初始化基线与配置补齐
+
+优先级：`P2`
+
+问题：
+
+- 当前缺少对 OpenClaw workspace 的统一初始化能力
+- readiness 能检查基线，但缺少“合并补齐 + drift 报告”
+
+范围：
+
+- 初始化工作区基础文件与目录
+- 对现有 `openclaw.json` 执行“合并补齐”
+- 输出 bootstrap status 和 config drift
+
+验收标准：
+
+- 缺失项被补齐
+- 高风险配置不被自动覆盖
+- Dashboard/shared-state 可见 bootstrap status
+
+### HM-404 OpenClaw 内部 Self-Check / Heartbeat
+
+优先级：`P1`
+
+问题：
+
+- 外层 guardian 能发现 silent / no_reply，但这不等于 OpenClaw 自己知道自己卡住
+- 当前仍缺少 OpenClaw 内部的最小 self-check / self-recovery 机制
+
+范围：
+
+- 在 OpenClaw 内部增加 `runtime-self-check`
+- 检测：
+  - `silent_stage`
+  - `no_final_reply`
+  - `completed != delivered`
+  - `stale_subagent`
+- 触发最小恢复动作：
+  - session refresh
+  - finalization retry
+  - delivery retry
+  - subagent reconciliation
+
+涉及文件：
+
+- [openclaw-self-check-heartbeat-design.md](/Users/hangzhou/openclaw-health-monitor/docs/openclaw-self-check-heartbeat-design.md)
+
+验收标准：
+
+- OpenClaw 自己能发现卡住
+- OpenClaw 自己能触发最小恢复动作
+- health-monitor 只监督，不接管判断
 
 ---
 
@@ -463,11 +572,31 @@
 涉及文件：
 
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 验收标准：
 
 - 聊天不再承担状态数据库角色
+
+### HM-503 Task Watcher 最小状态面
+
+优先级：`P2`
+
+问题：
+
+- 当前缺少对 `completed != delivered` 的最小结构化监督
+
+范围：
+
+- watcher task 持久化
+- shared-context/monitor-tasks 同步
+- DLQ 统计
+- watcher summary 导出
+
+验收标准：
+
+- watcher 能区分 completed / delivered / dlq
+- Dashboard/shared-state 可直接展示 watcher summary
 
 ---
 
@@ -498,8 +627,10 @@
 - HM-302
 - HM-401
 - HM-402
+- HM-403
 - HM-501
 - HM-502
+- HM-503
 
 ---
 

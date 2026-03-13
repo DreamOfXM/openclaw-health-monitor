@@ -175,7 +175,7 @@ guardian_pid() {
 }
 
 dashboard_pid() {
-    launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard.py"
+    launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard_v2/app.py|$BASE_DIR/dashboard_backend.py"
 }
 
 dashboard_reachable() {
@@ -240,6 +240,19 @@ gateway_pid() {
     listener_pid "$(gateway_port)"
 }
 
+active_gateway_pid() {
+    local active_env pid port
+    active_env="$(active_openclaw_env)"
+    if [ "$active_env" = "official" ]; then
+        port="$(config_value OPENCLAW_OFFICIAL_PORT)"
+        port="${port:-19001}"
+        pid="$(listener_pid "$port" || true)"
+        printf '%s\n' "${pid:-}"
+        return 0
+    fi
+    gateway_pid
+}
+
 ensure_launch_agents_dir() {
     mkdir -p "$HOME/Library/LaunchAgents"
 }
@@ -302,7 +315,7 @@ install_dashboard_launch_agent() {
   <key>ProgramArguments</key>
   <array>
     <string>${python_bin}</string>
-    <string>${BASE_DIR}/dashboard.py</string>
+    <string>${BASE_DIR}/dashboard_v2/app.py</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${BASE_DIR}</string>
@@ -494,7 +507,8 @@ stop_dashboard() {
     if [ -n "$listener" ]; then
         stop_pid "$listener" || true
     fi
-    pkill -f "$BASE_DIR/dashboard.py" 2>/dev/null || true
+    pkill -f "$BASE_DIR/dashboard_v2/app.py" 2>/dev/null || true
+    pkill -f "$BASE_DIR/dashboard_backend.py" 2>/dev/null || true
     rm -f "$DASHBOARD_PID_FILE"
 }
 
@@ -558,7 +572,7 @@ stop_all() {
 
 status_json() {
     local guardian dashboard gateway
-    gateway="$(gateway_pid || true)"
+    gateway="$(active_gateway_pid || true)"
     guardian="$(guardian_pid || true)"
     dashboard="$(dashboard_pid || true)"
     printf '{"gateway":"%s","guardian":"%s","dashboard":"%s"}\n' "${gateway:-}" "${guardian:-}" "${dashboard:-}"

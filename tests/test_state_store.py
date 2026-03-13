@@ -1,11 +1,42 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from state_store import MonitorStateStore
+from state_store import MonitorStateStore, RetryingSQLiteConnection
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_retrying_connection_retries_locked_call(self):
+        conn = object.__new__(RetryingSQLiteConnection)
+        calls = {"count": 0}
+
+        def flaky_call():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return "ok"
+
+        with mock.patch("time.sleep") as sleep:
+            result = conn._retry_sqlite_call(flaky_call)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls["count"], 2)
+        sleep.assert_called_once()
+
+    def test_init_db_lock_is_swallowed_during_store_construction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with mock.patch.object(
+                MonitorStateStore,
+                "_init_db",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ):
+                store = MonitorStateStore(base)
+
+        self.assertEqual(store.db_path, base / "data" / "monitor.db")
+
     def test_round_trip_alerts_versions_and_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -31,6 +62,17 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(len(changes), 1)
             self.assertEqual(changes[0]["type"], "config")
             self.assertTrue((base / "data" / "monitor.db").exists())
+
+    def test_append_runtime_event_keeps_recent_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+
+            for idx in range(5):
+                store.append_runtime_event("restart_events:official", {"seq": idx}, limit=3)
+
+            events = store.load_runtime_value("restart_events:official", [])
+            self.assertEqual([item["seq"] for item in events], [2, 3, 4])
 
     def test_task_registry_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,7 +183,7 @@ class StateStoreTests(unittest.TestCase):
                     "updated_at": 2,
                 }
             )
-            with unittest.mock.patch("time.time", return_value=100):
+            with mock.patch("time.time", return_value=100):
                 store.record_task_event("task-1", "dispatch_started", {"question": "任务A"})
                 store.record_task_event("task-1", "dispatch_started", {"question": "任务A"})
             events = store.list_task_events("task-1", limit=10)
@@ -167,7 +209,7 @@ class StateStoreTests(unittest.TestCase):
                     "updated_at": 2,
                 }
             )
-            with unittest.mock.patch("time.time", return_value=100):
+            with mock.patch("time.time", return_value=100):
                 store.record_task_event("task-1", "dispatch_started", {"question": "我再提个需求"})
 
             repaired = store.repair_task_identity("task-1")
@@ -248,6 +290,60 @@ class StateStoreTests(unittest.TestCase):
             runs = store.list_reflection_runs(limit=5)
             self.assertEqual(runs[0]["summary"]["promoted"], 1)
 
+    def test_watcher_task_round_trip_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_watcher_task(
+                {
+                    "watcher_task_id": "req-1",
+                    "env_id": "primary",
+                    "source_agent": "main",
+                    "target_agent": "codex",
+                    "intent": "THREADED_EXECUTION",
+                    "current_state": "completed",
+                    "completed_at": 100,
+                    "delivered_at": 0,
+                    "last_checked_at": 120,
+                    "error_count": 1,
+                    "payload": {"request_id": "req-1"},
+                }
+            )
+            store.upsert_watcher_task(
+                {
+                    "watcher_task_id": "req-2",
+                    "env_id": "primary",
+                    "source_agent": "main",
+                    "target_agent": "codex",
+                    "intent": "THREADED_EXECUTION",
+                    "current_state": "delivered",
+                    "completed_at": 90,
+                    "delivered_at": 110,
+                    "payload": {"request_id": "req-2"},
+                }
+            )
+            store.upsert_watcher_task(
+                {
+                    "watcher_task_id": "req-3",
+                    "env_id": "primary",
+                    "source_agent": "main",
+                    "target_agent": "codex",
+                    "intent": "THREADED_EXECUTION",
+                    "current_state": "failed",
+                    "in_dlq": True,
+                    "payload": {"request_id": "req-3"},
+                }
+            )
+            tasks = store.list_watcher_tasks(env_id="primary", limit=10)
+            summary = store.summarize_watcher_tasks(env_id="primary")
+            self.assertEqual(len(tasks), 3)
+            self.assertEqual(summary["total"], 3)
+            self.assertEqual(summary["completed"], 2)
+            self.assertEqual(summary["delivered"], 1)
+            self.assertEqual(summary["undelivered"], 1)
+            self.assertEqual(summary["failed"], 1)
+            self.assertEqual(summary["dlq"], 1)
+
     def test_summarize_control_plane_reports_ack_and_next_actor(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -297,6 +393,32 @@ class StateStoreTests(unittest.TestCase):
             summary = store.summarize_control_plane(env_id="primary")
             self.assertEqual(summary["tasks"]["recoverable"], 1)
             self.assertEqual(summary["tasks"]["next_actor_counts"]["dev"], 1)
+
+    def test_summarize_control_plane_counts_protocol_violations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-proto",
+                    "session_key": "session-proto",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "任务A",
+                    "last_user_message": "任务A",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.record_task_event("task-proto", "protocol_violation", {"violation_kind": "duplicate_final"})
+
+            summary = store.summarize_control_plane(env_id="primary")
+
+            self.assertEqual(summary["tasks"]["protocol_violations"], 1)
 
     def test_derive_task_control_state_distinguishes_weak_and_strong_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -387,6 +509,89 @@ class StateStoreTests(unittest.TestCase):
             control = store.derive_task_control_state("task-blocked")
             self.assertEqual(control["control_state"], "blocked_unverified")
             self.assertEqual(control["next_action"], "manual_or_session_recovery")
+            self.assertEqual(control["truth_level"], "derived")
+            self.assertEqual(control["contract"]["mode"], "observation_template")
+
+    def test_derive_task_control_state_detects_pipeline_detached_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-detached",
+                    "session_key": "session-detached",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "blocked",
+                    "current_stage": "implementation:started",
+                    "question": "开发一个记事本系统",
+                    "last_user_message": "开发一个记事本系统",
+                    "blocked_reason": "missing_pipeline_receipt",
+                    "started_at": 1,
+                    "last_progress_at": 30,
+                    "created_at": 1,
+                    "updated_at": 30,
+                }
+            )
+            store.upsert_task_contract(
+                "task-detached",
+                {
+                    "id": "delivery_pipeline",
+                    "protocol_version": "hm.v1",
+                    "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"],
+                },
+            )
+            store.record_task_event("task-detached", "dispatch_started", {"question": "开发一个记事本系统"})
+            store.record_task_event("task-detached", "pipeline_receipt", {"receipt": {"agent": "pm", "phase": "planning", "action": "completed", "ack_id": "ack-pm"}})
+            store.record_task_event("task-detached", "stage_progress", {"marker": "implementation:started", "stage": "implementation:started"})
+            control = store.derive_task_control_state("task-detached")
+            self.assertEqual(control["next_action"], "manual_or_session_recovery")
+            self.assertEqual(control["pipeline_recovery"]["rebind_target"], "dev")
+            self.assertIn("流水线", control["approved_summary"])
+            self.assertTrue(control["native_state"]["pipeline_receipt_seen"])
+            self.assertFalse(control["heuristic_state"]["visible_completion_seen"])
+
+    def test_derive_task_control_state_waits_for_receipt_after_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-recovering",
+                    "session_key": "session-recovering",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "恢复中:pipeline_detached",
+                    "question": "开发一个记事本系统",
+                    "last_user_message": "开发一个记事本系统",
+                    "blocked_reason": "",
+                    "started_at": 1,
+                    "last_progress_at": 40,
+                    "created_at": 1,
+                    "updated_at": 40,
+                }
+            )
+            store.upsert_task_contract(
+                "task-recovering",
+                {
+                    "id": "delivery_pipeline",
+                    "protocol_version": "hm.v1",
+                    "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"],
+                },
+            )
+            store.record_task_event("task-recovering", "dispatch_started", {"question": "开发一个记事本系统"})
+            store.record_task_event("task-recovering", "pipeline_receipt", {"receipt": {"agent": "pm", "phase": "planning", "action": "completed", "ack_id": "ack-pm"}})
+            store.record_task_event(
+                "task-recovering",
+                "recovery_succeeded",
+                {"recovery_kind": "pipeline_detached", "rebind_target": "dev"},
+            )
+
+            control = store.derive_task_control_state("task-recovering")
+
+            self.assertEqual(control["next_action"], "await_receipt_after_recovery")
+            self.assertEqual(control["next_actor"], "dev")
 
     def test_derive_task_control_state_detects_pipeline_detached_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:

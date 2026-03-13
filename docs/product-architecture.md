@@ -12,7 +12,7 @@ It describes:
 - storage and data model
 - environment-management model
 - task/control-plane model
-- learning/reflection model
+- learning/reflection supervision model
 - current implementation status
 - known gaps and next-step priorities
 
@@ -27,7 +27,7 @@ Its real role is to provide an external runtime governance layer for OpenClaw:
 - observe real execution instead of trusting free-form model output
 - detect silent failures, stuck tasks, and reply-loss cases
 - enforce a task/control protocol outside OpenClaw core
-- accumulate learnings and make repeated failures visible
+- verify that OpenClaw learning and reflection actually happen
 
 In short:
 
@@ -43,6 +43,9 @@ In short:
 - model invocation
 - session files and runtime logs
 - tool invocation and agent orchestration primitives
+- learning capture and `.learnings` writes
+- reflection cron and promotion decisions
+- durable memory updates and skills reuse
 
 ### 2.2 Health Monitor Owns
 
@@ -53,7 +56,8 @@ In short:
 - anomaly detection and runtime diagnosis
 - restart / recovery / rollback policy
 - operator dashboard
-- learning and reflection loop
+- learning visibility, audit, and verification
+- Task Watcher and `completed != delivered` supervision
 
 ### 2.3 Design Principle
 
@@ -106,7 +110,7 @@ There are three primary runtime pieces in this repository:
 
 Main file:
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 Responsibilities:
 
@@ -145,7 +149,8 @@ Responsibilities:
 - follow-up delivery and fallback push behavior
 - snapshot creation and rollback
 - restart and update orchestration
-- learning capture and reflection runs
+- learning freshness / reflection freshness audit
+- shared-state export for backlog, promoted items, and watcher status
 
 Guardian is the core automation loop of the product.
 
@@ -198,6 +203,8 @@ Responsibilities:
 - persist runtime kv-state
 - persist learnings and reflection runs
 - summarize control-plane state for Dashboard
+
+The state store records monitor-visible learning facts, but it is not the source of truth for OpenClaw's cognitive decisions.
 
 This is the long-lived product memory for the monitor itself.
 
@@ -305,7 +312,7 @@ What it does:
 
 Primary files:
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
 - [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 
@@ -322,7 +329,7 @@ What it does:
 Primary files:
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 ## 7.3 Task Registry
 
@@ -365,7 +372,7 @@ Primary files:
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 ## 7.6 Recovery and Version Operations
 
@@ -382,22 +389,27 @@ Primary files:
 
 - [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [snapshot_manager.py](/Users/hangzhou/openclaw-health-monitor/snapshot_manager.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
-## 7.7 Learning and Reflection
+## 7.7 Learning and Reflection Supervision
 
 What it does:
 
-- capture repeated blocked outcomes as learnings
-- summarize learnings
-- run reflection cycles on a schedule
-- promote repeated issues into operator-visible insights
+- display learning backlog and promoted items
+- expose reflection history and freshness
+- verify whether learning outputs landed in durable files
+- track whether repeated failures are going down over time
 
 Primary files:
 
-- [guardian.py](/Users/hangzhou/openclaw-health-monitor/guardian.py)
 - [state_store.py](/Users/hangzhou/openclaw-health-monitor/state_store.py)
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
+- [learning-reflection-rearchitecture.md](/Users/hangzhou/openclaw-health-monitor/docs/learning-reflection-rearchitecture.md)
+
+Ownership note:
+
+- OpenClaw owns learn / reflect / promote / reuse
+- Health Monitor owns visibility / audit / verification
 
 ## 7.8 Operator UI
 
@@ -415,7 +427,7 @@ What it shows:
 
 Primary file:
 
-- [dashboard.py](/Users/hangzhou/openclaw-health-monitor/dashboard.py)
+- [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 
 ## 8. Storage Model
 
@@ -447,6 +459,8 @@ Use:
 - reflection runs
 - runtime kv-state
 
+These records are external supervisory evidence, not the canonical execution-time learning engine.
+
 ## 8.3 Change Logs and Snapshots
 
 Use:
@@ -476,6 +490,7 @@ These act as a practical shared-state layer for the current product, even though
 ## 9. Task and Evidence Model
 
 The control plane does not trust arbitrary agent prose as task truth.
+It treats the task registry as derived operator state, while OpenClaw native session/runtime state remains authoritative.
 
 It prefers stronger runtime evidence such as:
 
@@ -516,7 +531,7 @@ The current product already aligns with a stronger long-running-agent philosophy
 - `AGENTS.md` / `SOUL.md` / `Skills` layering in the OpenClaw workspace
 - memory folder usage
 - task contract classification
-- session-based follow-up logic
+- native-vs-derived truth separation in the control plane
 
 ### 10.3 Still Missing
 

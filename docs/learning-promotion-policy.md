@@ -1,5 +1,14 @@
 # Learning Promotion Policy
 
+> Note
+>
+> This file describes the promotion policy surface.
+> The ownership split is defined in
+> `docs/learning-reflection-rearchitecture.md`:
+>
+> - `OpenClaw` owns learn / reflect / promote
+> - `health-monitor` owns visibility / audit / verification
+
 ## Daily Rules
 
 - learnings accumulate occurrences

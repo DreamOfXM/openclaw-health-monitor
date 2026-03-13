@@ -12,7 +12,7 @@ Before sending changes:
 
 ```bash
 cd ~/openclaw-health-monitor
-python3 -m unittest discover -s tests -v
+.venv/bin/python -m pytest dashboard_v2/tests tests -q
 ```
 
 4. Run release checks:
@@ -27,8 +27,22 @@ cd ~/openclaw-health-monitor
 - `config.local.conf`
 - `snapshots/`
 - `data/*.db`
+- `data/*.db-shm`
+- `data/*.db-wal`
+- `data/current-task-facts.json`
+- `data/task-registry-summary.json`
+- `data/shared-state/*.json` (keep `data/shared-state/README.md` only)
+- `.learnings/*.md`
+- `MEMORY.md`
+- `memory/*.md`
 - `logs/`
 - `change-logs/*.json`
+
+6. Keep the console boundary clear:
+
+- `dashboard_v2/` is the primary frontend
+- `dashboard_backend.py` is the compatibility data layer
+- do not add new primary UI work back into the old monolithic dashboard path
 
 Recommended contribution scope:
 
@@ -52,7 +66,7 @@ Please keep changes small, reviewable, and reversible.
 
 ```bash
 cd ~/openclaw-health-monitor
-python3 -m unittest discover -s tests -v
+.venv/bin/python -m pytest dashboard_v2/tests tests -q
 ```
 
 4. 再运行发布前检查：
@@ -67,8 +81,22 @@ cd ~/openclaw-health-monitor
 - `config.local.conf`
 - `snapshots/`
 - `data/*.db`
+- `data/*.db-shm`
+- `data/*.db-wal`
+- `data/current-task-facts.json`
+- `data/task-registry-summary.json`
+- `data/shared-state/*.json`（保留 `data/shared-state/README.md`）
+- `.learnings/*.md`
+- `MEMORY.md`
+- `memory/*.md`
 - `logs/`
 - `change-logs/*.json`
+
+6. 保持控制台边界清晰：
+
+- `dashboard_v2/` 是主前端
+- `dashboard_backend.py` 是兼容数据层
+- 不要再把新的主 UI 工作加回旧的 dashboard 路径里
 
 推荐优先贡献：
 

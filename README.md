@@ -140,6 +140,14 @@ cd ~/openclaw-health-monitor
 ./manage_official_openclaw.sh stop
 ```
 
+## 维护约定
+
+- `dashboard_v2/` 是当前唯一主控制台前端；不要再把旧的 `dashboard.py` 当成主 UI 继续扩展
+- `dashboard_backend.py` 是 Dashboard V2 背后的兼容数据层；环境、任务、学习、shared-state 等真实能力继续从这里和 `state_store.py` 提供
+- 当前迁移工作分支是 `dashboard-v2-primary-console`；在合并到 `main` 之前，后续控制台维护默认继续在这个分支上进行
+- 本地运行数据不再纳入版本管理：`.learnings/*.md`、`MEMORY.md`、`memory/*.md`、`data/shared-state/*.json`、`data/current-task-facts.json`、`data/task-registry-summary.json`、`data/*.db-shm`、`data/*.db-wal`
+- `data/shared-state/README.md` 仍保留在仓库中，用来说明 shared-state 目录结构；其余运行态 JSON 只作为本机事实源，不作为源码提交内容
+
 ## 功能概览
 
 ### 1. 本地运行与守护
@@ -181,6 +189,24 @@ Dashboard 负责提供本地操作和诊断视图，当前包括：
 - 支持在 Dashboard 中切换当前守护目标
 - 同一时间只允许一个 Gateway 处于激活运行态
 
+### 5. 进度治理机制（本轮新增落地）
+
+这轮实现把“有方案 ≠ 开发已启动、 有开发 ≠ 测试已启动、缺少回执 ≠ 可宣称推进”真正落成了代码约束：
+
+- **统一结构化回执协议**：`PIPELINE_RECEIPT` 必须包含 `agent / phase / action / evidence`，并补齐 `ack_id`
+- **状态机推进规则**：`planning_only / dev_running / awaiting_test / test_running / blocked_* / completed_verified` 由真实 receipt 驱动
+- **超时守护 / 缺失回执判定**：在宽限期后生成 `task_control_actions`，默认记录 follow-up 或直接阻塞
+- **单一事实源**：对外查询统一读取 `data/current-task-facts.json`
+- **用户可见文案绑定**：新增 `user_visible_progress`，由 `control_state + missing_receipts + contract` 决定，而不是口头猜测
+- **A 股闭环优先覆盖**：新增 `a_share_delivery_pipeline` 合同，专门约束 `A股 / 闭环采样 / 采样策略` 这类开发交付任务
+
+当前推荐的外部查询口径：
+
+- 先读 `data/current-task-facts.json`
+- 只根据 `approved_summary / user_visible_progress / control_state / next_action / missing_receipts` 回答
+- 当 `control_state=planning_only` 时，只能说“方案已完成，但开发尚未启动”
+- 当缺少 `dev/test` receipt 时，禁止说“开发/测试正在推进”
+
 ## 架构说明
 
 完整架构图与任务状态流转图见：
@@ -192,8 +218,11 @@ Dashboard 负责提供本地操作和诊断视图，当前包括：
 - `guardian.py`
   后台守护进程。负责健康检查、异常识别、主动进度播报、自动恢复、通知和变更记录。
 
-- `dashboard.py`
-  本地 Web UI。负责展示 Gateway / Guardian / Dashboard 状态、最近异常、内存归因、配置快照和操作入口。
+- `dashboard_v2/`
+  当前唯一主控制台前端。负责页面、交互、三视图结构和操作入口。
+
+- `dashboard_backend.py`
+  Dashboard V2 的后端兼容层。继续复用环境、任务、学习、共享状态、快照和版本治理的真实数据接口。
 
 - `desktop_runtime.sh`
   本地总控脚本。负责统一启动、停止、查询：
@@ -671,8 +700,11 @@ For the full architecture and task-state diagrams, see:
 - `guardian.py`
   Background daemon responsible for health checks, anomaly detection, recovery logic, notifications, and change logs.
 
-- `dashboard.py`
-  Local web UI that renders Gateway / Guardian / Dashboard state, recent incidents, memory attribution, snapshots, and operator controls.
+- `dashboard_v2/`
+  The primary control-console frontend. It owns the pages, interaction model, and operator workflows.
+
+- `dashboard_backend.py`
+  The backend compatibility layer behind Dashboard V2. It continues to expose the real environment, task, learning, shared-state, snapshot, and promotion interfaces.
 
 - `desktop_runtime.sh`
   The local runtime controller that starts, stops, and inspects:
@@ -757,6 +789,14 @@ Switching is mutually exclusive by default:
 - switching back to the primary environment stops the official validation Gateway
 
 This avoids two OpenClaw instances competing for the same channels.
+
+## Maintenance Notes
+
+- `dashboard_v2/` is the only primary control-console frontend now; do not keep extending the old `dashboard.py` as if it were the main UI
+- `dashboard_backend.py` is the compatibility data layer behind Dashboard V2; real environment, task, learning, and shared-state capabilities still come from there and `state_store.py`
+- the current migration branch is `dashboard-v2-primary-console`; until this work lands in `main`, treat that branch as the default place for ongoing console maintenance
+- local runtime artifacts are no longer source-controlled: `.learnings/*.md`, `MEMORY.md`, `memory/*.md`, `data/shared-state/*.json`, `data/current-task-facts.json`, `data/task-registry-summary.json`, `data/*.db-shm`, and `data/*.db-wal`
+- `data/shared-state/README.md` stays in git to document the shared-state contract; the rest of the runtime JSON files remain local machine facts rather than repository source
 
 Important:
 
