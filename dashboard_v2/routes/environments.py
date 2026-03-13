@@ -110,26 +110,11 @@ def promote_environment():
 
 @bp.route('/official-auto-update', methods=['POST'])
 def set_official_auto_update():
-    """切换官方验证版自动更新"""
-    try:
-        data = request.get_json() or {}
-        enabled = data.get('enabled')
-        if not isinstance(enabled, bool):
-            return jsonify({
-                'success': False,
-                'error': 'enabled 必须为布尔值'
-            }), 400
-        collector = get_collector()
-        result = collector.set_official_auto_update(enabled)
-        return jsonify({
-            'success': bool(result.get('success')),
-            'data': result
-        }), (200 if result.get('success') else 500)
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+    """切换官方验证版自动更新（单环境模式已禁用）"""
+    return jsonify({
+        'success': False,
+        'error': '单环境模式，不支持 official 自动更新'
+    }), 400
 
 
 @bp.route('/snapshots', methods=['GET'])

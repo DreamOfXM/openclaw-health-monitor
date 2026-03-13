@@ -172,10 +172,8 @@ class DataCollector:
         legacy = _legacy_dashboard()
         config = legacy.load_config()
         runtime_binding = _runtime_value(legacy, "active_openclaw_env", {})
-        active_env = str(runtime_binding.get("env_id") or "").strip().lower()
-        if active_env not in {"primary", "official"}:
-            active_env = "unknown"
-        selected_env = legacy.env_spec(active_env, config) if active_env in {"primary", "official"} else {}
+        active_env = "primary"  # 只支持 primary 环境
+        selected_env = legacy.env_spec(active_env, config)
         task_registry = legacy.get_task_registry_payload(limit=20)
         return {
             "legacy": legacy,
@@ -800,20 +798,16 @@ class DataCollector:
         }
 
     def promote_environment(self) -> Dict[str, Any]:
-        legacy = _legacy_dashboard()
-        result = legacy.execute_official_promotion()
-        self.invalidate_cache()
-        return result
+        # 单环境模式，不支持晋升
+        return {"status": "skipped", "message": "单环境模式，不支持版本晋升"}
 
     def set_official_auto_update(self, enabled: bool) -> Dict[str, Any]:
-        legacy = _legacy_dashboard()
-        success, message, official = legacy.set_official_auto_update_enabled(enabled)
-        self.invalidate_cache()
+        # 单环境模式，不支持 official 自动更新
         return {
-            "success": success,
-            "message": message,
+            "success": False,
+            "message": "单环境模式，不支持 official 自动更新",
             "enabled": enabled,
-            "environment": official,
+            "environment": {},
             "timestamp": datetime.now().isoformat(),
         }
 
