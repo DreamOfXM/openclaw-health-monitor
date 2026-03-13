@@ -145,28 +145,20 @@ Status: partially landed
 
 Objective:
 
-- make multi-version OpenClaw operation understandable and safe
+- make OpenClaw operation understandable and safe
 
 Scope:
 
-- primary vs official validation environments
-- update, start, validate, switch workflow
+- single environment operation
+- update, start, validate workflow
 - active environment truth
 - dashboard action safety
 
 Delivered:
 
-- primary / official environment management
+- primary environment management
 - active environment persistence
 - guarded dashboard links
-- automatic official environment preparation
-
-Remaining:
-
-- clearer promotion flow from official -> primary
-- stronger operator feedback on what is safe to switch
-- pre-switch validation summary
-- scripted promotion with automated verification and rollback
 
 ## Phase 6: Operator Console UX
 
@@ -190,19 +182,18 @@ Desired end state:
   - what is running
   - what is blocked
   - who should act next
-  - whether a version is safe to promote
   - whether a task is real progress or only received
 
 ## Design Principles
 
 - do not patch OpenClaw core unless absolutely necessary
-- prefer official OpenClaw configuration and primitives first
+- prefer OpenClaw configuration and primitives first
 - keep execution in OpenClaw, control in Health Monitor
 - treat receipts and task evidence as truth
 - treat free-form model language as advisory, not authoritative
-- every “in progress” claim should be backed by evidence
+- every "in progress" claim should be backed by evidence
 
-## What “Done” Looks Like
+## What "Done" Looks Like
 
 The project should eventually provide:
 
@@ -213,4 +204,4 @@ The project should eventually provide:
 - version-safe upgrade workflow
 - an evolution loop that learns from real failures
 
-That is the target state for the “OpenClaw super steward”.
+That is the target state for the "OpenClaw super steward".
