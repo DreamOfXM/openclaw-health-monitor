@@ -5,6 +5,7 @@ import unittest
 import time
 import sys
 import os
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -86,6 +87,20 @@ class TestDataCollector(unittest.TestCase):
         self.assertIn('environments', env)
         self.assertIn('context_readiness', env)
         self.assertIn('timestamp', env)
+
+    def test_runtime_context_prefers_active_binding(self):
+        """测试运行时上下文优先读取 committed binding，而不是旧配置里的 ACTIVE_OPENCLAW_ENV。"""
+        fake_legacy = mock.Mock()
+        fake_legacy.load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "official"}
+        fake_legacy.active_binding.return_value = {"active_env": "primary", "switch_state": "committed"}
+        fake_legacy.env_spec.side_effect = lambda env_id, _cfg=None: {"id": env_id}
+        fake_legacy.get_task_registry_payload.return_value = {}
+
+        with mock.patch("services.data_collector._legacy_dashboard", return_value=fake_legacy):
+            context = self.collector._load_runtime_context()
+
+        self.assertEqual(context["active_env"], "primary")
+        self.assertEqual(context["selected_env"]["id"], "primary")
     
     def test_get_tasks(self):
         """测试获取任务数据"""

@@ -130,12 +130,24 @@ class DataCollector:
     def _load_runtime_context(self) -> Dict[str, Any]:
         legacy = _legacy_dashboard()
         config = legacy.load_config()
-        active_env = legacy.active_env_id(config)
+        binding = {}
+        try:
+            binding = legacy.active_binding(config)
+        except Exception:
+            binding = {}
+        active_env = str(
+            binding.get("active_env")
+            or config.get("ACTIVE_OPENCLAW_ENV")
+            or "primary"
+        )
+        if active_env not in {"primary", "official"}:
+            active_env = "primary"
         selected_env = legacy.env_spec(active_env, config)
         task_registry = legacy.get_task_registry_payload(limit=20)
         return {
             "legacy": legacy,
             "config": config,
+            "binding": binding,
             "active_env": active_env,
             "selected_env": selected_env,
             "task_registry": task_registry,
@@ -262,6 +274,8 @@ class DataCollector:
 
             raw_environments = legacy.list_openclaw_environments(config)
             environments = [self._normalize_environment(item) for item in raw_environments]
+            for item in environments:
+                item["active"] = item.get("id") == active_env
             selected = next((item for item in environments if item.get("id") == active_env), {})
             bootstrap_status = legacy.build_bootstrap_status(config)
             context_readiness = legacy.build_context_lifecycle_readiness(config)
