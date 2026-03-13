@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import time
+import signal
 import socket
 import re
 import subprocess
@@ -666,19 +667,33 @@ def load_config() -> dict:
 
 def active_binding(config: Optional[dict] = None) -> dict[str, Any]:
     cfg = config or load_config()
-    return read_active_binding(BASE_DIR, cfg)
+    binding = read_active_binding(BASE_DIR, cfg)
+    runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
+    if not isinstance(runtime_binding, dict):
+        return binding
+    runtime_env = str(runtime_binding.get("env_id") or "").strip()
+    specs = get_env_specs(cfg)
+    if runtime_env not in specs:
+        return binding
+    expected = dict(specs[runtime_env])
+    if isinstance(runtime_binding.get("expected"), dict):
+        expected.update(runtime_binding.get("expected") or {})
+    return {
+        "active_env": runtime_env,
+        "switch_state": str(runtime_binding.get("switch_state") or binding.get("switch_state") or "committed"),
+        "binding_version": int(runtime_binding.get("binding_version") or binding.get("binding_version") or 1),
+        "updated_at": int(runtime_binding.get("updated_at") or binding.get("updated_at") or int(time.time())),
+        "expected": expected,
+    }
 
 
 def active_env_id(config: Optional[dict] = None) -> str:
     cfg = config or load_config()
-    if config is not None and cfg.get("ACTIVE_OPENCLAW_ENV") in {"primary", "official"}:
-        candidate = str(cfg.get("ACTIVE_OPENCLAW_ENV") or "primary")
-    else:
-        candidate = str(
-            active_binding(cfg).get("active_env")
-            or cfg.get("ACTIVE_OPENCLAW_ENV")
-            or "primary"
-        )
+    candidate = str(
+        active_binding(cfg).get("active_env")
+        or cfg.get("ACTIVE_OPENCLAW_ENV")
+        or "primary"
+    )
     return candidate if candidate == "official" else "primary"
 
 
@@ -2386,8 +2401,50 @@ def inactive_env_id(env_id: str) -> str:
     return "official" if env_id == "primary" else "primary"
 
 
+def terminate_listener_pid(pid: Optional[int], label: str, timeout: float = 8.0) -> tuple[bool, str]:
+    if pid is None:
+        return True, f"{label} listener 未运行"
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True, f"{label} listener 已退出"
+    except Exception as exc:
+        return False, f"停止 {label} listener 失败: {exc}"
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True, f"已终止 {label} listener(pid={pid})"
+        except Exception:
+            break
+        time.sleep(0.2)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True, f"已终止 {label} listener(pid={pid})"
+    except Exception as exc:
+        return False, f"强制终止 {label} listener 失败: {exc}"
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True, f"已强制终止 {label} listener(pid={pid})"
+        except Exception:
+            break
+        time.sleep(0.1)
+    return False, f"{label} listener 仍然存活"
+
+
 def enforce_single_active_listener(target_env: str) -> tuple[bool, str]:
     cfg = load_config()
+    bound_env = active_env_id(cfg)
+    if target_env != bound_env:
+        return False, f"当前 DB 绑定为 {bound_env}，拒绝操作未绑定环境 {target_env}"
     specs = get_env_specs(cfg)
     active_spec = specs[target_env]
     inactive_spec = specs[inactive_env_id(target_env)]
@@ -2396,7 +2453,7 @@ def enforce_single_active_listener(target_env: str) -> tuple[bool, str]:
     if active_pid is None:
         return False, f"{active_spec['name']} listener 未启动"
     if inactive_pid is None:
-        return True, "single-active ok"
+        return True, f"single-active ok: 仅 {active_spec['name']} listener 存活"
     if target_env == "official":
         run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
     else:
@@ -2404,8 +2461,10 @@ def enforce_single_active_listener(target_env: str) -> tuple[bool, str]:
     time.sleep(2)
     inactive_pid_after = get_listener_pid(int(inactive_spec["port"]))
     if inactive_pid_after is not None:
-        return False, f"{inactive_spec['name']} listener 仍然存活"
-    return True, f"已停止 {inactive_spec['name']} listener"
+        killed, kill_message = terminate_listener_pid(inactive_pid_after, inactive_spec["name"])
+        if not killed:
+            return False, kill_message
+    return True, f"已停止未绑定环境 {inactive_spec['name']} listener"
 
 
 def restore_environment_after_failed_switch(previous_env: str) -> tuple[bool, str]:

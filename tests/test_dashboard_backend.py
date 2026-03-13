@@ -1021,6 +1021,7 @@ class DashboardMemoryTests(unittest.TestCase):
             }
             with mock.patch.object(dashboard, "BASE_DIR", base), \
                 mock.patch.object(dashboard, "load_config", return_value=cfg), \
+                mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}), \
                 mock.patch.object(dashboard, "restart_active_openclaw_environment") as restart_env, \
                 mock.patch("dashboard_backend.SnapshotManager.restore_snapshot") as restore_snapshot:
                 ok, message = dashboard.restore_snapshot_and_restart("20260311-test-official")
@@ -1339,11 +1340,56 @@ class DashboardMemoryTests(unittest.TestCase):
                 "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
                 "OPENCLAW_OFFICIAL_PORT": 19001,
             },
-        ):
+        ), \
+            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
             ok, message = dashboard.enforce_single_active_listener("primary")
         self.assertTrue(ok)
         self.assertIn("listener", message)
         self.assertEqual(run_script.call_args.args[0], [str(dashboard.OFFICIAL_MANAGER), "stop"])
+
+    def test_active_binding_prefers_runtime_store_binding(self):
+        cfg = {"ACTIVE_OPENCLAW_ENV": "primary"}
+        with mock.patch.object(dashboard, "load_config", return_value=cfg), \
+            mock.patch("dashboard_backend.read_active_binding", return_value={"active_env": "primary", "switch_state": "committed", "binding_version": 1, "updated_at": 1, "expected": {}}), \
+            mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "official", "switch_state": "committed", "updated_at": 2}):
+            binding = dashboard.active_binding(cfg)
+        self.assertEqual(binding["active_env"], "official")
+
+    @mock.patch("dashboard_backend.get_listener_pid")
+    @mock.patch("dashboard_backend.run_script")
+    @mock.patch("dashboard_backend.terminate_listener_pid")
+    def test_enforce_single_active_listener_kills_unbound_env_when_stop_leaves_listener_alive(self, terminate_listener_pid, run_script, get_listener_pid):
+        get_listener_pid.side_effect = [1111, 2222, 2222]
+        terminate_listener_pid.return_value = (True, "killed")
+        with mock.patch.object(dashboard, "load_config", return_value={
+            "ACTIVE_OPENCLAW_ENV": "primary",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+            "OPENCLAW_OFFICIAL_PORT": 19001,
+        }), \
+            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
+            ok, message = dashboard.enforce_single_active_listener("primary")
+        self.assertTrue(ok)
+        self.assertIn("未绑定环境", message)
+        terminate_listener_pid.assert_called_once_with(2222, "官方验证版")
+
+    def test_enforce_single_active_listener_rejects_unbound_target_env(self):
+        with mock.patch.object(dashboard, "load_config", return_value={
+            "ACTIVE_OPENCLAW_ENV": "primary",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
+            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
+            "OPENCLAW_OFFICIAL_PORT": 19001,
+        }), \
+            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
+            ok, message = dashboard.enforce_single_active_listener("official")
+        self.assertFalse(ok)
+        self.assertIn("拒绝操作未绑定环境", message)
 
     def test_manage_official_environment_blocks_start_when_not_active(self):
         with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"}), \

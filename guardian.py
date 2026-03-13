@@ -77,7 +77,24 @@ def load_config():
 
 
 def active_binding() -> dict[str, Any]:
-    return read_active_binding(BASE_DIR, CONFIG)
+    binding = read_active_binding(BASE_DIR, CONFIG)
+    runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
+    if not isinstance(runtime_binding, dict):
+        return binding
+    runtime_env = str(runtime_binding.get("env_id") or "").strip()
+    specs = get_registered_env_specs(CONFIG)
+    if runtime_env not in specs:
+        return binding
+    expected = dict(specs[runtime_env])
+    if isinstance(runtime_binding.get("expected"), dict):
+        expected.update(runtime_binding.get("expected") or {})
+    return {
+        "active_env": runtime_env,
+        "switch_state": str(runtime_binding.get("switch_state") or binding.get("switch_state") or "committed"),
+        "binding_version": int(runtime_binding.get("binding_version") or binding.get("binding_version") or 1),
+        "updated_at": int(runtime_binding.get("updated_at") or binding.get("updated_at") or int(time.time())),
+        "expected": expected,
+    }
 
 
 def active_env_id() -> str:
