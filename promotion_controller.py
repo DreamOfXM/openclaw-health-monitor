@@ -301,7 +301,41 @@ class PromotionController:
             checks.append({"name": name, "ok": ok, "stdout": stdout, "stderr": stderr})
             if not ok:
                 raise RuntimeError(stderr or stdout or f"verification failed: {name}")
-        return {"checks": checks}
+        channel_readiness = self.probe_primary_channels(env)
+        self.store.save_runtime_value(
+            "channel_readiness:primary",
+            {
+                "env_id": "primary",
+                "checked_at": int(self.time_fn()),
+                **channel_readiness,
+            },
+        )
+        return {"checks": checks, "channel_readiness": channel_readiness}
+
+    def probe_primary_channels(self, env: dict[str, str]) -> dict[str, Any]:
+        code, stdout, stderr = self._run(["openclaw", "channels", "status", "--probe"], env=env, timeout=180)
+        text = (stdout or stderr or "").strip()
+        readiness = {
+            "status": "ready" if code == 0 else "warning",
+            "summary": text,
+            "feishu": {
+                "status": "unknown",
+                "detail": "未检测到 Feishu 通道结果",
+            },
+        }
+        if "Feishu default:" in text:
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("- Feishu default:"):
+                    detail = line.split(":", 1)[1].strip()
+                    readiness["feishu"] = {
+                        "status": "ready" if "works" in detail else "warning",
+                        "detail": detail,
+                    }
+                    if "works" not in detail and readiness["status"] == "ready":
+                        readiness["status"] = "warning"
+                    break
+        return readiness
 
     def rollback(self, primary_snapshot_name: str, primary_head: str) -> dict[str, Any]:
         primary = self.specs["primary"]

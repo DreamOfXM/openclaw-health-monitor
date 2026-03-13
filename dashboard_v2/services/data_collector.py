@@ -90,6 +90,16 @@ def _coerce_number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _runtime_value(legacy: Any, key: str, default: Any) -> Any:
+    try:
+        store = getattr(legacy, "STORE", None)
+        if store is None:
+            return default
+        return store.load_runtime_value(key, default)
+    except Exception:
+        return default
+
+
 class DataCollector:
     """数据收集器"""
 
@@ -130,24 +140,21 @@ class DataCollector:
     def _load_runtime_context(self) -> Dict[str, Any]:
         legacy = _legacy_dashboard()
         config = legacy.load_config()
-        binding = {}
-        try:
-            binding = legacy.active_binding(config)
-        except Exception:
-            binding = {}
-        active_env = str(
-            binding.get("active_env")
-            or config.get("ACTIVE_OPENCLAW_ENV")
-            or "primary"
-        )
+        runtime_binding = _runtime_value(legacy, "active_openclaw_env", {})
+        active_env = str(runtime_binding.get("env_id") or "").strip().lower()
         if active_env not in {"primary", "official"}:
-            active_env = "primary"
-        selected_env = legacy.env_spec(active_env, config)
+            active_env = "unknown"
+        selected_env = legacy.env_spec(active_env, config) if active_env in {"primary", "official"} else {}
         task_registry = legacy.get_task_registry_payload(limit=20)
         return {
             "legacy": legacy,
             "config": config,
-            "binding": binding,
+            "binding": {
+                "active_env": active_env,
+                "switch_state": str(runtime_binding.get("switch_state") or "committed"),
+                "updated_at": runtime_binding.get("updated_at") or 0,
+                "source": "runtime_db",
+            },
             "active_env": active_env,
             "selected_env": selected_env,
             "task_registry": task_registry,
@@ -259,8 +266,12 @@ class DataCollector:
             "dashboard_url": item.get("dashboard_url") or "",
             "dashboard_open_link": item.get("dashboard_open_link") or "",
             "auto_update_enabled": bool(item.get("auto_update_enabled")),
+            "auto_update_expected": bool(item.get("auto_update_expected")),
+            "auto_update_installed": bool(item.get("auto_update_installed")),
+            "auto_update_drift": bool(item.get("auto_update_drift")),
             "update_hour": item.get("update_hour"),
             "update_minute": item.get("update_minute"),
+            "channel_readiness": item.get("channel_readiness") or {},
         }
 
     def _fetch_environment_data(self) -> Dict[str, Any]:
@@ -281,23 +292,15 @@ class DataCollector:
             context_readiness = legacy.build_context_lifecycle_readiness(config)
             watcher_summary = self._shared_state("watcher-summary.json", {})
             restart_runtime_status = self._shared_state("restart-runtime-status.json", {})
-            binding_audit = self._shared_state(
-                "active-binding.json",
-                {
-                    "active_env": active_env,
-                    "switch_state": (context.get("binding") or {}).get("switch_state") or "committed",
-                    "updated_at": (context.get("binding") or {}).get("updated_at") or 0,
-                },
-            )
-            if not isinstance(binding_audit, dict):
-                binding_audit = {}
-            recent_binding_events = self._shared_state("binding-audit-events.json", [])
+            runtime_binding = context.get("binding") or {}
+            recent_binding_events = _runtime_value(legacy, "binding_audit_events", [])
             if not isinstance(recent_binding_events, list):
                 recent_binding_events = []
             binding_audit = {
-                "active_env": binding_audit.get("active_env") or active_env,
-                "switch_state": binding_audit.get("switch_state") or (context.get("binding") or {}).get("switch_state") or "committed",
-                "updated_at": binding_audit.get("updated_at") or (context.get("binding") or {}).get("updated_at") or 0,
+                "active_env": runtime_binding.get("active_env") or active_env,
+                "switch_state": runtime_binding.get("switch_state") or "committed",
+                "updated_at": runtime_binding.get("updated_at") or 0,
+                "source": "runtime_db",
                 "recent_events": recent_binding_events,
             }
             environment_integrity = []

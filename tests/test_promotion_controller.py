@@ -176,6 +176,30 @@ class PromotionControllerTests(unittest.TestCase):
         self.assertEqual(store.saved[-1][1]["status"], "promoted")
         self.assertTrue(result["build_sync"]["built"])
 
+    def test_verify_primary_records_channel_readiness(self):
+        store = FakeStore()
+        controller = PromotionController(
+            Path('/tmp/base'),
+            store,
+            {
+                'OPENCLAW_HOME': '/tmp/.openclaw',
+                'OPENCLAW_CODE': '/tmp/openclaw',
+                'GATEWAY_PORT': 18789,
+            },
+        )
+
+        def fake_run(args, env=None, timeout=None):
+            if args[:3] == ['openclaw', 'channels', 'status']:
+                return 0, 'Checking channel status (probe)…\n- Feishu default: enabled, configured, running, works\n', ''
+            if args[0] == 'openclaw':
+                return 0, 'OK\n', ''
+            return 0, '', ''
+
+        controller.runner = fake_run
+        result = controller.verify_primary()
+        self.assertEqual(result['channel_readiness']['status'], 'ready')
+        self.assertEqual(store.saved[-1][0], 'channel_readiness:primary')
+
     def test_run_allows_manual_promotion_when_preflight_warns(self):
         store = FakeStore()
         controller = PromotionController(Path("/tmp/base"), store, {})

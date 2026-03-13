@@ -705,12 +705,8 @@ def active_binding(config: Optional[dict] = None) -> dict[str, Any]:
 
 
 def active_env_id(config: Optional[dict] = None) -> str:
-    cfg = config or load_config()
-    candidate = str(
-        active_binding(cfg).get("active_env")
-        or cfg.get("ACTIVE_OPENCLAW_ENV")
-        or "primary"
-    )
+    runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
+    candidate = str((runtime_binding or {}).get("env_id") or "primary")
     return candidate if candidate == "official" else "primary"
 
 
@@ -1495,6 +1491,42 @@ def get_gateway_process_for_env(spec: dict) -> Optional[dict]:
     return get_process_info_by_pid(pid)
 
 
+def probe_channel_readiness_for_env(spec: dict) -> dict[str, Any]:
+    env = dict(os.environ)
+    env.update(
+        {
+            "OPENCLAW_STATE_DIR": str(spec["home"]),
+            "OPENCLAW_CONFIG_PATH": str(Path(spec["home"]) / "openclaw.json"),
+            "OPENCLAW_GATEWAY_PORT": str(spec["port"]),
+        }
+    )
+    try:
+        result = subprocess.run(["openclaw", "channels", "status", "--probe"], capture_output=True, text=True, timeout=180, env=env)
+        code, stdout, stderr = result.returncode, result.stdout, result.stderr
+    except Exception as exc:
+        code, stdout, stderr = -1, "", str(exc)
+    text = (stdout or stderr or "").strip()
+    readiness = {
+        "status": "ready" if code == 0 else "warning",
+        "summary": text,
+        "config_path": str(Path(spec["home"]) / "openclaw.json"),
+        "gateway_port": int(spec["port"]),
+        "feishu": {"status": "unknown", "detail": "未检测到 Feishu 通道结果"},
+    }
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- Feishu default:"):
+            detail = stripped.split(":", 1)[1].strip()
+            readiness["feishu"] = {
+                "status": "ready" if "works" in detail else "warning",
+                "detail": detail,
+            }
+            if "works" not in detail:
+                readiness["status"] = "warning"
+            break
+    return readiness
+
+
 def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
     cfg = config or load_config()
     current = active_env_id(cfg)
@@ -1511,6 +1543,16 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
         git_head = read_git_head(Path(item["code"]))
         target_head = read_git_target_head(Path(item["code"]), official_ref) if item["id"] == "official" else git_head
         control_ui_ready = env_has_control_ui_assets(item)
+        channel_readiness = STORE.load_runtime_value(f"channel_readiness:{item['id']}", {})
+        readiness_stale = not isinstance(channel_readiness, dict) or not channel_readiness
+        if isinstance(channel_readiness, dict) and channel_readiness:
+            readiness_stale = str(channel_readiness.get("config_path") or "") != str(Path(item["home"]) / "openclaw.json")
+        if readiness_stale and active and running:
+            channel_readiness = probe_channel_readiness_for_env(item)
+            STORE.save_runtime_value(
+                f"channel_readiness:{item['id']}",
+                {"env_id": item["id"], "checked_at": int(time.time()), **channel_readiness},
+            )
         environments.append(
             {
                 "id": item["id"],
@@ -1537,6 +1579,7 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "auto_update_drift": (official_schedule_plist.exists() != official_auto_update_expected) if item["id"] == "official" else False,
                 "update_hour": cfg.get("OPENCLAW_OFFICIAL_UPDATE_HOUR", 4) if item["id"] == "official" else None,
                 "update_minute": cfg.get("OPENCLAW_OFFICIAL_UPDATE_MINUTE", 30) if item["id"] == "official" else None,
+                "channel_readiness": channel_readiness,
             }
         )
     return environments

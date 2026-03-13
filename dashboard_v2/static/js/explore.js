@@ -131,6 +131,13 @@ function updateSingleEnvironment(prefix, env) {
     const status = getEnvironmentStatus(env);
     badge.textContent = status.label;
     badge.className = `env-status-badge ${status.className}`;
+
+    const statePathEl = document.getElementById(`${prefix}-state-path`);
+    const readiness = env.channel_readiness || {};
+    if (statePathEl && readiness && Object.keys(readiness).length) {
+        const feishu = readiness.feishu || {};
+        statePathEl.textContent = `${env.state_path || '--'} | 通道=${readiness.status || 'unknown'}${feishu.detail ? ` | Feishu=${feishu.detail}` : ''}`;
+    }
 }
 
 function getEnvironmentStatus(env) {

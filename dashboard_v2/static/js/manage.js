@@ -219,6 +219,8 @@ async function loadPromotionStatus() {
             currentEnvName.textContent = (envData.active_environment || '--').toUpperCase();
         }
         if (currentEnvStatus) {
+            const activeEnvData = (envData.environments || []).find(item => item.id === activeEnv) || {};
+            const readinessText = renderChannelReadinessSummary(activeEnvData);
             currentEnvStatus.textContent = !isOfficialRunning && activeEnv === 'primary'
                 ? '当前主用版正在运行；如需走验证晋升，请先启动 Official 环境。'
                 : (
@@ -226,6 +228,9 @@ async function loadPromotionStatus() {
                         ? '当前检查项已全部通过；如需切换，可直接执行版本晋升。'
                         : (promotionSummary.recommended_action || '当前激活环境')
                 );
+            if (readinessText) {
+                currentEnvStatus.textContent += ` | ${readinessText}`;
+            }
         }
 
         const activeBadge = document.getElementById('active-env');
@@ -259,6 +264,13 @@ function updateOfficialAutoUpdate(environments = []) {
     }
     if (enableBtn) enableBtn.disabled = enabled;
     if (disableBtn) disableBtn.disabled = !enabled;
+}
+
+function renderChannelReadinessSummary(env) {
+    const readiness = env.channel_readiness || {};
+    if (!readiness || !Object.keys(readiness).length) return '';
+    const feishu = readiness.feishu || {};
+    return `通道检测=${readiness.status || 'unknown'}${feishu.detail ? `，Feishu=${feishu.detail}` : ''}`;
 }
 
 async function toggleOfficialAutoUpdate(enabled) {
@@ -414,7 +426,7 @@ function showConfirmModal(action, params = {}) {
 
     switch (action) {
         case 'promote':
-            messageEl.textContent = '您确定要执行版本晋升吗？此操作将把 Official 提升为 Primary。';
+            messageEl.textContent = '您确定要执行版本晋升吗？此操作将使用 Official 替换当前 Primary，使其成为新的主用版；原 Primary 将退回为非激活环境。';
             break;
         case 'switch':
             messageEl.textContent = `您确定要切换到 ${params.target?.toUpperCase()} 环境吗？此操作会切换当前激活环境。`;
