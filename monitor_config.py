@@ -57,13 +57,6 @@ DEFAULT_CONFIG = {
     "ALERT_DEDUP_INTERVAL": 600,
     "OPENCLAW_HOME": str(Path.home() / ".openclaw"),
     "OPENCLAW_CODE": str(Path.home() / "openclaw-workspace" / "openclaw"),
-    "OPENCLAW_OFFICIAL_CODE": str(Path.home() / "openclaw-workspace" / "openclaw-official"),
-    "OPENCLAW_OFFICIAL_STATE": str(Path.home() / ".openclaw-official"),
-    "OPENCLAW_OFFICIAL_PORT": 19001,
-    "OPENCLAW_OFFICIAL_REF": "origin/main",
-    "OPENCLAW_OFFICIAL_AUTO_UPDATE": False,
-    "OPENCLAW_OFFICIAL_UPDATE_HOUR": 4,
-    "OPENCLAW_OFFICIAL_UPDATE_MINUTE": 30,
     "ACTIVE_OPENCLAW_ENV": "primary",
 }
 
@@ -178,11 +171,8 @@ def validate_config_update(key: str, value: str, config: dict[str, Any]) -> tupl
 def get_env_specs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Return the static environment registry."""
     primary_port = int(config.get("GATEWAY_PORT", 18789))
-    official_port = int(config.get("OPENCLAW_OFFICIAL_PORT", 19001))
     primary_home = Path(str(config.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
     primary_code = Path(str(config.get("OPENCLAW_CODE", str(Path.home() / "openclaw-workspace" / "openclaw"))))
-    official_state = Path(str(config.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official"))))
-    official_code = Path(str(config.get("OPENCLAW_OFFICIAL_CODE", str(Path.home() / "openclaw-workspace" / "openclaw-official"))))
     return {
         "primary": {
             "env_id": "primary",
@@ -194,17 +184,6 @@ def get_env_specs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "gateway_label": "ai.openclaw.gateway",
             "gateway_port": primary_port,
             "manager_kind": "launchagent",
-        },
-        "official": {
-            "env_id": "official",
-            "role": "validation",
-            "name": "官方验证版",
-            "code_root": str(official_code),
-            "state_root": str(official_state),
-            "config_path": str(official_state / "openclaw.json"),
-            "gateway_label": "ai.openclaw.gateway.official",
-            "gateway_port": official_port,
-            "manager_kind": "official-manager",
         },
     }
 

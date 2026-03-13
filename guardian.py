@@ -50,7 +50,6 @@ OPENCLAW_HOME = Path.home() / ".openclaw"
 OPENCLAW_CODE = Path.home() / "openclaw-workspace" / "openclaw"
 GATEWAY_LOG = OPENCLAW_HOME / "logs" / "gateway.log"
 TMP_OPENCLAW_LOG_DIR = Path("/tmp/openclaw")
-OFFICIAL_MANAGER = BASE_DIR / "manage_official_openclaw.sh"
 DESKTOP_RUNTIME = BASE_DIR / "desktop_runtime.sh"
 
 CONFIG = {}
@@ -99,13 +98,12 @@ def active_binding() -> dict[str, Any]:
 
 
 def active_env_id() -> str:
-    runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
-    env_id = str((runtime_binding or {}).get("env_id") or "primary").strip() or "primary"
-    return env_id if env_id in {"primary", "official"} else "primary"
+    # 只支持 primary 环境
+    return "primary"
 
 
 def commit_active_binding(env_id: str) -> None:
-    if env_id not in {"primary", "official"}:
+    if env_id != "primary":
         return
     try:
         binding = write_active_binding(BASE_DIR, CONFIG, env_id, switch_state="committed")
@@ -178,10 +176,8 @@ def all_env_specs() -> dict[str, dict[str, Any]]:
 
 def snapshot_targets() -> list[tuple[str, SnapshotManager]]:
     primary_home = Path(str(CONFIG.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
-    official_home = Path(str(CONFIG.get("OPENCLAW_OFFICIAL_STATE", str(Path.home() / ".openclaw-official"))))
     return [
         ("primary", SnapshotManager(BASE_DIR, primary_home)),
-        ("official", SnapshotManager(BASE_DIR, official_home)),
     ]
 
 
@@ -2463,57 +2459,8 @@ def reconcile_background_results_for_sessions(session_keys: set[str]) -> None:
 
 
 def enforce_single_active_runtime_guard() -> list[dict[str, Any]]:
-    specs = all_env_specs()
-    active_id = active_env_id()
-    primary_pid = get_listener_pid(int(specs["primary"]["port"]))
-    official_pid = get_listener_pid(int(specs["official"]["port"]))
-    issues: list[dict[str, Any]] = []
-    if primary_pid and official_pid:
-        issues.append(
-            {
-                "code": "dual_listener",
-                "message": "检测到双环境同时监听，已视为 release blocker",
-                "details": {
-                    "active_env": active_id,
-                    "primary_pid": primary_pid,
-                    "official_pid": official_pid,
-                },
-            }
-        )
-        if active_id == "official":
-            run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
-        else:
-            run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
-    elif active_id == "primary" and official_pid:
-        issues.append(
-            {
-                "code": "inactive_official_listener",
-                "message": "Primary 为激活环境，但 Official 仍在监听，已尝试停止。",
-                "details": {"active_env": active_id, "official_pid": official_pid},
-            }
-        )
-        run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
-    elif active_id == "official" and primary_pid:
-        issues.append(
-            {
-                "code": "inactive_primary_listener",
-                "message": "Official 为激活环境，但 Primary 仍在监听，已尝试停止。",
-                "details": {"active_env": active_id, "primary_pid": primary_pid},
-            }
-        )
-        run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
-
-    if issues:
-        seen = STORE.load_runtime_value("single_active_guard_seen", {})
-        now = int(time.time())
-        for issue in issues:
-            code = str(issue.get("code") or "guard")
-            if code not in seen or now - int(seen.get(code, 0)) > 300:
-                seen[code] = now
-                record_change_log("anomaly", str(issue.get("message") or "single-active guard"), issue.get("details") or {})
-                notify("单活环境告警", str(issue.get("message") or "检测到环境监听异常"), "error")
-        STORE.save_runtime_value("single_active_guard_seen", trim_runtime_seen(seen, keep=50))
-    return issues
+    # 只支持 primary 环境，不再需要双环境检查
+    return []
 
 
 def _terminate_pid(pid: Optional[int], label: str, timeout: float = 8.0) -> tuple[bool, str]:
@@ -2561,7 +2508,7 @@ def patrol_active_binding_runtime() -> list[dict[str, Any]]:
             continue
         if pid is None:
             continue
-        run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120) if env_id == "official" else run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
+        run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
         time.sleep(1)
         pid_after = get_listener_pid(int(spec["port"]))
         if pid_after is not None:
@@ -3873,38 +3820,6 @@ def restart_gateway():
     )
     log(f"尝试重启 Gateway ({spec['id']})...")
 
-    if spec["id"] == "official":
-        run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
-        run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
-        code, stdout, stderr = run_args([str(OFFICIAL_MANAGER), "start"], timeout=300)
-        if code == 0 and check_gateway_health():
-            commit_active_binding("official")
-            _record_restart_event(
-                source="guardian",
-                target="official",
-                stage="completed",
-                status="succeeded",
-                details={"message": "官方验证版 Gateway 重启成功"},
-            )
-            record_change_log("restart", "官方验证版 Gateway 重启成功", {"target_env": "official"})
-            log("官方验证版 Gateway 重启成功")
-            return True
-        _record_restart_event(
-            source="guardian",
-            target="official",
-            stage="completed",
-            status="failed",
-            details={"error": (stderr or stdout).strip(), "message": "官方验证版 Gateway 重启失败"},
-        )
-        record_change_log(
-            "restart",
-            "官方验证版 Gateway 重启失败",
-            {"target_env": "official", "error": (stderr or stdout).strip()},
-        )
-        log(f"官方验证版 Gateway 重启失败: {(stderr or stdout).strip()}", "ERROR")
-        return False
-
-    run_args([str(OFFICIAL_MANAGER), "stop"], timeout=120)
     run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
     code, stdout, stderr = run_args([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
@@ -3982,10 +3897,7 @@ def check_update_available() -> bool:
 def do_auto_update() -> bool:
     """执行自动更新"""
     spec = current_env_spec()
-    if spec["id"] == "official":
-        auto_update_enabled = CONFIG.get("OPENCLAW_OFFICIAL_AUTO_UPDATE", False)
-    else:
-        auto_update_enabled = CONFIG.get("AUTO_UPDATE", False)
+    auto_update_enabled = CONFIG.get("AUTO_UPDATE", False)
     if not auto_update_enabled:
         return False
     
@@ -4005,10 +3917,7 @@ def do_auto_update() -> bool:
     save_versions()
     
     # 执行更新
-    if spec["id"] == "official":
-        code, stdout, stderr = run_args([str(OFFICIAL_MANAGER), "update"], timeout=1800)
-    else:
-        code, stdout, stderr = run_cmd(f"openclaw update --channel {channel}")
+    code, stdout, stderr = run_cmd(f"openclaw update --channel {channel}")
     
     if code != 0:
         log(f"更新失败: {stderr or stdout}")

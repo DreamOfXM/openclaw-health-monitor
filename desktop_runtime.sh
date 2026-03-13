@@ -9,7 +9,6 @@ DASHBOARD_PID_FILE="$LOG_DIR/dashboard.pid"
 GATEWAY_PID_FILE="$LOG_DIR/gateway.pid"
 TRACKED_CONFIG="$BASE_DIR/config.conf"
 LOCAL_CONFIG="$BASE_DIR/config.local.conf"
-OFFICIAL_MANAGER="$BASE_DIR/manage_official_openclaw.sh"
 LAUNCH_DOMAIN="gui/$(id -u)"
 GUARDIAN_LABEL="ai.openclaw.guardian"
 DASHBOARD_LABEL="ai.openclaw.dashboard"
@@ -216,17 +215,8 @@ gateway_workdir() {
 }
 
 active_openclaw_env() {
-    local value db_path
-    db_path="$BASE_DIR/data/monitor.db"
-    value=""
-    if [ -f "$db_path" ] && command -v sqlite3 >/dev/null 2>&1; then
-        value="$(sqlite3 "$db_path" "SELECT json_extract(value_json, '$.env_id') FROM kv_state WHERE namespace='runtime' AND key='active_openclaw_env' LIMIT 1;" 2>/dev/null | head -n 1 || true)"
-    fi
-    value="${value:-primary}"
-    if [ "$value" != "official" ]; then
-        value="primary"
-    fi
-    printf '%s\n' "$value"
+    # 只支持 primary 环境
+    printf 'primary\n'
 }
 
 listener_pid() {
@@ -245,15 +235,6 @@ gateway_pid() {
 }
 
 active_gateway_pid() {
-    local active_env pid port
-    active_env="$(active_openclaw_env)"
-    if [ "$active_env" = "official" ]; then
-        port="$(config_value OPENCLAW_OFFICIAL_PORT)"
-        port="${port:-19001}"
-        pid="$(listener_pid "$port" || true)"
-        printf '%s\n' "${pid:-}"
-        return 0
-    fi
     gateway_pid
 }
 
@@ -535,29 +516,11 @@ stop_gateway() {
 }
 
 start_active_gateway() {
-    local active_env
-    active_env="$(active_openclaw_env)"
-    if [ "$active_env" = "official" ]; then
-        stop_gateway || true
-        if [ -x "$OFFICIAL_MANAGER" ]; then
-            "$OFFICIAL_MANAGER" start >/dev/null
-            return 0
-        fi
-        echo "Missing official manager: $OFFICIAL_MANAGER" >&2
-        return 1
-    fi
-
-    if [ -x "$OFFICIAL_MANAGER" ]; then
-        "$OFFICIAL_MANAGER" stop >/dev/null 2>&1 || true
-    fi
     start_gateway >/dev/null
 }
 
 stop_all_gateways() {
     stop_gateway || true
-    if [ -x "$OFFICIAL_MANAGER" ]; then
-        "$OFFICIAL_MANAGER" stop >/dev/null 2>&1 || true
-    fi
 }
 
 start_all() {

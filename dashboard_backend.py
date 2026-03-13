@@ -31,7 +31,6 @@ from monitor_config import (
     validate_config_update,
     write_active_binding,
 )
-from promotion_controller import PromotionController
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
 from bootstrap_evolution import (
@@ -49,7 +48,6 @@ STORE = MonitorStateStore(BASE_DIR)
 SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
 GUARDIAN_PID_FILE = BASE_DIR / "logs" / "guardian.pid"
 DESKTOP_RUNTIME = BASE_DIR / "desktop_runtime.sh"
-OFFICIAL_MANAGER = BASE_DIR / "manage_official_openclaw.sh"
 
 
 def raise_nofile_limit(target: int = 65536) -> None:
@@ -74,12 +72,12 @@ def record_change(change_type: str, message: str, details: Optional[dict] = None
     STORE.record_change(change_type, message, details)
     log_file = get_change_log_path()
     CHANGE_LOG_DIR.mkdir(exist_ok=True)
-    
+
     logs = []
     if log_file.exists():
         with open(log_file) as f:
             logs = json.load(f)
-    
+
     entry = {
         "time": datetime.now().strftime("%H:%M:%S"),
         "type": change_type,
@@ -87,7 +85,7 @@ def record_change(change_type: str, message: str, details: Optional[dict] = None
         "details": details or {}
     }
     logs.append(entry)
-    
+
     with open(log_file, "w") as f:
         json.dump(logs, f, indent=2, ensure_ascii=False)
 
@@ -139,19 +137,19 @@ def get_recent_changes(days: int = 7) -> list:
 
     all_changes = []
     today = datetime.now()
-    
+
     for i in range(days):
         date = today.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)
         date_str = date.strftime("%Y-%m-%d")
         log_file = CHANGE_LOG_DIR / f"{date_str}.json"
-        
+
         if log_file.exists():
             with open(log_file) as f:
                 logs = json.load(f)
                 for entry in logs:
                     entry["date"] = date_str
                     all_changes.append(entry)
-    
+
     return all_changes[-100:]  # 最近100条
 
 
@@ -658,8 +656,7 @@ def list_snapshots(limit: int = 20) -> list[dict]:
 
 
 def snapshot_env_id(snapshot_name: str) -> str:
-    if snapshot_name.endswith("-official") or "-official-" in snapshot_name:
-        return "official"
+    # 只支持 primary 环境
     return "primary"
 
 
@@ -706,9 +703,8 @@ def active_binding(config: Optional[dict] = None) -> dict[str, Any]:
 
 
 def active_env_id(config: Optional[dict] = None) -> str:
-    runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
-    candidate = str((runtime_binding or {}).get("env_id") or "primary")
-    return candidate if candidate == "official" else "primary"
+    # 只支持 primary 环境
+    return "primary"
 
 
 def get_env_specs(config: Optional[dict] = None) -> dict[str, dict]:
@@ -718,8 +714,8 @@ def get_env_specs(config: Optional[dict] = None) -> dict[str, dict]:
     for env_id, spec in specs.items():
         result[env_id] = {
             "id": env_id,
-            "name": "当前主用版" if env_id == "primary" else "官方验证版",
-            "description": "当前日常使用的 OpenClaw 环境" if env_id == "primary" else "用于并行验证官方最新版的隔离环境",
+            "name": "当前主用版",
+            "description": "当前日常使用的 OpenClaw 环境",
             "home": Path(spec["state_root"]),
             "code": Path(spec["code_root"]),
             "port": int(spec["gateway_port"]),
@@ -830,15 +826,6 @@ def detect_environment_inconsistencies(environments: list[dict], active_env: str
                 "detail": f"DB 绑定={bound_env}，当前激活环境={active_env}。",
             }
         )
-    if len(running) > 1:
-        issues.append(
-            {
-                "severity": "error",
-                "code": "dual_listener",
-                "title": "检测到双环境同时监听",
-                "detail": "single-active-environment 约束被破坏，当前存在两个 gateway listener。",
-            }
-        )
     for item in environments:
         if item.get("active") and not item.get("running"):
             issues.append(
@@ -867,35 +854,6 @@ def detect_environment_inconsistencies(environments: list[dict], active_env: str
                     "detail": "重启/切换后的绑定已提交，但 listener 未存活。",
                 }
             )
-        if active_env == "official" and item.get("id") == "primary" and item.get("running"):
-            issues.append(
-                {
-                    "severity": "error",
-                    "code": "primary_running_while_official_active",
-                    "title": "Official 激活时 Primary 仍在监听",
-                    "detail": "这会导致状态漂移和消息误投。",
-                }
-            )
-        if active_env == "primary" and item.get("id") == "official" and item.get("running"):
-            issues.append(
-                {
-                    "severity": "error",
-                    "code": "official_running_while_primary_active",
-                    "title": "Primary 激活时 Official 仍在监听",
-                    "detail": "这会破坏单活环境运行基线。",
-                }
-            )
-    official_schedule_plist = Path.home() / "Library" / "LaunchAgents" / "ai.openclaw.official-update.plist"
-    official_auto_update_expected = bool(load_config().get("OPENCLAW_OFFICIAL_AUTO_UPDATE", False))
-    if official_schedule_plist.exists() != official_auto_update_expected:
-        issues.append(
-            {
-                "severity": "warning",
-                "code": "official_auto_update_drift",
-                "title": "官方自动更新配置与系统调度不一致",
-                "detail": f"config={'enabled' if official_auto_update_expected else 'disabled'}，launchd={'installed' if official_schedule_plist.exists() else 'missing'}。",
-            }
-        )
     dedup: dict[str, dict] = {}
     for issue in issues:
         dedup[str(issue.get("code") or len(dedup))] = issue
@@ -1533,16 +1491,13 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
     current = active_env_id(cfg)
     binding = active_binding(cfg)
     bound_env = str(binding.get("active_env") or current or "primary")
-    official_ref = str(cfg.get("OPENCLAW_OFFICIAL_REF", "origin/main"))
-    official_schedule_plist = Path.home() / "Library" / "LaunchAgents" / "ai.openclaw.official-update.plist"
-    official_auto_update_expected = bool(cfg.get("OPENCLAW_OFFICIAL_AUTO_UPDATE", False))
     environments = []
     for item in get_env_specs(cfg).values():
         listener_pid = get_listener_pid(int(item["port"]))
         running = listener_pid is not None
         active = item["id"] == current
         git_head = read_git_head(Path(item["code"]))
-        target_head = read_git_target_head(Path(item["code"]), official_ref) if item["id"] == "official" else git_head
+        target_head = git_head
         control_ui_ready = env_has_control_ui_assets(item)
         channel_readiness = STORE.load_runtime_value(f"channel_readiness:{item['id']}", {})
         readiness_stale = not isinstance(channel_readiness, dict) or not channel_readiness
@@ -1574,12 +1529,6 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
                 "active": active,
                 "bound": item["id"] == bound_env,
                 "binding_switch_state": str(binding.get("switch_state") or "committed") if item["id"] == bound_env else "inactive",
-                "auto_update_enabled": (official_schedule_plist.exists() and official_auto_update_expected) if item["id"] == "official" else False,
-                "auto_update_expected": official_auto_update_expected if item["id"] == "official" else False,
-                "auto_update_installed": official_schedule_plist.exists() if item["id"] == "official" else False,
-                "auto_update_drift": (official_schedule_plist.exists() != official_auto_update_expected) if item["id"] == "official" else False,
-                "update_hour": cfg.get("OPENCLAW_OFFICIAL_UPDATE_HOUR", 4) if item["id"] == "official" else None,
-                "update_minute": cfg.get("OPENCLAW_OFFICIAL_UPDATE_MINUTE", 30) if item["id"] == "official" else None,
                 "channel_readiness": channel_readiness,
             }
         )
@@ -1587,41 +1536,14 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
 
 
 def build_environment_promotion_summary(environments: list[dict], task_registry: dict) -> dict:
-    primary = next((item for item in environments if item["id"] == "primary"), {})
-    official = next((item for item in environments if item["id"] == "official"), {})
-    current = task_registry.get("current") or {}
-    current_control = current.get("control") or {}
-    blocked_tasks = int((task_registry.get("summary") or {}).get("blocked", 0) or 0)
-
-    summary = {
-        "candidate_env": official.get("id"),
+    # 只支持 primary 环境，不再需要 promotion 逻辑
+    return {
+        "candidate_env": None,
         "safe_to_promote": False,
-        "headline": "官方验证版尚未达到切换条件",
+        "headline": "单环境模式，无需切换",
         "reasons": [],
-        "recommended_action": "先保持当前主用版，继续验证官方版。",
+        "recommended_action": "当前只维护一套环境。",
     }
-
-    if not official:
-        summary["reasons"].append("未找到官方验证版环境。")
-        return summary
-    if not official.get("running"):
-        summary["reasons"].append("官方验证版未运行。")
-    if official.get("running") and not official.get("healthy"):
-        summary["reasons"].append("官方验证版未通过健康检查。")
-    if blocked_tasks:
-        summary["reasons"].append(f"当前存在 {blocked_tasks} 个阻塞任务。")
-    if current and current_control.get("control_state") in {"blocked_unverified", "blocked_control_followup_failed", "dev_blocked", "test_blocked", "analysis_blocked"}:
-        summary["reasons"].append("当前活动任务仍处于阻塞态。")
-
-    if official.get("running") and official.get("healthy") and not summary["reasons"]:
-        summary["safe_to_promote"] = True
-        summary["headline"] = "官方验证版已满足切换条件"
-        summary["recommended_action"] = "可将官方验证版切换为当前主用版。"
-        if official.get("git_head") and primary.get("git_head") and official.get("git_head") != primary.get("git_head"):
-            summary["reasons"].append(
-                f"将从 {primary.get('git_head')} 切到 {official.get('git_head')}"
-            )
-    return summary
 
 
 def get_learning_center_payload(limit: int = 10) -> dict:
@@ -1995,7 +1917,7 @@ def backup_change_logs():
     """备份旧日志"""
     CHANGE_LOG_DIR.mkdir(exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
-    
+
     for f in CHANGE_LOG_DIR.glob("*.json"):
         if f.stem < today:
             backup_dir = CHANGE_LOG_DIR / "backups"
@@ -2149,7 +2071,7 @@ def get_system_metrics() -> dict:
     mem_total = 32
     mem_wired = 0.0
     mem_compressed = 0.0
-    
+
     try:
         result = subprocess.run("top -l 1 -n 0", shell=True, capture_output=True, text=True, timeout=5)
         for line in result.stdout.split("\n"):
@@ -2169,7 +2091,7 @@ def get_system_metrics() -> dict:
                     unused_match = re.search(r'([\d.]+[KMGT])\s*unused', line)
                     wired_match = re.search(r'([\d.]+[KMGT])\s*wired', line)
                     compressor_match = re.search(r'([\d.]+[KMGT])\s*compressor', line)
-                    
+
                     if used_match:
                         mem_used = round(parse_mem_value_to_gb(used_match.group(1)), 2)
                     if wired_match:
@@ -2184,7 +2106,7 @@ def get_system_metrics() -> dict:
                     pass
     except:
         pass
-    
+
     return {
         "cpu": round(cpu, 1),
         "mem_used": mem_used,
@@ -2200,15 +2122,15 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
     gateway_log = env_gateway_log(env)
     if not gateway_log.exists():
         return {"total": 0, "slow": 0, "stuck": 0, "sessions": []}
-    
+
     sessions = []
     dispatch_time = {}
     lines = []
-    
+
     try:
         with open(gateway_log) as f:
             lines = f.readlines()[-8000:]
-        
+
         # 先收集所有问题 - 支持多种格式
         questions = {}
         for line in lines:
@@ -2216,21 +2138,21 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
                 ts = None
                 ts_str = ""
                 msg = None
-                
+
                 # 格式1: "message in group xxx: 问题"
                 if "message in" in line.lower() and ": " in line and "did not mention" not in line.lower():
                     idx = line.find("message in")
                     msg_start = line.find(": ", idx)
                     if msg_start > 0:
                         msg = line[msg_start+2:].strip()[:50]
-                
-                # 格式2: "DM from xxx: 问题"  
+
+                # 格式2: "DM from xxx: 问题"
                 elif "dm from" in line.lower() and ": " in line:
                     idx = line.lower().find("dm from")
                     msg_start = line.find(": ", idx)
                     if msg_start > 0:
                         msg = line[msg_start+2:].strip()[:50]
-                
+
                 # 格式3: 飞书发送的消息 "助手名: 内容"
                 elif "feishu[default]:" in line.lower() and ": " in line:
                     idx = line.lower().find("feishu[default]:")
@@ -2238,7 +2160,7 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
                         msg_start = line.find(": ", idx + 15)
                         if msg_start > 0:
                             msg = line[msg_start+2:].strip()[:50]
-                
+
                 if msg and len(msg) > 2:
                     if "+08:00" in line:
                         ts_str = line[:25]
@@ -2252,7 +2174,7 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
                         questions[ts_key] = {"msg": msg[:30], "time": ts_str[11:19] if ts_str else ""}
             except:
                 pass
-        
+
         # 分析会话
         for line in lines:
             try:
@@ -2265,10 +2187,10 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
                     ts_str = line[:24]
                     ts = datetime.strptime(ts_str[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
                     ts += 8 * 3600
-                
+
                 if ts is None:
                     continue
-                
+
                 if "dispatching to agent" in line.lower():
                     dispatch_time["dispatch"] = ts
                     # 扩大搜索范围到前后10秒
@@ -2282,26 +2204,26 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
                             break
                     if not found:
                         dispatch_time["question"] = "未知"
-                            
+
                 elif "dispatch complete" in line.lower() and "dispatch" in dispatch_time:
                     duration = ts - dispatch_time["dispatch"]
                     question = dispatch_time.get("question", "无法获取问题内容")
                     question_time = dispatch_time.get("question_time", "")
-                    
+
                     # 提取回复数量
                     replies = 0
                     import re
                     m = re.search(r'replies=(\d+)', line)
                     if m:
                         replies = int(m.group(1))
-                    
+
                     # 分析慢响应原因
                     reason = "正常"
                     if duration > 120:
                         reason = "严重卡顿"
                     elif duration > 30:
                         reason = "响应慢"
-                    
+
                     # 检查是否有错误关键词
                     line_lower = line.lower()
                     if any(k in line_lower for k in ["timeout", "timed out", "error", "fail"]):
@@ -2309,7 +2231,7 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
                             reason = "LLM超时" if duration > 30 else "正常(有超时)"
                         elif "error" in line_lower or "fail" in line_lower:
                             reason = "处理出错"
-                    
+
                     sessions.append({
                         "time": question_time,
                         "duration": int(duration),
@@ -2323,11 +2245,11 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
                 pass
     except:
         pass
-    
+
     sessions = sessions[-20:]
     slow = sum(1 for s in sessions if s["duration"] > 30)
     stuck = sum(1 for s in sessions if s["duration"] > 120)
-    
+
     # 分析慢响应原因 - 检查整个日志
     slow_reasons = {}
     for line in lines:
@@ -2340,7 +2262,7 @@ def analyze_sessions(minutes: int = 5, spec: Optional[dict] = None) -> dict:
             slow_reasons["API错误"] = slow_reasons.get("API错误", 0) + 1
         elif "400" in line or "401" in line or "403" in line or "500" in line:
             slow_reasons["HTTP错误"] = slow_reasons.get("HTTP错误", 0) + 1
-    
+
     return {"total": len(sessions), "slow": slow, "stuck": stuck, "sessions": sessions, "reasons": slow_reasons}
 
 
@@ -2355,7 +2277,7 @@ def get_error_logs(count: int = 20, spec: Optional[dict] = None) -> list:
         try:
             with open(log_file) as f:
                 lines = f.readlines()[-500:]
-            
+
             for line in lines:
                 lower = line.lower()
                 if any(kw in lower for kw in ["error", "fail", "exception", "crash"]):
@@ -2379,7 +2301,7 @@ def get_error_logs(count: int = 20, spec: Optional[dict] = None) -> list:
             break
         except:
             pass
-    
+
     return errors[:count]
 
 
@@ -2401,7 +2323,7 @@ def get_version(spec: Optional[dict] = None) -> str:
 def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
     """获取诊断建议"""
     diagnoses = []
-    
+
     # 内存
     if metrics["mem_total"] > 0:
         mem_percent = metrics["mem_used"] / metrics["mem_total"] * 100
@@ -2419,7 +2341,7 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
                 "message": f"当前 {mem_percent:.0f}%，注意监控",
                 "action": None
             })
-    
+
     # CPU
     if metrics["cpu"] > 90:
         diagnoses.append({
@@ -2428,7 +2350,7 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
             "message": f"当前 {metrics['cpu']}%，检查是否有异常进程",
             "action": None
         })
-    
+
     # 慢会话
     if sessions.get("stuck", 0) > 0:
         diagnoses.append({
@@ -2444,7 +2366,7 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
             "message": f"过去30分钟有 {sessions['slow']} 个慢响应会话",
             "action": None
         })
-    
+
     # 进程
     gateway_running = any("gateway" in p.get("cmd", "").lower() for p in processes if p)
     if not gateway_running:
@@ -2454,7 +2376,7 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
             "message": "进程已退出，需要立即处理",
             "action": "启动 Gateway"
         })
-    
+
     # 正常
     if not diagnoses:
         diagnoses.append({
@@ -2463,7 +2385,7 @@ def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
             "message": "所有指标正常",
             "action": None
         })
-    
+
     return diagnoses
 
 
@@ -2518,7 +2440,8 @@ def wait_for_env_listener(env_id: str, timeout: float = 15.0, interval: float = 
 
 
 def inactive_env_id(env_id: str) -> str:
-    return "official" if env_id == "primary" else "primary"
+    # 只支持 primary 环境
+    return "primary"
 
 
 def terminate_listener_pid(pid: Optional[int], label: str, timeout: float = 8.0) -> tuple[bool, str]:
@@ -2561,40 +2484,12 @@ def terminate_listener_pid(pid: Optional[int], label: str, timeout: float = 8.0)
 
 
 def enforce_single_active_listener(target_env: str) -> tuple[bool, str]:
-    cfg = load_config()
-    bound_env = active_env_id(cfg)
-    if target_env != bound_env:
-        return False, f"当前 DB 绑定为 {bound_env}，拒绝操作未绑定环境 {target_env}"
-    specs = get_env_specs(cfg)
-    active_spec = specs[target_env]
-    inactive_spec = specs[inactive_env_id(target_env)]
-    active_pid = get_listener_pid(int(active_spec["port"]))
-    inactive_pid = get_listener_pid(int(inactive_spec["port"]))
-    if active_pid is None:
-        return False, f"{active_spec['name']} listener 未启动"
-    if inactive_pid is None:
-        return True, f"single-active ok: 仅 {active_spec['name']} listener 存活"
-    if target_env == "official":
-        run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
-    else:
-        run_script([str(OFFICIAL_MANAGER), "stop"], timeout=120)
-    time.sleep(2)
-    inactive_pid_after = get_listener_pid(int(inactive_spec["port"]))
-    if inactive_pid_after is not None:
-        killed, kill_message = terminate_listener_pid(inactive_pid_after, inactive_spec["name"])
-        if not killed:
-            return False, kill_message
-    return True, f"已停止未绑定环境 {inactive_spec['name']} listener"
+    # 只支持 primary 环境，不再需要双环境检查
+    return True, "single-active ok: 单环境模式"
 
 
 def restore_environment_after_failed_switch(previous_env: str) -> tuple[bool, str]:
-    if previous_env == "official":
-        code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
-        if code != 0:
-            return False, (stderr or stdout or "恢复 official 失败").strip()
-        if not wait_for_env_listener("official"):
-            return False, "恢复 official 失败：listener 未启动"
-        return True, "已恢复 official"
+    # 只支持 primary 环境
     code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
     if code != 0:
         return False, (stderr or stdout or "恢复 primary 失败").strip()
@@ -2604,110 +2499,10 @@ def restore_environment_after_failed_switch(previous_env: str) -> tuple[bool, st
 
 
 def switch_openclaw_environment(target_env: str) -> tuple[bool, str]:
-    if target_env not in {"primary", "official"}:
-        return False, "未知环境"
-
-    cfg = load_config()
-    previous_env = active_env_id(cfg)
-    previous_binding = active_binding(cfg)
-    specs = get_env_specs(cfg)
-    target_spec = specs[target_env]
-    inactive_spec = specs[inactive_env_id(target_env)]
-
-    def binding_snapshot(env_id: str, state: str) -> None:
-        cfg_now = load_config()
-        binding = write_active_binding(BASE_DIR, cfg_now, env_id, switch_state=state)
-        STORE.save_runtime_value(
-            "active_openclaw_env",
-            {
-                "env_id": env_id,
-                "updated_at": int(time.time()),
-                "switch_state": state,
-                "binding_version": binding.get("binding_version") or 1,
-                "gateway_label": get_env_specs(cfg_now)[env_id]["gateway_label"],
-                "gateway_port": get_env_specs(cfg_now)[env_id]["port"],
-                "config_path": str(get_env_specs(cfg_now)[env_id]["config_path"]),
-                "expected": binding.get("expected") or {},
-            },
-        )
-        record_binding_audit_event(
-            source="dashboard.switch",
-            env_id=env_id,
-            status=state,
-            details={"switch_state": state},
-        )
-
-    def verify_binding(env_id: str) -> tuple[bool, str]:
-        cfg_now = load_config()
-        binding = active_binding(cfg_now)
-        specs_now = get_env_specs(cfg_now)
-        spec = specs_now[env_id]
-        if binding.get("active_env") != env_id:
-            return False, "active binding env 不一致"
-        expected = binding.get("expected") or {}
-        if int(expected.get("gateway_port") or 0) != int(spec["port"]):
-            return False, "binding port 不一致"
-        if str(expected.get("gateway_label") or "") != str(spec["gateway_label"]):
-            return False, "binding gateway_label 不一致"
-        if str(expected.get("config_path") or "") != str(spec["config_path"]):
-            return False, "binding config_path 不一致"
-        if get_listener_pid(int(spec["port"])) is None:
-            return False, f"{spec['name']} listener 未启动"
-        if get_listener_pid(int(inactive_spec["port"])) is not None:
-            return False, f"{inactive_spec['name']} listener 仍然存活"
-        record_binding_audit_event(
-            source="dashboard.switch",
-            env_id=env_id,
-            status="verified",
-            details={"gateway_port": spec["port"], "gateway_label": spec["gateway_label"]},
-        )
-        return True, "binding verified"
-
-    def rollback_and_restore(message: str) -> tuple[bool, str]:
-        if previous_env != target_env:
-            save_config("ACTIVE_OPENCLAW_ENV", previous_env)
-            write_active_binding(BASE_DIR, load_config(), previous_env, switch_state="rollback")
-            restored, restore_message = restore_environment_after_failed_switch(previous_env)
-            if restored:
-                binding_snapshot(previous_env, "committed")
-            else:
-                return False, f"{message}; 回滚恢复失败：{restore_message}"
-        return False, message
-
-    binding_snapshot(target_env, "stopping_old_env")
-    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=60)
-    run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=60)
-    time.sleep(2)
-    if get_listener_pid(int(specs["primary"]["port"])) is not None or get_listener_pid(int(specs["official"]["port"])) is not None:
-        return rollback_and_restore("切换失败：旧环境 listener 未完全停止")
-
-    if not save_config("ACTIVE_OPENCLAW_ENV", target_env):
-        return rollback_and_restore("保存 ACTIVE_OPENCLAW_ENV 失败")
-    binding_snapshot(target_env, "starting_new_env")
-
-    if target_env == "official":
-        code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
-        if code != 0:
-            return rollback_and_restore((stderr or stdout or "官方验证版启动失败").strip())
-        if not wait_for_env_listener("official"):
-            return rollback_and_restore("官方验证版切换失败：Gateway 未成功启动")
-    else:
-        code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
-        if code != 0:
-            return rollback_and_restore((stderr or stdout or "主用版启动失败").strip())
-        if not wait_for_env_listener("primary"):
-            return rollback_and_restore("当前主用版切换失败：Gateway 未成功启动")
-
-    single_ok, single_message = enforce_single_active_listener(target_env)
-    if not single_ok:
-        return rollback_and_restore(f"切换失败：{single_message}")
-
-    verified, verify_message = verify_binding(target_env)
-    if not verified:
-        return rollback_and_restore(f"切换失败：{verify_message}")
-
-    binding_snapshot(target_env, "committed")
-    return True, (stdout.strip() if 'stdout' in locals() and stdout.strip() else f"已切换到{target_spec['name']}")
+    # 只支持 primary 环境
+    if target_env != "primary":
+        return False, "只支持 primary 环境"
+    return True, "当前已是 primary 环境"
 
 
 def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Optional[str], str]:
@@ -2730,14 +2525,10 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         details={"old_pid": old_pid_str},
     )
 
-    run_script([str(OFFICIAL_MANAGER), "stop"], timeout=120)
     run_script([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
     time.sleep(2)
 
-    if target_env == "official":
-        code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), "start"], timeout=300)
-    else:
-        code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
+    code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
 
     if code != 0:
         record_restart_event(
@@ -2810,62 +2601,21 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
 
 
 def execute_official_promotion() -> dict:
-    config = load_config()
-    environments = list_openclaw_environments(config)
-    task_registry = get_task_registry_payload(limit=8)
-    controller = PromotionController(BASE_DIR, STORE, config)
-    result = controller.run(environments, task_registry)
-    status = result.get("status", "unknown")
-    details = {
-        "status": status,
-        "primary_git_head": (result.get("preflight") or {}).get("primary_git_head", ""),
-        "official_git_head": (result.get("preflight") or {}).get("official_git_head", ""),
+    # 只支持 primary 环境，不再需要 promotion 逻辑
+    return {
+        "status": "skipped",
+        "message": "单环境模式，无需晋升",
     }
-    backups = result.get("backups") or {}
-    if backups:
-        details["snapshots"] = backups
-    if status == "promoted":
-        if result.get("preflight_warning"):
-            details["checks"] = result.get("preflight", {}).get("checks", [])
-            record_change("version", "官方验证版带预警晋升为当前主用版", details)
-        else:
-            record_change("version", "官方验证版晋升为当前主用版", details)
-    elif status == "rolled_back":
-        details["error"] = result.get("error", "")
-        record_change("recover", "官方验证版晋升失败，已回滚主用版", details)
-    elif status == "failed_preflight":
-        details["checks"] = result.get("preflight", {}).get("checks", [])
-        record_change("version", "官方验证版晋升前检查未通过", details)
-    return result
 
 
 def manage_official_environment(action: str) -> tuple[bool, str]:
-    allowed = {
-        "prepare": "准备官方验证版",
-        "start": "启动官方验证版",
-        "stop": "停止官方验证版",
-        "update": "更新官方验证版",
-        "install-schedule": "安装官方自动更新",
-        "remove-schedule": "关闭官方自动更新",
-        "schedule-status": "查看官方自动更新状态",
-    }
-    if action not in allowed:
-        return False, "未知操作"
-    if action == "start" and active_env_id(load_config()) != "official":
-        return False, "请先切换到 official 再启动，避免双监听"
-    timeout = 300 if action in {"prepare", "update", "start"} else 120
-    code, stdout, stderr = run_script([str(OFFICIAL_MANAGER), action], timeout=timeout)
-    message = (stdout or stderr or allowed[action]).strip()
-    return code == 0, message
+    # 只支持 primary 环境
+    return False, "单环境模式，不支持 official 环境操作"
 
 
 def set_official_auto_update_enabled(enabled: bool) -> tuple[bool, str, dict[str, Any]]:
-    normalized = "true" if enabled else "false"
-    if not save_config("OPENCLAW_OFFICIAL_AUTO_UPDATE", normalized):
-        return False, "保存自动更新配置失败", {}
-    action = "install-schedule" if enabled else "remove-schedule"
-    ok, message = manage_official_environment(action)
-    cfg = load_config()
+    # 只支持 primary 环境
+    return False, "单环境模式，不支持 official 自动更新", {}
     envs = list_openclaw_environments(cfg)
     official = next((item for item in envs if item.get("id") == "official"), {})
     return ok, message, official
@@ -3615,12 +3365,11 @@ def index():
                 <button class="btn" style="background:#dc2626" onclick="emergencyRecover()">🚨 急救</button>
             </div>
         </header>
-        
+
         <div class="status-strip">
             <div class="status-group">
                 <div id="global-active-env" class="env-chip active"><strong>当前环境</strong> 加载中</div>
                 <div id="global-primary-env" class="env-chip"><strong>Primary</strong> --</div>
-                <div id="global-official-env" class="env-chip"><strong>Official</strong> --</div>
             </div>
             <div class="status-summary">
                 <div id="global-gateway-status" class="status-pill"><strong>Gateway</strong> --</div>
@@ -4029,7 +3778,7 @@ def index():
             </div>
         </div>
     </div>
-    
+
     <script>
         let currentData = null;
         let promotionActionInFlight = false;
@@ -4214,7 +3963,7 @@ def index():
                 await loadData();
             }
         }
-        
+
         async function loadData() {
             try {
                 const res = await fetch('/api/status');
@@ -4224,14 +3973,14 @@ def index():
                 }
                 const data = await res.json();
                 currentData = data;
-                
+
                 // CPU
                 document.getElementById('cpu').textContent = data.metrics.cpu + '%';
                 document.getElementById('cpu-sub').textContent = data.metrics.cpu > 90 ? '过高' : '正常';
                 const cpuBar = document.getElementById('cpu-bar');
                 cpuBar.style.width = Math.min(data.metrics.cpu, 100) + '%';
                 cpuBar.className = 'progress-bar ' + (data.metrics.cpu > 90 ? 'error' : data.metrics.cpu > 70 ? 'warning' : 'good');
-                
+
                 // 内存
                 document.getElementById('mem').textContent = data.metrics.mem_used + 'G';
                 const memPercent = (data.metrics.mem_used / data.metrics.mem_total * 100).toFixed(0);
@@ -4240,11 +3989,11 @@ def index():
                 const memBar = document.getElementById('mem-bar');
                 memBar.style.width = memPercent + '%';
                 memBar.className = 'progress-bar ' + (memPercent > 85 ? 'error' : memPercent > 70 ? 'warning' : 'good');
-                
+
                 // 会话
                 document.getElementById('sessions').textContent = data.sessions.total;
                 document.getElementById('sessions-sub').textContent = `慢: ${data.sessions.slow} | 卡: ${data.sessions.stuck}`;
-                
+
                 // 慢响应原因统计
                 const reasonsEl = document.getElementById('slow-reasons');
                 const reasons = data.sessions.reasons || {};
@@ -4254,7 +4003,7 @@ def index():
                 } else {
                     reasonsEl.textContent = '';
                 }
-                
+
                 // Gateway 状态
                 const statusEl = document.getElementById('gateway-status');
                 if (data.gateway_healthy) {
@@ -4272,7 +4021,6 @@ def index():
                 const envs = data.environments || [];
                 const activeEnv = envs.find(item => item.active) || null;
                 const primaryEnv = envs.find(item => item.id === 'primary') || null;
-                const officialEnv = envs.find(item => item.id === 'official') || null;
                 const promotionSummary = data.promotion_summary || {};
                 const promotionLastRun = data.promotion_last_run || {};
                 const environmentIntegrity = data.environment_integrity || [];
@@ -4282,7 +4030,6 @@ def index():
                 const dualRunning = envs.filter(item => item.running).length > 1;
                 const activeEnvChip = document.getElementById('global-active-env');
                 const primaryChip = document.getElementById('global-primary-env');
-                const officialChip = document.getElementById('global-official-env');
                 const gatewayStatusPill = document.getElementById('global-gateway-status');
                 const guardianStatusPill = document.getElementById('global-guardian-status');
                 const taskStatsPill = document.getElementById('global-task-stats');
@@ -4292,10 +4039,6 @@ def index():
                     primaryChip.classList.toggle('active', !!(primaryEnv && primaryEnv.active));
                     primaryChip.innerHTML = `<strong>Primary</strong> ${primaryEnv ? (primaryEnv.running ? (primaryEnv.healthy ? '健康' : '异常') : '未运行') : '--'}`;
                 }
-                if (officialChip) {
-                    officialChip.classList.toggle('active', !!(officialEnv && officialEnv.active));
-                    officialChip.innerHTML = `<strong>Official</strong> ${officialEnv ? (officialEnv.running ? (officialEnv.healthy ? '健康' : '异常') : '未运行') : '--'}`;
-                }
                 if (gatewayStatusPill) gatewayStatusPill.innerHTML = `<strong>Gateway</strong> ${data.gateway_healthy ? '运行中' : '异常'}`;
                 if (guardianStatusPill) guardianStatusPill.innerHTML = `<strong>Guardian</strong> ${data.guardian_process ? '运行中' : '未检测到'}`;
                 if (taskStatsPill) taskStatsPill.innerHTML = `<strong>任务</strong> 运行中 ${taskSummary.running || 0} / 阻塞 ${taskSummary.blocked || 0}`;
@@ -4304,38 +4047,22 @@ def index():
                     <div class="memory-box-title">当前守护目标</div>
                     <div class="memory-box-main">${activeEnv.name} · ${activeEnv.healthy ? '健康' : (activeEnv.running ? '异常' : '未运行')}</div>
                     <div class="memory-box-sub" title="code=${activeEnv.code} | state=${activeEnv.home}">env=${activeEnv.id} · 端口 ${activeEnv.port} · 版本 ${activeEnv.git_head}</div>
-                    <div class="memory-box-sub" style="margin-top:6px;">单活视角下只展示当前使用环境；目录与 token 信息已收进 hover。</div>
+                    <div class="memory-box-sub" style="margin-top:6px;">单环境模式下只维护一套环境。</div>
                 ` : `
                     <div class="memory-box-title">当前守护目标</div>
                     <div class="memory-box-main">未识别</div>
                     <div class="memory-box-sub">请检查版本环境配置。</div>
                 `;
-                envWorkflowEl.innerHTML = officialEnv ? `
-                    <details class="workflow-collapsible">
-                        <summary>
-                            <div class="workflow-title">更新与验证流程</div>
-                            <div class="workflow-main">${officialEnv.auto_update_enabled ? '官方验证版会自动更新' : '官方验证版尚未启用自动更新'}</div>
-                            <div class="workflow-sub">自动更新只作用于官方验证版，不会直接覆盖当前主用版。每天 ${String(officialEnv.update_hour ?? 4).padStart(2, '0')}:${String(officialEnv.update_minute ?? 30).padStart(2, '0')} 检查并更新官方验证版代码。</div>
-                        </summary>
-                        <div class="workflow-collapsible-body">
-                            <div class="workflow-steps">
-                                <div class="workflow-step"><strong>1. 更新官方验证版</strong><br/>点击“更新官方验证版”，守护者会拉最新代码、同步隔离配置并重新构建。</div>
-                                <div class="workflow-step"><strong>2. 启动并验证</strong><br/>启动官方验证版后，只让它跑在隔离端口上，先看 Dashboard、任务注册表和活跃代理是否正常。</div>
-                                <div class="workflow-step"><strong>3. 切换为当前使用环境</strong><br/>验证通过后，点击“切换到这里”，守护目标就会切到官方验证版；原主用版会停止，不会双开。</div>
-                                <div class="workflow-step"><strong>4. 长期稳定后再回收旧主用版</strong><br/>当前页面不会自动覆盖旧主用版代码，避免你在没验证完之前误升级生产环境。</div>
-                            </div>
-                        </div>
-                    </details>
+                envWorkflowEl.innerHTML = `
                     <div class="workflow-box">
                         <div class="workflow-title">当前判断</div>
-                        <div class="workflow-main">${activeEnv && activeEnv.id === 'official' ? '你当前正在使用官方验证版' : '你当前仍在使用主用版'}</div>
+                        <div class="workflow-main">单环境模式</div>
                         <div class="workflow-sub">
                             主用版：${primaryEnv ? `${primaryEnv.running ? '运行中' : '已停止'} · ${primaryEnv.git_head}` : '-'}<br/>
-                            官方验证版：${officialEnv.running ? (officialEnv.healthy ? '运行中且健康' : '运行中但异常') : '未运行'} · ${officialEnv.git_head}${officialEnv.target_head && officialEnv.target_head !== officialEnv.git_head ? ` · 可更新到 ${officialEnv.target_head}` : ''}<br/>
-                            当前页面的按钮已经区分“更新”“启动”“切换使用”，不需要再去 README 里猜流程。
+                            当前页面只维护一套环境，不需要环境切换流程。
                         </div>
                     </div>
-                ` : '';
+                `;
                 promotionSummaryEl.innerHTML = `
                     <div class="memory-box-title">版本晋升摘要</div>
                     <div class="memory-box-main">${promotionSummary.headline || '暂无版本晋升判断'}</div>
@@ -4400,7 +4127,7 @@ def index():
                         </div>
                     `;
                 }).join('');
-                
+
                 // 慢会话
                 const tbody = document.getElementById('slow-sessions');
                 tbody.innerHTML = data.sessions.sessions.length ? '' : '<tr><td colspan="5" style="text-align:center;color:#666">暂无会话</td></tr>';
@@ -4409,7 +4136,7 @@ def index():
                     row.innerHTML = `<td>${s.time}</td><td title="${s.question}">${s.question || '-'}</td><td>${s.replies || 0}条</td><td>${s.duration}s</td><td>${s.status}</td>`;
                     tbody.appendChild(row);
                 });
-                
+
                 // 内存占用排行
                 const memoryAttrEl = document.getElementById('memory-attribution');
                 const memoryItemsEl = document.getElementById('memory-items');
@@ -4448,7 +4175,7 @@ def index():
                         procEl.appendChild(row);
                     });
                 }
-                
+
                 // 诊断
                 const diagEl = document.getElementById('diagnoses');
                 diagEl.innerHTML = data.diagnoses.map(d => `
@@ -4817,7 +4544,7 @@ def index():
                         `;
                     }, '<div class="event-item"><div class="event-title">暂无最近异常</div><div class="event-details">Guardian 已启动，但最近没有记录到异常或阶段事件。</div></div>', { limit: 4, buttonLabel: '展开更多事件', collapseLabel: '收起事件' });
                 }
-                
+
                 // 错误日志
                 const errEl = document.getElementById('error-logs');
                 errEl.innerHTML = data.errors.length ? '' : '<tr><td colspan="2" style="text-align:center;color:#666">暂无错误</td></tr>';
@@ -4826,18 +4553,18 @@ def index():
                     row.innerHTML = `<td>${e.time}</td><td>${e.message}</td>`;
                     errEl.appendChild(row);
                 });
-                
+
                 // 进程
                 const procListEl = document.getElementById('processes');
                 const procs = [
                     {name: 'Gateway', info: data.gateway_process},
                     {name: 'Guardian', info: data.guardian_process},
                 ];
-                procListEl.innerHTML = procs.map(p => p.info ? 
+                procListEl.innerHTML = procs.map(p => p.info ?
                     `<tr><td>${p.name}</td><td>${p.info.pid}</td><td>${p.info.cpu}%</td><td>${p.info.mem.toFixed(1)}%</td></tr>` :
                     `<tr><td>${p.name}</td><td colspan="3" class="status-error">未运行</td></tr>`
                 ).join('');
-                
+
                 // 配置
                 const autoUpdate = data.config.AUTO_UPDATE;
                 document.getElementById('auto-update-toggle').checked = autoUpdate;
@@ -4860,13 +4587,13 @@ def index():
                     {title: '当前版本', body: `${data.version.current || 'unknown'} · 历史 ${data.version.history ? data.version.history.length : 0} 条`},
                     {title: '资源占用', body: `CPU ${data.metrics.cpu}% · 内存 ${data.metrics.mem_used}G / ${data.metrics.mem_total}G`}
                 ], '暂无系统信息');
-                
+
                 const dingtalkWebhook = data.config.DINGTALK_WEBHOOK;
                 const feishuWebhook = data.config.FEISHU_WEBHOOK;
-                
+
                 const dingtalkBtn = document.getElementById('dingtalk-btn');
                 const feishuBtn = document.getElementById('feishu-btn');
-                
+
                 if (dingtalkWebhook) {
                     dingtalkBtn.textContent = '已配置';
                     dingtalkBtn.classList.add('configured');
@@ -4876,7 +4603,7 @@ def index():
                     dingtalkBtn.classList.remove('configured');
                     document.getElementById('dingtalk-status').textContent = '未配置';
                 }
-                
+
                 if (feishuWebhook) {
                     feishuBtn.textContent = '已配置';
                     feishuBtn.classList.add('configured');
@@ -4886,13 +4613,13 @@ def index():
                     feishuBtn.classList.remove('configured');
                     document.getElementById('feishu-status').textContent = '未配置';
                 }
-                
+
                 document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
             } catch(e) {
                 console.error(e);
             }
         }
-        
+
         async function restartGateway() {
             const btn = event.target;
             btn.disabled = true;
@@ -4952,7 +4679,7 @@ def index():
                 showToast('error', e.message || `${label}失败`);
             }
         }
-        
+
         async function emergencyRecover() {
             if (!confirm('🚨 急救模式将：\\n1. 恢复最近一次配置快照\\n2. 重新启动 Gateway\\n\\n确定要执行吗？')) return;
             try {
@@ -4963,7 +4690,7 @@ def index():
                 alert('急救请求失败');
             }
         }
-        
+
         async function toggleAutoUpdate(checkbox) {
             const value = checkbox.checked;
             try {
@@ -4982,7 +4709,7 @@ def index():
                 checkbox.checked = !value;
             }
         }
-        
+
         async function configureWebhook(type) {
             const key = type === 'DINGTALK' ? 'DINGTALK_WEBHOOK' : 'FEISHU_WEBHOOK';
             const value = prompt('请输入 ' + (type === 'DINGTALK' ? '钉钉' : '飞书') + ' Webhook URL:');
@@ -5000,10 +4727,10 @@ def index():
                 alert('配置保存失败');
             }
         }
-        
+
         loadData();
         setInterval(loadData, 5000);
-        
+
         function switchTab(tabName, evt = null) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -5014,7 +4741,7 @@ def index():
                 loadSnapshots();
             }
         }
-        
+
         async function loadChanges() {
             console.log('Loading changes...');
             try {
@@ -5192,7 +4919,7 @@ def api_status():
     if not isinstance(restart_events, list):
         restart_events = []
     recent_restart_events = restart_events[-20:]
-    
+
     data = {
         "active_environment": selected_env["id"],
         "environments": environments,
@@ -5467,10 +5194,10 @@ def api_config():
         data = request.get_json()
         key = data.get("key")
         value = data.get("value")
-        
+
         if not key:
             return jsonify({"success": False, "message": "缺少配置键"})
-        
+
         if save_config(key, str(value)):
             return jsonify({"success": True, "message": "配置已更新"})
         else:
@@ -5482,7 +5209,7 @@ def api_config():
 if __name__ == "__main__":
     import socket
     raise_nofile_limit()
-    
+
     def find_free_port(start=8080):
         for port in range(start, start + 10):
             try:
