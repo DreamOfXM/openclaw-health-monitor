@@ -281,7 +281,25 @@ class DataCollector:
             context_readiness = legacy.build_context_lifecycle_readiness(config)
             watcher_summary = self._shared_state("watcher-summary.json", {})
             restart_runtime_status = self._shared_state("restart-runtime-status.json", {})
-            shared_state = legacy.build_shared_state_snapshot(config)
+            binding_audit = self._shared_state(
+                "active-binding.json",
+                {
+                    "active_env": active_env,
+                    "switch_state": (context.get("binding") or {}).get("switch_state") or "committed",
+                    "updated_at": (context.get("binding") or {}).get("updated_at") or 0,
+                },
+            )
+            if not isinstance(binding_audit, dict):
+                binding_audit = {}
+            recent_binding_events = self._shared_state("binding-audit-events.json", [])
+            if not isinstance(recent_binding_events, list):
+                recent_binding_events = []
+            binding_audit = {
+                "active_env": binding_audit.get("active_env") or active_env,
+                "switch_state": binding_audit.get("switch_state") or (context.get("binding") or {}).get("switch_state") or "committed",
+                "updated_at": binding_audit.get("updated_at") or (context.get("binding") or {}).get("updated_at") or 0,
+                "recent_events": recent_binding_events,
+            }
             environment_integrity = []
             detect_integrity = getattr(legacy, "detect_environment_inconsistencies", None)
             if callable(detect_integrity):
@@ -305,7 +323,7 @@ class DataCollector:
                 },
                 "watcher_summary": watcher_summary,
                 "restart_runtime_status": restart_runtime_status,
-                "binding_audit": shared_state.get("binding_audit") or {},
+                "binding_audit": binding_audit,
                 "environment_integrity": environment_integrity,
                 "promotion_summary": promotion_summary,
                 "timestamp": datetime.now().isoformat(),

@@ -8,6 +8,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 let currentConfirmAction = null;
 let confirmActionInFlight = false;
+let manageEnvironmentData = null;
+let manageHealthScoreData = null;
+let manageTaskData = null;
 
 function initManage() {
     loadManageData();
@@ -30,6 +33,19 @@ function initManage() {
 }
 
 async function loadManageData() {
+    try {
+        const [envResponse, healthResponse, tasksResponse] = await Promise.all([
+            API.getEnvironment(true),
+            API.getHealthScore(false),
+            API.getTasks(false)
+        ]);
+        manageEnvironmentData = envResponse.success ? envResponse.data : null;
+        manageHealthScoreData = healthResponse.success ? healthResponse.data : null;
+        manageTaskData = tasksResponse.success ? tasksResponse.data : null;
+    } catch (error) {
+        console.error('加载管理页主数据失败:', error);
+    }
+
     await Promise.all([
         loadPromotionStatus(),
         loadSnapshots(),
@@ -40,9 +56,7 @@ async function loadManageData() {
 
 async function loadBindingAlerts() {
     try {
-        const response = await API.getEnvironment(true);
-        if (!response.success) return;
-        const envData = response.data || {};
+        const envData = manageEnvironmentData || {};
         const integrity = envData.environment_integrity || [];
         const bindingAudit = envData.binding_audit || {};
         const summaryEl = document.getElementById('binding-audit-summary');
@@ -74,17 +88,10 @@ async function loadBindingAlerts() {
 
 async function loadPromotionStatus() {
     try {
-        const [healthResponse, envResponse, tasksResponse] = await Promise.all([
-            API.getHealthScore(true),
-            API.getEnvironment(true),
-            API.getTasks(true)
-        ]);
-
-        if (!envResponse.success) return;
-
-        const envData = envResponse.data;
-        const healthData = healthResponse.success ? healthResponse.data : { score: 0 };
-        const taskData = tasksResponse.success ? tasksResponse.data : { blocked_count: 0 };
+        const envData = manageEnvironmentData || {};
+        const healthData = manageHealthScoreData || { score: 0 };
+        const taskData = manageTaskData || { blocked_count: 0 };
+        if (!envData || !Object.keys(envData).length) return;
         const promotionSummary = envData.promotion_summary || {};
 
         const officialEnv = (envData.environments || []).find(item => item.id === 'official') || {};

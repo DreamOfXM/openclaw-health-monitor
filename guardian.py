@@ -136,6 +136,12 @@ def commit_active_binding(env_id: str) -> None:
             },
             limit=200,
         )
+        shared_dir = BASE_DIR / "data" / "shared-state"
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        (shared_dir / "binding-audit-events.json").write_text(
+            json.dumps(STORE.load_runtime_value("binding_audit_events", []), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     except Exception:
         pass
 

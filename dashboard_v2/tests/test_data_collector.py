@@ -109,18 +109,16 @@ class TestDataCollector(unittest.TestCase):
         fake_legacy.build_bootstrap_status.return_value = {}
         fake_legacy.build_context_lifecycle_readiness.return_value = {"status": "ready"}
         fake_legacy.build_environment_promotion_summary.return_value = {}
-        fake_legacy.build_shared_state_snapshot.return_value = {
-            "binding_audit": {"active_env": "primary", "switch_state": "committed"}
-        }
         context = {
             "legacy": fake_legacy,
             "config": {},
             "active_env": "primary",
+            "binding": {"active_env": "primary", "switch_state": "committed", "updated_at": 1},
             "selected_env": {"id": "primary"},
             "task_registry": {},
         }
         with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
-            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}]):
+            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}, {}, []]):
             env = self.collector._fetch_environment_data()
         self.assertEqual(env["binding_audit"]["active_env"], "primary")
     
