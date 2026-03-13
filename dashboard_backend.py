@@ -2616,9 +2616,6 @@ def manage_official_environment(action: str) -> tuple[bool, str]:
 def set_official_auto_update_enabled(enabled: bool) -> tuple[bool, str, dict[str, Any]]:
     # 只支持 primary 环境
     return False, "单环境模式，不支持 official 自动更新", {}
-    envs = list_openclaw_environments(cfg)
-    official = next((item for item in envs if item.get("id") == "official"), {})
-    return ok, message, official
 
 
 # ========== API 端点 ==========
@@ -3896,72 +3893,17 @@ def index():
         function renderPromotionRun(promotionSummary, run) {
             const boardEl = document.getElementById('promotion-status-board');
             if (!boardEl) return;
-            const status = run && run.status ? run.status : 'idle';
-            const checks = (run && run.preflight && run.preflight.checks) || [];
-            const failedChecks = checks.filter(item => !item.ok).map(item => item.detail);
-            const snapshots = run && run.backups ? Object.entries(run.backups).map(([k, v]) => `${k}: ${v}`).join(' | ') : '尚未创建';
-            const verifyChecks = (run && run.verification && run.verification.checks) || [];
-            const verifySummary = verifyChecks.length
-                ? verifyChecks.map(item => `${item.name}:${item.ok ? 'OK' : 'FAIL'}`).join(' | ')
-                : '尚未执行';
-            const rollbackSummary = run && run.rollback
-                ? `已恢复 ${run.rollback.primary_snapshot || '-'}${run.rollback.primary_head ? ` · HEAD ${run.rollback.primary_head.slice(0, 8)}` : ''}`
-                : '未触发';
-            const headline = run && run.status
-                ? ({
-                    preflight: '正在做晋升前检查',
-                    backup: '已通过前检，正在建立回滚点',
-                    cutover: '已完成同步，正在切换主用版',
-                    promoted: '晋升完成，主用版已切到验证通过的官方版本',
-                    rolled_back: '晋升失败，已自动回滚主用版',
-                    failed_preflight: '晋升前检查未通过',
-                }[run.status] || `当前状态：${run.status}`)
-                : (promotionSummary && promotionSummary.safe_to_promote ? '官方验证版已满足晋升条件，可以开始发布到主用版' : '还没有发生正式晋升，当前显示的是准备状态');
-            const updatedAt = run && run.updated_at ? formatPromotionTime(run.updated_at) : '暂无运行记录';
-            const actionLabel = promotionActionInFlight ? '晋升执行中...' : '将官方验证版升级为主用版';
             boardEl.innerHTML = `
                 <div class="memory-box">
-                    <div class="memory-box-title">晋升执行流</div>
-                    <div class="memory-box-main">${headline}</div>
-                    <div class="memory-box-sub">最近更新：${updatedAt}</div>
-                    <div class="promotion-actions">
-                        <button class="btn btn-primary" ${promotionActionInFlight ? 'disabled' : ''} onclick="promoteOfficialToPrimary()">${actionLabel}</button>
-                        <button class="btn" onclick="loadData()">刷新流程状态</button>
-                    </div>
-                </div>
-                <div class="promotion-stage-grid">
-                    ${renderPromotionStage(status === 'failed_preflight' ? 'fail' : (status !== 'idle' ? 'ok' : 'pending'), 'Preflight', checks.length ? `${checks.filter(item => item.ok).length}/${checks.length} 通过` : '待检查', failedChecks.length ? failedChecks.join(' | ') : '会检查 official 健康、阻塞任务、候选版本差异。')}
-                    ${renderPromotionStage(status === 'backup' ? 'active' : (run && run.backups ? 'ok' : 'pending'), 'Backup', run && run.backups ? '回滚点已建立' : '待执行', snapshots)}
-                    ${renderPromotionStage(status === 'cutover' ? 'active' : ((run && run.cutover) || status === 'promoted' || status === 'rolled_back' ? 'ok' : 'pending'), 'Cutover', run && run.cutover ? '主用版已切换启动链路' : '待执行', run && run.cutover ? (run.cutover.message || '已开始切换主用环境') : '会停止 official，启动 primary，并将守护目标切回 primary。')}
-                    ${renderPromotionStage(status === 'promoted' ? 'ok' : (status === 'rolled_back' ? 'fail' : (verifyChecks.length ? 'active' : 'pending')), 'Verify', status === 'promoted' ? '自动验活通过' : (status === 'rolled_back' ? '验证失败' : '待执行'), verifySummary)}
-                    ${renderPromotionStage(status === 'rolled_back' ? 'fail' : 'pending', 'Rollback', status === 'rolled_back' ? '已自动回滚' : '未触发', status === 'rolled_back' ? `${run.error || '未知错误'} | ${rollbackSummary}` : '只有在 cutover 或 verify 失败时才会触发。')}
+                    <div class="memory-box-title">版本晋升</div>
+                    <div class="memory-box-main">单环境模式</div>
+                    <div class="memory-box-sub">当前只维护一套环境，不需要版本晋升流程。</div>
                 </div>
             `;
         }
 
         async function promoteOfficialToPrimary() {
-            if (promotionActionInFlight) return;
-            const confirmed = confirm('这会把已验证通过的 official 晋升为新的 primary，并在失败时自动回滚。现在开始吗？');
-            if (!confirmed) return;
-            promotionActionInFlight = true;
-            const boardEl = document.getElementById('promotion-status-board');
-            if (boardEl) {
-                boardEl.innerHTML = '<div class="memory-box"><div class="memory-box-title">晋升执行流</div><div class="memory-box-main">正在执行 official -> primary 晋升...</div><div class="memory-box-sub">请等待备份、同步、切换与自动验活完成。</div></div>';
-            }
-            try {
-                const res = await fetch('/api/environments/promote', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({source_env: 'official', target_env: 'primary'})
-                });
-                const data = await res.json();
-                alert(data.message || (data.success ? '晋升完成' : '晋升失败'));
-            } catch (err) {
-                alert('晋升请求失败: ' + err);
-            } finally {
-                promotionActionInFlight = false;
-                await loadData();
-            }
+            alert('单环境模式，不支持晋升操作');
         }
 
         async function loadData() {
@@ -4081,7 +4023,7 @@ def index():
                 ], '暂无动作');
                 renderSimpleList('overview-release-quick', [
                     {title: promotionSummary.headline || '暂无版本晋升判断', body: promotionSummary.recommended_action || '继续观察。'},
-                    {title: activeEnv && activeEnv.id === 'official' ? '当前使用验证版' : '当前使用主用版', body: dualRunning ? '发现双运行风险。' : '未发现双运行。'}
+                    {title: '当前使用主用版', body: '单环境模式'}
                 ], '暂无发布摘要');
                 const envAlerts = environmentIntegrity.length ? environmentIntegrity.map(item => ({title: item.title, body: item.detail})) : [];
                 renderSimpleList('environment-alerts', envAlerts, '当前没有检测到环境不一致告警。');
@@ -4097,15 +4039,6 @@ def index():
                     } else {
                         dashboardLink = '<a class="env-link disabled" href="javascript:void(0)" aria-disabled="true" title="环境未运行，无法打开 Dashboard">环境未运行</a>';
                     }
-                    const officialExtra = item.id === 'official'
-                        ? `
-                            <button class="btn" onclick="manageOfficial('update')">更新官方验证版</button>
-                            <button class="btn" onclick="manageOfficial('${item.running ? 'stop' : 'start'}')">${item.running ? '停止官方验证版' : '启动官方验证版'}</button>
-                            <button class="btn" onclick="manageOfficial('install-schedule')">${item.auto_update_enabled ? '重装自动更新' : '启用自动更新'}</button>
-                        `
-                        : `<button class="btn" ${item.active ? 'disabled' : ''} onclick="switchEnvironment('primary')">保持主用版</button>`;
-                    const targetMeta = item.id === 'official' ? `目标版本: ${item.target_head || '-'}` : '';
-                    const updateMeta = item.id === 'official' ? `自动更新: ${item.auto_update_enabled ? '已开启' : '未开启'}` : '';
                     return `
                         <div class="env-card ${item.active ? 'active' : ''}" title="code=${item.code}&#10;state=${item.home}&#10;token=${item.token_prefix || '-'}">
                             <div class="env-title-row">
@@ -4117,12 +4050,10 @@ def index():
                                 env: ${item.id} · 端口: ${item.port}<br/>
                                 版本: ${item.git_head}<br/>
                                 状态: ${item.running ? (item.healthy ? '健康' : '运行中但异常') : '未运行'} · listener: ${item.listener_pid || '-'}<br/>
-                                ${[targetMeta, updateMeta].filter(Boolean).join(' · ') || '更多目录与 token 信息见 hover'}
                             </div>
                             <div class="env-actions wrap">
                                 ${switchBtn}
                                 ${dashboardLink}
-                                ${officialExtra}
                             </div>
                         </div>
                     `;
@@ -4236,8 +4167,8 @@ def index():
                 renderSimpleList('overview-failure-summary', failureItems, '最近没有明显的模型或交付失败。');
                 renderSimpleList('overview-warning-list', envAlerts.length ? envAlerts : (data.diagnoses || []).slice(0, 2).map(item => ({title: item.title, body: item.message})), '当前没有需要升级处理的风险。');
                 renderSimpleList('release-summary-list', [
-                    {title: activeEnv && activeEnv.id === 'official' ? '当前主视角在 Official' : '当前主视角在 Primary', body: activeEnv ? `${activeEnv.code} · ${activeEnv.git_head}` : '未识别当前环境'},
-                    {title: '发布判断', body: (promotionSummary.reasons || []).join(' | ') || '当前没有额外阻断条件。'}
+                    {title: '当前主视角在 Primary', body: activeEnv ? `${activeEnv.code} · ${activeEnv.git_head}` : '未识别当前环境'},
+                    {title: '发布判断', body: '单环境模式，无需晋升流程。'}
                 ], '暂无发布补充信息');
 
                 const healthAcceptance = data.health_acceptance || {};
@@ -5032,40 +4963,14 @@ def api_switch_environment():
 
 @app.route("/api/environments/manage", methods=["POST"])
 def api_manage_environment():
-    """Manage official validation environment lifecycle and updates."""
-    try:
-        data = request.get_json(silent=True) or {}
-        action = str(data.get("action", "")).strip()
-        success, message = manage_official_environment(action)
-        if success:
-            record_change("version", f"官方验证版操作: {action}", {"action": action})
-        return jsonify({"success": success, "message": message, "action": action})
-    except Exception as exc:
-        return jsonify({"success": False, "message": str(exc)})
+    """Manage environment lifecycle (single environment mode)."""
+    return jsonify({"success": False, "message": "单环境模式，不支持此操作"})
 
 
 @app.route("/api/environments/promote", methods=["POST"])
 def api_promote_environment():
-    """Promote validated official environment into primary."""
-    try:
-        data = request.get_json(silent=True) or {}
-        source_env = str(data.get("source_env", "official")).strip() or "official"
-        target_env = str(data.get("target_env", "primary")).strip() or "primary"
-        if source_env != "official" or target_env != "primary":
-            return jsonify({"success": False, "message": "当前只支持 official -> primary 的版本晋升"})
-        result = execute_official_promotion()
-        status = result.get("status", "unknown")
-        success = status == "promoted"
-        if status == "failed_preflight":
-            failed = [item.get("detail", "") for item in (result.get("preflight") or {}).get("checks", []) if not item.get("ok")]
-            message = "晋升前检查未通过：" + (" | ".join(failed) if failed else "请查看流程状态")
-        elif status == "rolled_back":
-            message = f"晋升失败，已自动回滚：{result.get('error', '未知错误')}"
-        elif status == "promoted":
-            message = "官方验证版已晋升为当前主用版，并通过自动验活"
-        else:
-            message = f"晋升流程结束：{status}"
-        return jsonify({"success": success, "message": message, "result": result, "status": status})
+    """Promote environment (single environment mode)."""
+    return jsonify({"success": False, "message": "单环境模式，不支持版本晋升"})
     except Exception as exc:
         return jsonify({"success": False, "message": str(exc)})
 
