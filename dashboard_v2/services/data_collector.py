@@ -94,12 +94,12 @@ class DataCollector:
     """数据收集器"""
 
     REFRESH_INTERVALS = {
-        "health_score": 5,
+        "health_score": 10,
         "metrics": 5,
         "events": 5,
         "environment": 10,
         "agents": 30,
-        "tasks": -1,
+        "tasks": 10,
         "learnings": 60,
         "config": -1,
         "snapshots": -1,
@@ -162,10 +162,10 @@ class DataCollector:
 
     def _fetch_health_score_data(self) -> Dict[str, Any]:
         return {
-            "environment": self._fetch_environment_data(),
-            "metrics": self._fetch_metrics_data(),
-            "tasks": self._fetch_task_data(),
-            "learning": self._fetch_learning_data(),
+            "environment": self.get_environment(),
+            "metrics": self.get_metrics(),
+            "tasks": self.get_tasks(),
+            "learning": self.get_learnings(),
             "errors": self._fetch_error_data(),
         }
 
@@ -385,19 +385,38 @@ class DataCollector:
             "current_stage": task.get("current_stage") or "",
             "blocked_reason": task.get("blocked_reason") or "",
             "last_progress_label": task.get("last_progress_label") or "-",
-            "latest_receipt": latest_receipt,
-            "control": control,
-            "control_actions": task.get("control_actions") or [],
+            "latest_receipt": {
+                "agent": latest_receipt.get("agent") or "",
+                "phase": latest_receipt.get("phase") or "",
+                "action": latest_receipt.get("action") or "",
+            },
+            "control": {
+                "control_state": control.get("control_state") or "",
+                "approved_summary": control.get("approved_summary") or "",
+                "next_action": control.get("next_action") or "",
+                "next_actor": control.get("next_actor") or "",
+                "claim_level": control.get("claim_level") or "",
+            },
             "session_key": task.get("session_key") or "",
             "truth_level": "derived",
         }
 
     def _fetch_task_data(self) -> Dict[str, Any]:
         try:
-            payload = _legacy_dashboard().get_task_registry_payload(limit=200)
-            tasks = [self._normalize_task(item) for item in payload.get("tasks") or []]
+            payload = self._shared_state("task-registry-snapshot.json", {})
+            if not isinstance(payload, dict) or not payload.get("summary"):
+                payload = _legacy_dashboard().get_task_registry_payload(limit=120)
+            raw_tasks = list(payload.get("tasks") or [])
+            raw_tasks.sort(
+                key=lambda item: int(item.get("updated_at") or item.get("last_progress_at") or item.get("created_at") or 0),
+                reverse=True,
+            )
+            tasks = [self._normalize_task(item) for item in raw_tasks[:50]]
             current = payload.get("current")
             summary = payload.get("summary") or {}
+            current_facts = _read_json_file(PROJECT_ROOT / "data" / "current-task-facts.json", {})
+            if (not isinstance(current, dict) or not current) and isinstance(current_facts, dict):
+                current = current_facts.get("current_task") or None
             return {
                 "blocked_count": int(summary.get("blocked", 0) or 0),
                 "total_count": int(summary.get("total", 0) or 0),
@@ -405,8 +424,8 @@ class DataCollector:
                 "current": self._normalize_task(current) if isinstance(current, dict) else None,
                 "tasks": tasks,
                 "summary": summary,
-                "control_queue": payload.get("control_queue") or [],
-                "session_resolution": payload.get("session_resolution") or {},
+                "control_queue": list(payload.get("control_queue") or [])[:20],
+                "session_resolution": payload.get("session_resolution") or (current_facts.get("session_resolution") if isinstance(current_facts, dict) else {}) or {},
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as exc:

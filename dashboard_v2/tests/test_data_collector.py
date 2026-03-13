@@ -121,6 +121,26 @@ class TestDataCollector(unittest.TestCase):
             mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}, {}, []]):
             env = self.collector._fetch_environment_data()
         self.assertEqual(env["binding_audit"]["active_env"], "primary")
+
+    def test_get_tasks_prefers_shared_state_snapshot(self):
+        payload = {
+            "summary": {"blocked": 1, "total": 2, "running": 1},
+            "current": {"task_id": "task-1", "status": "running", "question": "主任务"},
+            "tasks": [
+                {"task_id": "task-1", "status": "running", "question": "主任务"},
+                {"task_id": "task-2", "status": "background", "question": "后台任务"},
+            ],
+            "control_queue": [],
+            "session_resolution": {"active_task_id": "task-1"},
+        }
+        with mock.patch.object(self.collector, "_shared_state", return_value=payload), \
+            mock.patch("services.data_collector._read_json_file", return_value={}), \
+            mock.patch("services.data_collector._legacy_dashboard") as legacy:
+            data = self.collector._fetch_task_data()
+        legacy.return_value.get_task_registry_payload.assert_not_called()
+        self.assertEqual(data["blocked_count"], 1)
+        self.assertEqual(data["total_count"], 2)
+        self.assertEqual(data["current"]["task_id"], "task-1")
     
     def test_get_tasks(self):
         """测试获取任务数据"""
