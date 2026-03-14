@@ -37,6 +37,7 @@ from bootstrap_evolution import (
     derive_watcher_task_id,
     ensure_bootstrap_workspace,
 )
+from heartbeat_guardrail import TaskWatcher, Heartbeat, HeartbeatPhase
 
 # ========== 配置 ==========
 BASE_DIR = Path(__file__).parent
@@ -1821,6 +1822,90 @@ def promote_learning_to_memory(learning: dict[str, Any]) -> None:
     with open(main_memory, "a", encoding="utf-8") as f:
         f.write(f"\n### {category}\n\n")
         f.write(f"- **{title}**: {detail}\n")
+
+
+# ========== 心跳检测 + Guardrail ==========
+TASK_WATCHER: TaskWatcher | None = None
+
+def get_task_watcher() -> TaskWatcher:
+    """获取任务监控器（单例）"""
+    global TASK_WATCHER
+    if TASK_WATCHER is None:
+        TASK_WATCHER = TaskWatcher(STORE)
+    return TASK_WATCHER
+
+
+def check_heartbeat_and_guardrail() -> dict[str, Any]:
+    """心跳检测 + Guardrail 检查
+    
+    功能：
+    1. 检查所有活跃任务的心跳状态
+    2. 检测超时任务
+    3. 执行 Guardrail 恢复策略
+    4. 生成可观测性报告
+    """
+    watcher = get_task_watcher()
+    result = watcher.check_all_tasks()
+    
+    # 处理超时任务
+    for timeout_task in result.get("timeout_tasks", []):
+        task_id = timeout_task.get("task_id")
+        if task_id:
+            log(f"检测到超时任务: {task_id}", "WARNING")
+            
+            # 尝试恢复
+            recovery_result = watcher.recover_timeout_task(task_id)
+            
+            if recovery_result.get("success"):
+                log(f"任务 {task_id} 恢复成功: {recovery_result.get('action')}")
+            else:
+                log(f"任务 {task_id} 恢复失败: {recovery_result.get('message')}", "ERROR")
+                
+                # 通知用户
+                if should_alert("task_timeout"):
+                    notify(
+                        "任务超时",
+                        f"任务 {task_id} 已超时且无法自动恢复\n"
+                        f"阶段: {timeout_task.get('phase')}\n"
+                        f"超时时间: {timeout_task.get('timeout_seconds')}秒",
+                        "error"
+                    )
+    
+    # 记录健康状态
+    health_status = result.get("health_status", "healthy")
+    if health_status != "healthy":
+        STORE.save_runtime_value("last_degraded_at", int(time.time() * 1000))
+    
+    return result
+
+
+def record_heartbeat(
+    task_id: str,
+    session_key: str,
+    phase: str,
+    progress: int,
+    message: str | None = None,
+    error_code: str | None = None,
+) -> None:
+    """记录心跳（供外部调用）"""
+    watcher = get_task_watcher()
+    heartbeat = Heartbeat(
+        task_id=task_id,
+        session_key=session_key,
+        phase=HeartbeatPhase(phase),
+        progress=progress,
+        timestamp_ms=int(time.time() * 1000),
+        message=message,
+        error_code=error_code,
+    )
+    watcher.heartbeat_monitor.record_heartbeat(heartbeat)
+    log(f"心跳记录: {task_id} @ {phase} ({progress}%)")
+
+
+def get_observability_report() -> dict[str, Any]:
+    """获取可观测性报告（供外部调用）"""
+    watcher = get_task_watcher()
+    return watcher.get_observability_report()
 
 
 def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
@@ -4167,6 +4252,9 @@ def main():
             push_runtime_progress_updates()
             enforce_task_registry_control_plane()
             run_reflection_cycle()
+            
+            # 心跳检测 + Guardrail 检查
+            check_heartbeat_and_guardrail()
             
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:
