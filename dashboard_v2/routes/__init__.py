@@ -8,6 +8,7 @@ from .tasks import bp as tasks_bp
 from .environments import bp as environments_bp
 from .agents import bp as agents_bp
 from .learnings import bp as learnings_bp
+from .heartbeat import bp as heartbeat_bp
 
 __all__ = [
     'health_bp',
@@ -16,5 +17,6 @@ __all__ = [
     'tasks_bp',
     'environments_bp',
     'agents_bp',
-    'learnings_bp'
+    'learnings_bp',
+    'heartbeat_bp',
 ]

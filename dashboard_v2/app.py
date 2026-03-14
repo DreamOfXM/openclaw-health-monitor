@@ -22,7 +22,8 @@ from routes import (
     tasks_bp,
     environments_bp,
     agents_bp,
-    learnings_bp
+    learnings_bp,
+    heartbeat_bp,
 )
 from services.websocket_manager import get_ws_manager
 
@@ -50,6 +51,7 @@ def create_app():
     app.register_blueprint(environments_bp)
     app.register_blueprint(agents_bp)
     app.register_blueprint(learnings_bp)
+    app.register_blueprint(heartbeat_bp)
     
     # 页面路由
     @app.route('/')
@@ -66,6 +68,11 @@ def create_app():
     def manage():
         """管理视图"""
         return render_template('manage.html')
+    
+    @app.route('/heartbeat')
+    def heartbeat():
+        """心跳监控视图"""
+        return render_template('heartbeat.html')
     
     @app.route('/api/v2/status')
     def api_status():
