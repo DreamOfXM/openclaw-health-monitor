@@ -101,17 +101,16 @@ flowchart LR
 
 目标：
 
-- 管理 `primary / official`
+- 管理 `primary`
 - 展示当前激活环境
-- 切换环境
+- 重启当前运行时
 - 打开对应 Dashboard
-- 管理验证版更新与启动
+- 管理快照回退
 
 主要文件：
 
 - [dashboard_backend.py](/Users/hangzhou/openclaw-health-monitor/dashboard_backend.py)
 - [desktop_runtime.sh](/Users/hangzhou/openclaw-health-monitor/desktop_runtime.sh)
-- [manage_official_openclaw.sh](/Users/hangzhou/openclaw-health-monitor/manage_official_openclaw.sh)
 
 当前判断：
 

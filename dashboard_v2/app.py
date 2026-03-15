@@ -26,7 +26,9 @@ from routes import (
     heartbeat_bp,
 )
 from services.websocket_manager import get_ws_manager
+from services.health_score import calculate_health_score, get_calculator
 
+ASSET_VERSION = str(int(time.time()))
 
 @lru_cache(maxsize=1)
 def _legacy_dashboard():
@@ -42,6 +44,10 @@ def create_app():
         static_folder='static'
     )
     app.url_map.strict_slashes = False
+
+    @app.context_processor
+    def inject_asset_version():
+        return {"asset_version": ASSET_VERSION}
     
     # 注册蓝图
     app.register_blueprint(health_bp)
@@ -96,11 +102,28 @@ def create_app():
             collector = get_collector()
             while True:
                 try:
-                    data = collector.get_health_score_data(force_refresh=True)
-                    yield f"data: {json.dumps({'type': 'health', 'data': data, 'timestamp': datetime.now().isoformat()})}\n\n"
+                    health_data = collector.get_health_score_data(force_refresh=False)
+                    result = calculate_health_score(
+                        environment_data=health_data.get('environment', {}),
+                        metrics_data=health_data.get('metrics', {}),
+                        task_data=health_data.get('tasks', {}),
+                        learning_data=health_data.get('learning', {}),
+                        error_data=health_data.get('errors', {})
+                    )
+                    next_action = get_calculator().get_next_action(result)
+                    payload = {
+                        'score': result.score,
+                        'status': result.status,
+                        'status_emoji': result.status_emoji,
+                        'status_color': result.status_color,
+                        'deductions': result.deductions,
+                        'next_action': next_action,
+                        'last_updated': result.last_updated.isoformat(),
+                    }
+                    yield f"data: {json.dumps({'type': 'health', 'data': payload, 'timestamp': datetime.now().isoformat()})}\n\n"
                 except Exception as e:
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-                time.sleep(5)
+                time.sleep(15)
         
         return Response(
             stream_with_context(generate()),
@@ -121,11 +144,11 @@ def create_app():
             collector = get_collector()
             while True:
                 try:
-                    data = collector.get_metrics(force_refresh=True)
+                    data = collector.get_metrics(force_refresh=False)
                     yield f"data: {json.dumps({'type': 'metrics', 'data': data, 'timestamp': datetime.now().isoformat()})}\n\n"
                 except Exception as e:
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-                time.sleep(3)
+                time.sleep(15)
         
         return Response(
             stream_with_context(generate()),
@@ -147,7 +170,7 @@ def create_app():
             last_count = 0
             while True:
                 try:
-                    events = collector.get_events(limit=20, force_refresh=True)
+                    events = collector.get_events(limit=20, force_refresh=False)
                     current_count = len(events)
                     if current_count != last_count:
                         yield f"data: {json.dumps({'type': 'events', 'data': events, 'count': current_count, 'timestamp': datetime.now().isoformat()})}\n\n"
@@ -156,7 +179,7 @@ def create_app():
                         yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()})}\n\n"
                 except Exception as e:
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-                time.sleep(5)
+                time.sleep(15)
         
         return Response(
             stream_with_context(generate()),

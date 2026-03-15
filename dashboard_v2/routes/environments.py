@@ -49,7 +49,7 @@ def get_active_environment():
 
 @bp.route('/switch', methods=['POST'])
 def switch_environment():
-    """切换环境（高危操作）"""
+    """兼容旧接口；单环境模式下只允许 primary。"""
     try:
         data = request.get_json() or {}
         target_env = data.get('environment')
@@ -73,34 +73,21 @@ def switch_environment():
         }), 500
 
 
-@bp.route('/promote', methods=['POST'])
-def promote_environment():
-    """执行版本晋升（高危操作）"""
+@bp.route('/restart', methods=['POST'])
+def restart_environment():
+    """重启当前唯一运行环境（高危操作）"""
     try:
-        data = request.get_json() or {}
-        confirmation = data.get('confirmation')
-        
-        if confirmation != 'PROMOTE':
-            return jsonify({
-                'success': False,
-                'error': '确认码错误，操作取消'
-            }), 403
-        
         collector = get_collector()
-        result = collector.promote_environment()
-        status = str(result.get('status') or '')
-        success = status == 'promoted'
-        message = str(result.get('error') or result.get('message') or status or '晋升流程已结束')
-        response_status = 200
-        if status in {'error', 'failed'}:
-            response_status = 500
+        result = collector.restart_environment()
+        success = bool(result.get('success'))
+        message = str(result.get('message') or '重启流程已结束')
         return jsonify({
-            'success': success,
+            'success': bool(success),
             'data': {
                 **result,
                 'message': message,
             }
-        }), response_status
+        }), (200 if success else 500)
     except Exception as e:
         return jsonify({
             'success': False,
@@ -108,22 +95,15 @@ def promote_environment():
         }), 500
 
 
-@bp.route('/official-auto-update', methods=['POST'])
-def set_official_auto_update():
-    """切换官方验证版自动更新（单环境模式已禁用）"""
-    return jsonify({
-        'success': False,
-        'error': '单环境模式，不支持 official 自动更新'
-    }), 400
-
-
 @bp.route('/snapshots', methods=['GET'])
 def get_snapshots():
     """获取快照列表"""
     try:
         force_refresh = request.args.get('refresh', 'false').lower() == 'true'
+        limit = max(1, min(request.args.get('limit', 20, type=int), 100))
+        offset = max(0, request.args.get('offset', 0, type=int))
         collector = get_collector()
-        data = collector.get_snapshots(force_refresh=force_refresh)
+        data = collector.get_snapshots(limit=limit, offset=offset, force_refresh=force_refresh)
         return jsonify({
             'success': True,
             'data': data

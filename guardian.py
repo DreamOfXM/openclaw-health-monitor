@@ -37,7 +37,14 @@ from bootstrap_evolution import (
     derive_watcher_task_id,
     ensure_bootstrap_workspace,
 )
-from heartbeat_guardrail import TaskWatcher, Heartbeat, HeartbeatPhase
+from heartbeat_guardrail import (
+    TaskWatcher,
+    Heartbeat,
+    HeartbeatPhase,
+    infer_duration_profile,
+    resolve_timing_window,
+    build_user_visible_status_template,
+)
 
 # ========== 配置 ==========
 BASE_DIR = Path(__file__).parent
@@ -78,29 +85,34 @@ def load_config():
 
 
 def active_binding() -> dict[str, Any]:
-    binding = read_active_binding(BASE_DIR, CONFIG)
     runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
-    if not isinstance(runtime_binding, dict):
-        return binding
-    runtime_env = str(runtime_binding.get("env_id") or "").strip()
     specs = get_registered_env_specs(CONFIG)
+    default_env = "primary" if "primary" in specs else next(iter(specs), "primary")
+    if not isinstance(runtime_binding, dict):
+        return {
+            "active_env": default_env,
+            "switch_state": "committed",
+            "binding_version": 1,
+            "updated_at": int(time.time()),
+            "expected": dict(specs.get(default_env) or {}),
+        }
+    runtime_env = str(runtime_binding.get("env_id") or "").strip()
     if runtime_env not in specs:
-        return binding
+        runtime_env = default_env
     expected = dict(specs[runtime_env])
     if isinstance(runtime_binding.get("expected"), dict):
         expected.update(runtime_binding.get("expected") or {})
     return {
         "active_env": runtime_env,
-        "switch_state": str(runtime_binding.get("switch_state") or binding.get("switch_state") or "committed"),
-        "binding_version": int(runtime_binding.get("binding_version") or binding.get("binding_version") or 1),
-        "updated_at": int(runtime_binding.get("updated_at") or binding.get("updated_at") or int(time.time())),
+        "switch_state": str(runtime_binding.get("switch_state") or "committed"),
+        "binding_version": int(runtime_binding.get("binding_version") or 1),
+        "updated_at": int(runtime_binding.get("updated_at") or int(time.time())),
         "expected": expected,
     }
 
 
 def active_env_id() -> str:
-    # 只支持 primary 环境
-    return "primary"
+    return str(active_binding().get("active_env") or "primary")
 
 
 def commit_active_binding(env_id: str) -> None:
@@ -301,8 +313,8 @@ def _bridge_watcher_receipt(payload: dict[str, Any], *, env_id: str, watcher_tas
         return "observed_unbound"
     task_for_validation = dict(task)
     if str(task.get("status") or "") == "completed":
-        control = STORE.derive_task_control_state(task["task_id"])
-        if str(control.get("control_state") or "") != "completed_verified":
+        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
+        if not core.get("is_terminal") and str(core.get("finalization_state") or "") != "finalized":
             task_for_validation["status"] = "running"
     accepted, normalized_payload, violations = validate_protocol_event(
         task_for_validation,
@@ -617,21 +629,11 @@ def build_main_closure_supervision_summary(spec: dict[str, Any] | None = None) -
         except Exception:
             runtime_status = {}
     if not runtime_status:
-        runtime_status = STORE.load_runtime_value(
-            f"main_closure_summary:{env_id}",
-            {
-                "env_id": env_id,
-                "main_closure_artifact_status": "missing",
-                "foreground_root_task_id": "",
-                "active_root_count": 0,
-                "background_root_count": 0,
-                "adoption_pending_count": 0,
-                "finalization_pending_count": 0,
-                "delivery_failed_count": 0,
-                "late_result_count": 0,
-                "binding_source_counts": {},
-            },
-        )
+        runtime_status = {
+            "env_id": env_id,
+            "main_closure_artifact_status": "derived",
+            **STORE.summarize_main_closure(limit_roots=20, limit_events=50),
+        }
 
     events_payload: dict[str, Any] = {}
     events_valid = False
@@ -642,10 +644,8 @@ def build_main_closure_supervision_summary(spec: dict[str, Any] | None = None) -
         except Exception:
             events_payload = {}
     if not events_payload:
-        events_payload = STORE.load_runtime_value(
-            f"main_closure_events:{env_id}",
-            {"env_id": env_id, "events": []},
-        )
+        closure_summary = STORE.summarize_main_closure(limit_roots=20, limit_events=50)
+        events_payload = {"env_id": env_id, "events": closure_summary.get("events") or []}
 
     if runtime_status_path.exists() and events_path.exists() and runtime_status_valid and events_valid:
         artifact_status = "ready"
@@ -669,6 +669,12 @@ def build_main_closure_supervision_summary(spec: dict[str, Any] | None = None) -
         "binding_source_counts": runtime_status.get("binding_source_counts") or {},
         "recent_event_types": [str(item.get("event_type") or "unknown") for item in recent_events[:5]],
         "roots": list(runtime_status.get("roots") or [])[:10],
+        "finalizers": list(runtime_status.get("finalizers") or [])[:10],
+        "delivery_attempts": list(runtime_status.get("delivery_attempts") or [])[:10],
+        "followups": list(runtime_status.get("followups") or [])[:20],
+        "purity_metrics": runtime_status.get("purity_metrics") or {},
+        "purity_gate_ok": bool((runtime_status.get("purity_metrics") or {}).get("purity_gate_ok", True)),
+        "purity_gate_reasons": list((runtime_status.get("purity_metrics") or {}).get("purity_gate_reasons") or []),
         "events": recent_events,
     }
 
@@ -1276,7 +1282,10 @@ def validate_protocol_event(
     violations: list[dict[str, Any]] = []
     task_status = str(task.get("status") or "")
     task_id = str(task.get("task_id") or "")
-    terminal = task_status == "completed" or STORE.has_task_event(task_id, "visible_completion")
+    core = STORE.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False) if task_id else {}
+    terminal = bool(core.get("is_terminal")) or str(core.get("finalization_state") or "") == "finalized"
+    if not terminal:
+        terminal = task_status == "completed" or STORE.has_task_event(task_id, "visible_completion")
 
     if event_type == "pipeline_receipt":
         receipt = dict(normalized.get("receipt") or {})
@@ -1385,8 +1394,17 @@ def write_task_registry_snapshot() -> None:
         return
     current_spec = current_env_spec()
     env_id = current_spec["id"]
-    bootstrap_status = ensure_openclaw_bootstrap(current_spec)
-    watcher_summary = sync_shared_context_watcher_tasks(current_spec)
+    lightweight_export = bool(CONFIG.get("LIGHTWEIGHT_TASK_REGISTRY_SNAPSHOT", True))
+    bootstrap_status = (
+        STORE.load_runtime_value(f"bootstrap_status:{env_id}", {})
+        if lightweight_export
+        else ensure_openclaw_bootstrap(current_spec)
+    )
+    watcher_summary = (
+        STORE.load_runtime_value(f"watcher_summary:{env_id}", {})
+        if lightweight_export
+        else sync_shared_context_watcher_tasks(current_spec)
+    )
     restart_events = STORE.load_runtime_value(f"restart_events:{env_id}", [])
     if not isinstance(restart_events, list):
         restart_events = []
@@ -1414,30 +1432,45 @@ def write_task_registry_snapshot() -> None:
         if last_user_message == "未知任务":
             last_user_message = STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
         control = STORE.derive_task_control_state(task["task_id"])
+        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
         return {
             **task,
             "question": question,
             "last_user_message": last_user_message,
             "control": control,
             "contract": control.get("contract") or {},
+            "root_task": core.get("root_task"),
+            "current_workflow_run": core.get("current_workflow_run"),
+            "current_finalizer": core.get("current_finalizer"),
+            "current_delivery_attempt": core.get("current_delivery_attempt"),
+            "current_followups": core.get("current_followups") or [],
+            "core_truth": {
+                "workflow_state": core.get("workflow_state") or "",
+                "finalization_state": core.get("finalization_state") or "",
+                "final_status": core.get("final_status") or "",
+                "delivery_state": core.get("delivery_state") or "",
+                "delivery_confirmation_level": core.get("delivery_confirmation_level") or "",
+                "needs_followup": bool(core.get("needs_followup")),
+                "truth_level": "core_projection" if core.get("has_core_projection") else "derived",
+            },
         }
 
     current_payload = enrich_task(current)
     tasks_payload = [task for task in (enrich_task(item) for item in filtered[:20]) if task]
-    facts_current = current_payload or (tasks_payload[0] if tasks_payload else None)
-    session_resolution = (
-        STORE.derive_session_resolution(str((facts_current or {}).get("session_key") or ""))
-        if facts_current and facts_current.get("session_key")
-        else None
-    )
     payload = {
         "generated_at": int(time.time()),
         "env_id": env_id,
         "summary": STORE.summarize_tasks(env_id=env_id),
         "current": current_payload,
         "tasks": tasks_payload,
-        "session_resolution": session_resolution,
+        "session_resolution": None,
     }
+    facts_current = payload.get("current") or (tasks_payload[0] if tasks_payload else None)
+    session_resolution = (
+        STORE.derive_session_resolution(str((facts_current or {}).get("session_key") or ""))
+        if facts_current and facts_current.get("session_key")
+        else None
+    )
     facts_payload = {
         "generated_at": payload["generated_at"],
         "env_id": env_id,
@@ -1446,6 +1479,8 @@ def write_task_registry_snapshot() -> None:
             "question": facts_current.get("question") if facts_current else None,
             "status": facts_current.get("status") if facts_current else None,
             "current_stage": facts_current.get("current_stage") if facts_current else None,
+            "core_truth": (facts_current or {}).get("core_truth") or {},
+            "latest_receipt": (facts_current or {}).get("latest_receipt") or {},
             "approved_summary": (facts_current or {}).get("control", {}).get("approved_summary"),
             "user_visible_progress": (facts_current or {}).get("control", {}).get("user_visible_progress"),
             "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
@@ -1461,9 +1496,70 @@ def write_task_registry_snapshot() -> None:
             "missing_receipts": (facts_current or {}).get("control", {}).get("missing_receipts") or [],
             "control_action": (facts_current or {}).get("control", {}).get("control_action"),
             "phase_statuses": (facts_current or {}).get("control", {}).get("phase_statuses") or [],
+            "timing": (facts_current or {}).get("control", {}).get("timing") or {},
+            "active_phase": (facts_current or {}).get("control", {}).get("active_phase"),
+            "followup_stage": (facts_current or {}).get("control", {}).get("followup_stage"),
+            "heartbeat_age_seconds": (facts_current or {}).get("control", {}).get("heartbeat_age_seconds"),
+            "heartbeat_ok": (facts_current or {}).get("control", {}).get("heartbeat_ok"),
+            "terminal_state_seen": (facts_current or {}).get("control", {}).get("terminal_state_seen"),
+            "control": (facts_current or {}).get("control") or {},
         },
         "session_resolution": session_resolution,
     }
+    main_closure_supervision = {
+        "generated_at": payload["generated_at"],
+        "env_id": env_id,
+        "roots": [],
+        "events": [],
+        "foreground_root_task_id": "",
+        "finalizers": [],
+        "delivery_attempts": [],
+        "followups": [],
+        "purity_metrics": {},
+        "purity_gate_ok": True,
+        "purity_gate_reasons": [],
+    }
+    if not lightweight_export:
+        main_closure_supervision = build_main_closure_supervision_summary(current_spec)
+        foreground_root_id = str(main_closure_supervision.get("foreground_root_task_id") or "")
+        current_root = next(
+            (
+                item
+                for item in list(main_closure_supervision.get("roots") or [])
+                if str(item.get("root_task_id") or "") == foreground_root_id
+            ),
+            None,
+        )
+        if current_root:
+            matching_task = next(
+                (
+                    item
+                    for item in tasks_payload
+                    if str(((item.get("root_task") or {}).get("root_task_id") or "")) == foreground_root_id
+                ),
+                None,
+            )
+            if matching_task:
+                payload["current"] = matching_task
+        facts_current = payload.get("current") or (tasks_payload[0] if tasks_payload else None)
+        session_resolution = (
+            STORE.derive_session_resolution(str((facts_current or {}).get("session_key") or ""))
+            if facts_current and facts_current.get("session_key")
+            else None
+        )
+        payload["session_resolution"] = session_resolution
+        facts_payload["current_root_task"] = current_root
+        if current_root:
+            current_workflow_run_id = str(current_root.get("current_workflow_run_id") or "")
+            if current_workflow_run_id:
+                facts_payload["current_workflow_run"] = STORE.get_workflow_run(current_workflow_run_id)
+            root_task_id = str(current_root.get("root_task_id") or "")
+            if root_task_id:
+                facts_payload["current_followups"] = STORE.list_followups(root_task_id=root_task_id, limit=20)
+                finalizers = STORE.list_finalizer_records(root_task_id=root_task_id, limit=5)
+                deliveries = STORE.list_delivery_attempts(root_task_id=root_task_id, limit=10)
+                facts_payload["current_finalizer"] = finalizers[0] if finalizers else None
+                facts_payload["current_delivery_attempt"] = deliveries[0] if deliveries else None
     data_dir = BASE_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "task-registry-summary.json").write_text(
@@ -1500,7 +1596,6 @@ def write_task_registry_snapshot() -> None:
     }
     learning_supervision = build_learning_supervision_summary(current_spec)
     self_check_supervision = build_self_check_supervision_summary(current_spec)
-    main_closure_supervision = build_main_closure_supervision_summary(current_spec)
     promotion_policy = {
         "generated_at": int(time.time()),
         "reflection_interval_seconds": int(CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600)),
@@ -1603,6 +1698,30 @@ def write_task_registry_snapshot() -> None:
         json.dumps(main_closure_supervision, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    purity_gate = {
+        "generated_at": int(time.time()),
+        "env_id": env_id,
+        "ok": bool(main_closure_supervision.get("purity_gate_ok", True)),
+        "reasons": list(main_closure_supervision.get("purity_gate_reasons") or []),
+        "metrics": dict(main_closure_supervision.get("purity_metrics") or {}),
+    }
+    STORE.save_runtime_value(f"main_closure_purity_gate:{env_id}", purity_gate)
+    (shared_dir / "main-closure-purity-gate.json").write_text(
+        json.dumps(purity_gate, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    if not purity_gate["ok"]:
+        STORE.append_runtime_event(
+            f"main_closure_purity_anomalies:{env_id}",
+            {
+                "env_id": env_id,
+                "status": "failed",
+                "reasons": purity_gate["reasons"],
+                "metrics": purity_gate["metrics"],
+                "timestamp_iso": datetime.now().isoformat(),
+            },
+            limit=100,
+        )
     (shared_dir / "main-closure-events.json").write_text(
         json.dumps(
             {
@@ -1902,6 +2021,68 @@ def record_heartbeat(
     log(f"心跳记录: {task_id} @ {phase} ({progress}%)")
 
 
+def _infer_heartbeat_phase_for_task(task: dict[str, Any]) -> HeartbeatPhase:
+    stage = str(task.get("current_stage") or "").lower()
+    question = str(task.get("question") or "").lower()
+    combined = f"{stage} {question}"
+    if "plan" in combined or "planning" in combined or "方案" in combined:
+        return HeartbeatPhase.PLANNING
+    if "dev" in combined or "implementation" in combined or "开发" in combined or "实现" in combined:
+        return HeartbeatPhase.IMPLEMENTATION
+    if "test" in combined or "testing" in combined or "测试" in combined:
+        return HeartbeatPhase.TESTING
+    if "calculation" in combined or "calculator" in combined or "计算" in combined:
+        return HeartbeatPhase.CALCULATION
+    if "verification" in combined or "verifier" in combined or "校验" in combined or "验证" in combined:
+        return HeartbeatPhase.VERIFICATION
+    if "risk" in combined or "风控" in combined:
+        return HeartbeatPhase.RISK_ASSESSMENT
+    return HeartbeatPhase.IDLE
+
+
+def _infer_heartbeat_progress_for_task(task: dict[str, Any], phase: HeartbeatPhase) -> int:
+    if str(task.get("status") or "") == "blocked":
+        return 0
+    defaults = {
+        HeartbeatPhase.PLANNING: 20,
+        HeartbeatPhase.IMPLEMENTATION: 50,
+        HeartbeatPhase.TESTING: 80,
+        HeartbeatPhase.CALCULATION: 55,
+        HeartbeatPhase.VERIFICATION: 85,
+        HeartbeatPhase.RISK_ASSESSMENT: 65,
+        HeartbeatPhase.IDLE: 10,
+    }
+    return defaults.get(phase, 10)
+
+
+def emit_taskwatcher_heartbeats(limit: int = 100) -> int:
+    watcher = get_task_watcher()
+    active_tasks = STORE.list_active_tasks(limit=limit)
+    now_ms = int(time.time() * 1000)
+    recorded = 0
+    for task in active_tasks:
+        task_id = str(task.get("task_id") or "")
+        session_key = str(task.get("session_key") or "")
+        if not task_id or not session_key:
+            continue
+        phase = _infer_heartbeat_phase_for_task(task)
+        interval_ms = watcher.heartbeat_monitor.config.intervals.get(phase, 30) * 1000
+        last = watcher.heartbeat_monitor.get_last_heartbeat(task_id)
+        if last and now_ms - last.timestamp_ms < max(5000, int(interval_ms * 0.8)):
+            continue
+        heartbeat = Heartbeat(
+            task_id=task_id,
+            session_key=session_key,
+            phase=phase,
+            progress=_infer_heartbeat_progress_for_task(task, phase),
+            timestamp_ms=now_ms,
+            message=str(task.get("current_stage") or task.get("question") or "处理中"),
+        )
+        watcher.heartbeat_monitor.record_heartbeat(heartbeat)
+        recorded += 1
+    return recorded
+
+
 def get_observability_report() -> dict[str, Any]:
     """获取可观测性报告（供外部调用）"""
     watcher = get_task_watcher()
@@ -2005,8 +2186,13 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
         task = STORE.get_task(task_id)
         if not task:
             return
+        core = STORE.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+        root_task_id = str((core.get("root_task") or {}).get("root_task_id") or "")
+        if not root_task_id or root_task_id.startswith("legacy-root:"):
+            STORE.sync_legacy_task_projection(task_id)
         control = STORE.derive_task_control_state(task_id)
-        STORE.reconcile_task_control_action(task, control)
+        if not root_task_id or root_task_id.startswith("legacy-root:"):
+            STORE.reconcile_task_control_action(task, control)
 
     def most_recent_key() -> str | None:
         if not open_dispatches:
@@ -2579,6 +2765,18 @@ def patrol_active_binding_runtime() -> list[dict[str, Any]]:
     specs = all_env_specs()
     bound_env = active_env_id()
     issues: list[dict[str, Any]] = []
+    closure = build_main_closure_supervision_summary()
+    if not bool(closure.get("purity_gate_ok", True)):
+        issues.append(
+            {
+                "code": "main_closure_purity_gate_failed",
+                "message": "主闭环纯净度门禁失败",
+                "details": {
+                    "env_id": closure.get("env_id") or bound_env,
+                    "purity_gate_reasons": list(closure.get("purity_gate_reasons") or []),
+                },
+            }
+        )
     for env_id, spec in specs.items():
         pid = get_listener_pid(int(spec["port"]))
         if env_id == bound_env:
@@ -2864,26 +3062,45 @@ def collect_runtime_anomalies(
 def scan_runtime_anomalies() -> list[dict]:
     """Detect stalled or no-reply situations from runtime logs."""
     runtime_log = resolve_runtime_gateway_log()
-    if not runtime_log.exists():
-        return []
-
     cursor = STORE.load_runtime_value("runtime_anomaly_cursor", {})
     last_signature = cursor.get("last_signature", "")
     stalled_threshold = int(CONFIG.get("STALLED_RESPONSE_THRESHOLD", 90))
     slow_threshold = int(CONFIG.get("SLOW_RESPONSE_THRESHOLD", 30))
+    lines: list[str] = []
+    anomalies: list[dict[str, Any]] = []
+    latest_signature = last_signature
 
-    try:
-        with open(runtime_log) as handle:
-            lines = handle.readlines()[-4000:]
-    except Exception as exc:
-        log(f"读取运行日志失败: {exc}", "ERROR")
-        return []
-    anomalies, latest_signature = collect_runtime_anomalies(
-        lines,
-        now=time.time(),
-        slow_threshold=slow_threshold,
-        stalled_threshold=stalled_threshold,
-    )
+    if runtime_log.exists():
+        try:
+            with open(runtime_log) as handle:
+                lines = handle.readlines()[-4000:]
+        except Exception as exc:
+            log(f"读取运行日志失败: {exc}", "ERROR")
+            lines = []
+        if lines:
+            anomalies, latest_signature = collect_runtime_anomalies(
+                lines,
+                now=time.time(),
+                slow_threshold=slow_threshold,
+                stalled_threshold=stalled_threshold,
+            )
+
+    closure = build_main_closure_supervision_summary()
+    if not bool(closure.get("purity_gate_ok", True)):
+        reasons = list(closure.get("purity_gate_reasons") or [])
+        purity_signature = "purity_gate:" + "|".join(reasons or ["unknown"])
+        anomalies.append(
+            {
+                "signature": purity_signature,
+                "type": "main_closure_purity_gate_failed",
+                "message": "主闭环纯净度门禁失败",
+                "details": {
+                    "env_id": closure.get("env_id") or active_env_id(),
+                    "reasons": reasons,
+                    "timestamp": str(closure.get("generated_at") or int(time.time())),
+                },
+            }
+        )
     latest_signature = latest_signature or last_signature
 
     seen = STORE.load_runtime_value("runtime_anomaly_seen", {})
@@ -2901,6 +3118,9 @@ def scan_runtime_anomalies() -> list[dict]:
             detail_lines = [f"类型: {anomaly['type']}"]
             if anomaly["details"].get("question"):
                 detail_lines.append(f"问题: {anomaly['details']['question']}")
+            reasons = anomaly["details"].get("reasons")
+            if isinstance(reasons, list) and reasons:
+                detail_lines.append(f"原因: {', '.join(str(item) for item in reasons[:3])}")
             if anomaly["details"].get("duration") is not None:
                 detail_lines.append(f"耗时: {anomaly['details']['duration']}秒")
             if anomaly["details"].get("timestamp"):
@@ -3209,10 +3429,8 @@ def enforce_task_registry_control_plane() -> list[dict]:
 
     env_id = current_env_spec()["id"]
     now = int(time.time())
-    grace = int(CONFIG.get("TASK_CONTROL_RECEIPT_GRACE", 180))
     cooldown = int(CONFIG.get("TASK_CONTROL_FOLLOWUP_COOLDOWN", 300))
     max_attempts = max(1, int(CONFIG.get("TASK_CONTROL_MAX_ATTEMPTS", 2)))
-    block_timeout = int(CONFIG.get("TASK_CONTROL_BLOCK_TIMEOUT", 900))
     intrusive_control = bool(CONFIG.get("ENABLE_INTRUSIVE_TASK_CONTROL", False))
     outcomes: list[dict] = []
 
@@ -3220,16 +3438,47 @@ def enforce_task_registry_control_plane() -> list[dict]:
         if task.get("env_id") != env_id:
             continue
 
-        control = STORE.derive_task_control_state(task["task_id"])
-        action = STORE.reconcile_task_control_action(task, control)
-        control = STORE.derive_task_control_state(task["task_id"])
-        contract = control.get("contract") or {}
-        if not (contract.get("required_receipts") or []):
+        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
+        core_supervision = STORE.derive_core_task_supervision(task["task_id"])
+        workflow_state = str(core.get("workflow_state") or "")
+        root_task_id = str((core.get("root_task") or {}).get("root_task_id") or "")
+        native_core_task = (
+            core_supervision.get("truth_level") == "core_projection"
+            and root_task_id
+            and not root_task_id.startswith("legacy-root:")
+        )
+        if (
+            native_core_task
+            and workflow_state in {"accepted", "routed", "queued", "started", "completed"}
+            and not core_supervision.get("needs_followup")
+            and not core_supervision.get("is_blocked")
+            and not core_supervision.get("is_delivery_pending")
+        ):
             continue
+        if workflow_state in {"delivered", "failed", "cancelled", "dlq"}:
+            continue
+        if workflow_state in {"delivery_pending"}:
+            continue
+
+        control = STORE.derive_task_control_state(task["task_id"])
+        if native_core_task:
+            action = control.get("control_action")
+        else:
+            action = STORE.reconcile_task_control_action(task, control)
+            control = STORE.derive_task_control_state(task["task_id"])
+        contract = control.get("contract") or {}
         control_state = str(control.get("control_state") or "")
+        approved_summary = str(control.get("approved_summary") or "")
+        next_action = str(control.get("next_action") or "")
+        next_actor = str(control.get("next_actor") or "")
+        blocked_reason = str(task.get("blocked_reason") or "")
         recovery = control.get("pipeline_recovery") or {}
-        recovery_candidate = bool(recovery) and str(control.get("next_action") or "") == "manual_or_session_recovery"
-        if control_state not in {
+        recovery_candidate = bool(recovery) and next_action == "manual_or_session_recovery"
+        
+        # P0 修复：不再只检查 required_receipts，而是检查 control_state
+        # 即使是 single_agent 合同，如果 control_state 是 received_only 且 idle 超过阈值，也应该 blocked
+        has_required_receipts = bool(contract.get("required_receipts") or [])
+        needs_control_action = control_state in {
             "received_only",
             "planning_only",
             "progress_only",
@@ -3240,16 +3489,51 @@ def enforce_task_registry_control_plane() -> list[dict]:
             "test_running",
             "blocked_unverified",
             "blocked_control_followup_failed",
-        } and not recovery_candidate:
+        } or recovery_candidate or bool(core_supervision.get("needs_followup")) or bool(core_supervision.get("is_blocked"))
+
+        if not has_required_receipts and not needs_control_action:
             continue
 
         idle = max(0, now - int(task.get("last_progress_at") or task.get("updated_at") or now))
         total = max(0, now - int(task.get("started_at") or now))
         action = action or control.get("control_action")
+        action_id = int(action["id"]) if isinstance(action, dict) and action.get("id") else 0
+        native_followup_id = ""
+        if isinstance(action, dict):
+            native_followup_id = str((action.get("details") or {}).get("followup_id") or "")
+
+        def update_native_followup(
+            *,
+            state: str | None = None,
+            suggested_action: str | None = None,
+            resolved_at: int | None = None,
+            metadata_updates: dict[str, Any] | None = None,
+        ) -> None:
+            if not native_core_task or not native_followup_id:
+                return
+            STORE.update_followup(
+                native_followup_id,
+                current_state=state,
+                suggested_action=suggested_action,
+                resolved_at=resolved_at,
+                updated_at=now,
+                metadata_updates=metadata_updates or {},
+            )
         attempts = int((action or {}).get("attempts", 0))
         last_followup_at = int((action or {}).get("last_followup_at", 0))
+        phase = _infer_heartbeat_phase_for_task(task)
+        profile = infer_duration_profile(phase=phase, task=task, control=control)
+        timing = resolve_timing_window(phase=phase, profile=profile)
+        first_window = timing.first_ack_sla if control_state in {"received_only", "planning_only", "progress_only"} else timing.heartbeat_interval
+        hard_timeout = timing.hard_timeout
+        soft_or_hard_stage = "soft" if attempts == 0 else "hard"
+        immediate_followup_states = {
+            "blocked_unverified",
+            "blocked_control_followup_failed",
+        }
+        followup_threshold = 0 if (recovery_candidate or control_state in immediate_followup_states) else first_window
 
-        if idle < grace:
+        if idle < followup_threshold:
             continue
 
         if (
@@ -3262,37 +3546,105 @@ def enforce_task_registry_control_plane() -> list[dict]:
         ):
             continue
 
-        should_block = attempts >= max_attempts or total >= block_timeout
+        if core_supervision.get("truth_level") == "core_projection":
+            core_next_action = str(core_supervision.get("next_action") or "")
+            core_next_actor = str(core_supervision.get("next_actor") or "")
+            if core_next_action:
+                next_action = core_next_action
+            if core_next_actor:
+                next_actor = core_next_actor
+            if core_supervision.get("control_state"):
+                control_state = str(core_supervision.get("control_state") or control_state)
+            if core_supervision.get("recovery_candidate"):
+                recovery_candidate = True
+            if core_supervision.get("followup_summary"):
+                approved_summary = str(core_supervision.get("followup_summary") or "")
+            if core_supervision.get("blocked_reason"):
+                blocked_reason = str(core_supervision.get("blocked_reason") or "")
+            action = action or control.get("control_action")
+
+        if core_supervision.get("truth_level") == "core_projection" and core_supervision.get("is_blocked"):
+            blocked_reason = str(core_supervision.get("blocked_reason") or blocked_reason or "core_blocked")
+            if task.get("status") != "blocked" or str(task.get("blocked_reason") or "") != blocked_reason:
+                STORE.update_task_fields(
+                    task["task_id"],
+                    status="blocked",
+                    current_stage=str(task.get("current_stage") or "等待恢复执行"),
+                    blocked_reason=blocked_reason,
+                    updated_at=now,
+                )
+            if action_id:
+                details = dict(action.get("details") or {})
+                details.update(
+                    {
+                        "truth_level": "core_projection",
+                        "workflow_state": workflow_state,
+                        "followup_types": core_supervision.get("followup_types") or [],
+                    }
+                )
+                STORE.update_control_action(
+                    action_id,
+                    status="pending",
+                    summary=str(core_supervision.get("followup_summary") or approved_summary or "主闭环当前处于阻塞状态。"),
+                    control_state=control_state,
+                    details=details,
+                )
+            else:
+                update_native_followup(
+                    state="open",
+                    metadata_updates={
+                        "summary": str(core_supervision.get("followup_summary") or approved_summary or "主闭环当前处于阻塞状态。"),
+                        "truth_level": "core_projection",
+                        "workflow_state": workflow_state,
+                        "followup_types": core_supervision.get("followup_types") or [],
+                    },
+                )
+
+        should_block = attempts >= max_attempts or total >= hard_timeout or idle >= hard_timeout
         if recovery_candidate and not intrusive_control:
-            summary = "检测到流水线失联；Health Monitor 默认不主动催办内部协作，请先核对 OpenClaw 原生状态。"
+            summary = str(core_supervision.get("followup_summary") or "检测到流水线失联；Health Monitor 默认不主动催办内部协作，请先核对 OpenClaw 原生状态。")
             STORE.record_task_event(
                 task["task_id"],
                 "ops_attention_needed",
                 {
-                    "reason": "pipeline_recovery_needed",
+                    "reason": str(core_supervision.get("blocked_reason") or "pipeline_recovery_needed"),
                     "control_state": control_state,
                     "pipeline_recovery": recovery,
                     "idle": idle,
                     "total": total,
+                    "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-            if action:
+            if action_id:
                 details = dict(action.get("details") or {})
                 details.update(
                     {
                         "policy": "observe_only",
-                        "truth_level": "derived",
+                        "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
                         "pipeline_recovery": recovery,
+                        "followup_types": core_supervision.get("followup_types") or [],
                     }
                 )
                 STORE.update_control_action(
-                    int(action["id"]),
+                    action_id,
                     status="pending",
                     last_followup_at=now,
                     summary=summary,
                     control_state=control_state,
                     details=details,
+                )
+            else:
+                update_native_followup(
+                    state="open",
+                    metadata_updates={
+                        "summary": summary,
+                        "policy": "observe_only",
+                        "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
+                        "pipeline_recovery": recovery,
+                        "followup_types": core_supervision.get("followup_types") or [],
+                        "last_followup_at": now,
+                    },
                 )
             record_change_log(
                 "anomaly",
@@ -3304,7 +3656,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "pipeline_recovery": recovery,
                     "idle": idle,
                     "duration": total,
-                    "truth_level": "derived",
+                    "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
                 },
             )
             outcomes.append(
@@ -3343,7 +3695,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         "timestamp": datetime.now().isoformat(),
                     },
                 )
-                if action:
+                if action_id:
                     details = dict(action.get("details") or {})
                     details.update(
                         {
@@ -3353,7 +3705,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         }
                     )
                     STORE.update_control_action(
-                        int(action["id"]),
+                        action_id,
                         status="blocked",
                         attempts=next_attempts,
                         last_followup_at=now,
@@ -3361,6 +3713,19 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         summary="流水线恢复失败：缺少 session_key，无法自动恢复。",
                         control_state=control_state,
                         details=details,
+                    )
+                else:
+                    update_native_followup(
+                        state="open",
+                        metadata_updates={
+                            "summary": "流水线恢复失败：缺少 session_key，无法自动恢复。",
+                            "recovery_kind": recovery.get("kind") or "",
+                            "recovery_attempt": next_attempts,
+                            "recovery_error": "missing_session_key",
+                            "last_error": "missing_session_key",
+                            "attempts": next_attempts,
+                            "last_followup_at": now,
+                        },
                     )
                 outcomes.append(
                     {
@@ -3421,9 +3786,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         "timestamp": datetime.now().isoformat(),
                     },
                 )
-                if action:
+                if action_id:
                     STORE.update_control_action(
-                        int(action["id"]),
+                        action_id,
                         status="sent",
                         attempts=next_attempts,
                         last_followup_at=now,
@@ -3431,6 +3796,19 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         summary="守护系统已自动发起流水线恢复，等待新的结构化回执。",
                         control_state=control_state,
                         details=details,
+                    )
+                else:
+                    update_native_followup(
+                        state="open",
+                        metadata_updates={
+                            "summary": "守护系统已自动发起流水线恢复，等待新的结构化回执。",
+                            "recovery_kind": recovery.get("kind") or "",
+                            "recovery_attempt": next_attempts,
+                            "recovery_error": "",
+                            "attempts": next_attempts,
+                            "last_followup_at": now,
+                            "last_error": "",
+                        },
                     )
                 record_change_log(
                     "pipeline",
@@ -3481,9 +3859,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         blocked_reason="pipeline_recovery_failed",
                         updated_at=now,
                     )
-                if action:
+                if action_id:
                     STORE.update_control_action(
-                        int(action["id"]),
+                        action_id,
                         status="blocked" if fatal_recovery else "pending",
                         attempts=next_attempts,
                         last_followup_at=now,
@@ -3491,6 +3869,19 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         summary="守护系统恢复流水线失败。" if fatal_recovery else "守护系统恢复流水线失败，将继续重试。",
                         control_state=control_state,
                         details=details,
+                    )
+                else:
+                    update_native_followup(
+                        state="open",
+                        metadata_updates={
+                            "summary": "守护系统恢复流水线失败。" if fatal_recovery else "守护系统恢复流水线失败，将继续重试。",
+                            "recovery_kind": recovery.get("kind") or "",
+                            "recovery_attempt": next_attempts,
+                            "recovery_error": error_kind or "",
+                            "attempts": next_attempts,
+                            "last_followup_at": now,
+                            "last_error": error_kind or "",
+                        },
                     )
                 if fatal_recovery and should_record_control_plane_anomaly(task["task_id"], "pipeline_recovery_failed"):
                     record_change_log(
@@ -3563,12 +3954,49 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "pipeline_recovery": recovery,
                 }
             )
-            if action:
+            if action_id:
+                details = dict(action.get("details") or {})
+                details.update(
+                    {
+                        "duration_profile": profile.value,
+                        "phase": phase.value,
+                        "first_ack_sla": timing.first_ack_sla,
+                        "heartbeat_interval": timing.heartbeat_interval,
+                        "hard_timeout": timing.hard_timeout,
+                        "followup_stage": soft_or_hard_stage,
+                        "status_template": build_user_visible_status_template(
+                            control_state="blocked_unverified" if blocked_reason == "missing_pipeline_receipt" else "blocked_control_followup_failed",
+                            phase=phase,
+                            timing=timing,
+                            heartbeat_ok=False,
+                        ),
+                    }
+                )
                 STORE.update_control_action(
-                    int(action["id"]),
+                    action_id,
                     status="blocked",
                     summary="任务缺少结构化回执，控制面已判阻塞。",
                     control_state=control_state,
+                    details=details,
+                )
+            else:
+                update_native_followup(
+                    state="open",
+                    metadata_updates={
+                        "summary": "任务缺少结构化回执，控制面已判阻塞。",
+                        "duration_profile": profile.value,
+                        "phase": phase.value,
+                        "first_ack_sla": timing.first_ack_sla,
+                        "heartbeat_interval": timing.heartbeat_interval,
+                        "hard_timeout": timing.hard_timeout,
+                        "followup_stage": soft_or_hard_stage,
+                        "status_template": build_user_visible_status_template(
+                            control_state="blocked_unverified" if blocked_reason == "missing_pipeline_receipt" else "blocked_control_followup_failed",
+                            phase=phase,
+                            timing=timing,
+                            heartbeat_ok=False,
+                        ),
+                    },
                 )
             continue
 
@@ -3592,7 +4020,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-            if action:
+            if action_id:
                 details = dict(action.get("details") or {})
                 details.update(
                     {
@@ -3602,12 +4030,23 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     }
                 )
                 STORE.update_control_action(
-                    int(action["id"]),
+                    action_id,
                     status="pending",
                     last_followup_at=now,
                     summary=summary,
                     control_state=control_state,
                     details=details,
+                )
+            else:
+                update_native_followup(
+                    state="open",
+                    metadata_updates={
+                        "summary": summary,
+                        "policy": "observe_only",
+                        "truth_level": "derived",
+                        "missing_receipts": control.get("missing_receipts") or [],
+                        "last_followup_at": now,
+                    },
                 )
             record_change_log(
                 "pipeline",
@@ -3632,6 +4071,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
             continue
 
         if not session_key:
+            blocked_attempts = attempts + 1
             STORE.update_task_fields(
                 task["task_id"],
                 status="blocked",
@@ -3672,12 +4112,52 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "control_state": control_state,
                 }
             )
-            if action:
+            if action_id:
+                details = dict(action.get("details") or {})
+                details.update(
+                    {
+                        "duration_profile": profile.value,
+                        "phase": phase.value,
+                        "first_ack_sla": timing.first_ack_sla,
+                        "heartbeat_interval": timing.heartbeat_interval,
+                        "hard_timeout": timing.hard_timeout,
+                        "followup_stage": soft_or_hard_stage,
+                        "status_template": build_user_visible_status_template(
+                            control_state="blocked_control_followup_failed",
+                            phase=phase,
+                            timing=timing,
+                            heartbeat_ok=False,
+                        ),
+                    }
+                )
                 STORE.update_control_action(
-                    int(action["id"]),
+                    action_id,
                     status="blocked",
                     summary="守护控制面无法继续催办，任务已阻塞。",
                     control_state=control_state,
+                    details=details,
+                )
+            else:
+                update_native_followup(
+                    state="open",
+                    metadata_updates={
+                        "summary": "守护控制面无法继续催办，任务已阻塞。",
+                        "duration_profile": profile.value,
+                        "phase": phase.value,
+                        "first_ack_sla": timing.first_ack_sla,
+                        "heartbeat_interval": timing.heartbeat_interval,
+                        "hard_timeout": timing.hard_timeout,
+                        "followup_stage": soft_or_hard_stage,
+                        "status_template": build_user_visible_status_template(
+                            control_state="blocked_control_followup_failed",
+                            phase=phase,
+                            timing=timing,
+                            heartbeat_ok=False,
+                        ),
+                        "attempts": blocked_attempts,
+                        "last_followup_at": now,
+                        "last_error": "missing_session_key",
+                    },
                 )
             continue
 
@@ -3689,14 +4169,55 @@ def enforce_task_registry_control_plane() -> list[dict]:
         )
         ok, error_kind = send_guardian_followup(session_key, control_message)
         next_attempts = attempts + 1
-        if action:
+        if action_id:
+            details = dict(action.get("details") or {})
+            details.update(
+                {
+                    "duration_profile": profile.value,
+                    "phase": phase.value,
+                    "first_ack_sla": timing.first_ack_sla,
+                    "heartbeat_interval": timing.heartbeat_interval,
+                    "hard_timeout": timing.hard_timeout,
+                    "followup_stage": soft_or_hard_stage,
+                    "status_template": build_user_visible_status_template(
+                        control_state=control_state,
+                        phase=phase,
+                        timing=timing,
+                        heartbeat_ok=False,
+                        followup_stage=soft_or_hard_stage,
+                    ),
+                }
+            )
             STORE.update_control_action(
-                int(action["id"]),
+                action_id,
                 status="sent" if ok else "pending",
                 attempts=next_attempts,
                 last_followup_at=now,
                 last_error=error_kind or "",
                 control_state=control_state,
+                details=details,
+            )
+        else:
+            update_native_followup(
+                state="open",
+                metadata_updates={
+                    "duration_profile": profile.value,
+                    "phase": phase.value,
+                    "first_ack_sla": timing.first_ack_sla,
+                    "heartbeat_interval": timing.heartbeat_interval,
+                    "hard_timeout": timing.hard_timeout,
+                    "followup_stage": soft_or_hard_stage,
+                    "status_template": build_user_visible_status_template(
+                        control_state=control_state,
+                        phase=phase,
+                        timing=timing,
+                        heartbeat_ok=False,
+                        followup_stage=soft_or_hard_stage,
+                    ),
+                    "attempts": next_attempts,
+                    "last_followup_at": now,
+                    "last_error": error_kind or "",
+                },
             )
         STORE.record_task_event(
             task["task_id"],
@@ -3781,9 +4302,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "control_state": control_state,
                 }
             )
-            if action:
+            if action_id:
                 STORE.update_control_action(
-                    int(action["id"]),
+                    action_id,
                     status="blocked",
                     attempts=next_attempts,
                     last_followup_at=now,
@@ -3791,8 +4312,20 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     summary="守护控制面催办失败，任务已阻塞。",
                     control_state=control_state,
                 )
-    capture_control_plane_learnings(outcomes)
-    write_task_registry_snapshot()
+            else:
+                update_native_followup(
+                    state="open",
+                    metadata_updates={
+                        "summary": "守护控制面催办失败，任务已阻塞。",
+                        "attempts": next_attempts,
+                        "last_followup_at": now,
+                        "last_error": error_kind or "",
+                    },
+                )
+    if CONFIG.get("ENABLE_CONTROL_PLANE_LEARNING_CAPTURE", True):
+        capture_control_plane_learnings(outcomes)
+    if outcomes and CONFIG.get("WRITE_TASK_SNAPSHOT_AFTER_CONTROL_PLANE", False):
+        write_task_registry_snapshot()
     return outcomes
 
 
@@ -3896,6 +4429,24 @@ def notify(title: str, message: str, level: str = "info"):
 def restart_gateway():
     """重启 Gateway"""
     spec = current_env_spec()
+    purity_gate = build_main_closure_supervision_summary(spec)
+    if not bool(purity_gate.get("purity_gate_ok", True)):
+        reasons = list(purity_gate.get("purity_gate_reasons") or [])
+        reason_text = ", ".join(str(item) for item in reasons[:3]) or "main_closure_purity_gate_failed"
+        _record_restart_event(
+            source="guardian",
+            target=spec["id"],
+            stage="completed",
+            status="failed",
+            details={"error": reason_text, "message": "主闭环纯净度门禁失败，拒绝重启 Gateway"},
+        )
+        record_change_log(
+            "restart",
+            "主闭环纯净度门禁失败，拒绝重启 Gateway",
+            {"target_env": spec["id"], "purity_gate_reasons": reasons},
+        )
+        log(f"拒绝重启 Gateway: 主闭环纯净度门禁失败 ({reason_text})", "ERROR")
+        return False
     _record_restart_event(
         source="guardian",
         target=spec["id"],
@@ -4055,7 +4606,7 @@ def save_stable_version():
 
 
 def capture_snapshot(label: str) -> bool:
-    """为 primary/official OpenClaw 关键配置创建快照。"""
+    """为当前单环境 OpenClaw 关键配置创建快照。"""
     if not CONFIG.get("ENABLE_SNAPSHOT_RECOVERY", True):
         return False
     created: list[str] = []
@@ -4253,6 +4804,8 @@ def main():
             enforce_task_registry_control_plane()
             run_reflection_cycle()
             
+            emit_taskwatcher_heartbeats()
+
             # 心跳检测 + Guardrail 检查
             check_heartbeat_and_guardrail()
             

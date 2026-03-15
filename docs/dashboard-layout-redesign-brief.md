@@ -21,13 +21,13 @@ The page must answer these questions in order:
 1. Is the active environment healthy right now?
 2. If not, what is the most important problem?
 3. What should the operator do next?
-4. What is the state of `official -> primary` promotion?
+4. Is the current `primary` runtime stable and recoverable?
 5. Where is the deeper evidence if the operator wants to inspect further?
 
 ## Current Problems
 
 - Too many sections compete as primary content.
-- Monitoring, task orchestration, incident triage, and environment promotion are mixed together.
+- Monitoring, task orchestration, incident triage, and runtime control are mixed together.
 - The page lacks one dominant operational narrative.
 - The right rail is important, but the main column is also important, so attention is split.
 - Dense technical evidence appears too early, before the UI establishes what matters now.
@@ -57,7 +57,7 @@ The hero should combine:
 - active environment state
 - overall system verdict
 - current incident or main attention point
-- promotion readiness / current promotion status
+- runtime readiness / current runtime status
 - one clear recommended next action
 
 This should be the first thing users understand.
@@ -73,7 +73,7 @@ Good candidates:
 - CPU / memory pressure
 - session health
 - gateway / guardian status
-- promotion readiness
+- runtime readiness
 
 These should support the hero, not compete with it.
 
@@ -96,17 +96,16 @@ Recent anomalies, progress, and action-worthy changes should live in one clear t
 
 This area should help operators understand causality, not just show isolated cards.
 
-### 6. Environment and Promotion Zone
+### 6. Environment and Runtime Zone
 
-This remains extremely important, but it should be cleanly structured as a release-control module, not a random side block.
+This remains extremely important, but it should be cleanly structured as a runtime-control module, not a random side block.
 
 Must clearly show:
 
 - active env
-- official env
-- readiness to promote
-- promotion stages
-- upgrade action
+- runtime readiness
+- runtime stages
+- restart action
 - rollback meaning/status
 
 This zone should look premium and highly trustworthy.
@@ -128,7 +127,7 @@ This is tertiary content.
 
 Low-priority operational support content stays later on the page.
 
-Do not let it compete with the main monitoring and promotion flow.
+Do not let it compete with the main monitoring and runtime-control flow.
 
 ## Visual Direction
 
@@ -136,7 +135,7 @@ The visual language should feel like:
 
 - AI operations center
 - premium mission control
-- modern release cockpit
+- modern runtime cockpit
 
 Avoid:
 
@@ -189,9 +188,9 @@ The redesign passes only if:
 
 - a first-time viewer can understand the page's main purpose in under 5 seconds
 - the active environment and health status are immediately obvious
-- the operator can clearly distinguish monitoring, action, promotion, and evidence
+- the operator can clearly distinguish monitoring, action, runtime control, and evidence
 - the page feels modern and high-end rather than messy
-- the environment/promotion module feels intentional and trustworthy
+- the environment/runtime module feels intentional and trustworthy
 - the page is still usable on smaller screens
 
 ## Implementation Priority
@@ -200,7 +199,7 @@ Priority order:
 
 1. page structure and hierarchy
 2. hero area
-3. environment and promotion module
+3. environment and runtime module
 4. operations zone
 5. dense evidence readability
 6. final visual polish
@@ -224,7 +223,7 @@ The hero block must combine the following into one visually dominant composition
 - active environment
 - overall system verdict
 - current main issue or current stable status
-- promotion readiness or current promotion state
+- runtime readiness or current runtime state
 - one recommended next action
 
 This hero should feel like the control tower of the page.
@@ -235,13 +234,13 @@ After the hero, the page should be ordered like this:
 
 1. current operations and active agents
 2. recent anomalies / incident timeline / progress
-3. environment and promotion detail zone
+3. environment and runtime detail zone
 4. deep evidence and diagnostics
 5. maintenance / learning / config
 
 ### Explicit Prohibition
 
-Do not keep `environment/promotion` as just another ordinary right-rail box.
+Do not keep `environment/runtime` as just another ordinary right-rail box.
 
 It can still use a side column inside the hero composition or a structured split layout, but it must visually participate in the top narrative of the page.
 
@@ -249,7 +248,7 @@ It can still use a side column inside the hero composition or a structured split
 
 Preferred layout pattern:
 
-- Hero row: wide left command/status surface + right promotion/release surface
+- Hero row: wide left command/status surface + right runtime/recovery surface
 - KPI strip: directly below hero
 - Main body: operations and anomalies first
 - Lower body: evidence and maintenance later
@@ -260,7 +259,7 @@ If a screenshot of the page is taken, the first thing the eye should understand 
 
 - what environment is active
 - whether the system is healthy
-- whether a promotion is ready/running/blocked
+- whether the runtime is ready/running/blocked
 - what the operator should do next
 
 If the screenshot still reads like many same-weight cards, the redesign has failed.

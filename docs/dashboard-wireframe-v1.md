@@ -12,7 +12,7 @@ Within 5 seconds, the operator must understand:
 
 1. which environment is active
 2. whether the system is healthy
-3. whether promotion is ready / running / blocked
+3. whether runtime is ready / running / blocked
 4. what action should be taken next
 
 ## Page Structure
@@ -42,7 +42,7 @@ This is the dominant area at the top of the dashboard.
 Use a 2-column hero composition:
 
 - left side = operational command surface
-- right side = environment + promotion surface
+- right side = environment + runtime-control surface
 
 #### B1. Left Hero Surface
 
@@ -65,10 +65,10 @@ A stacked release-control module inside the hero zone.
 Must contain:
 
 - current active environment summary
-- official environment summary
-- promotion readiness summary
-- promote action
-- promotion stage strip / stage board
+- primary environment summary
+- runtime readiness summary
+- restart action
+- runtime state strip / status board
 
 This is not a sidebar. It is part of the hero.
 
@@ -129,14 +129,14 @@ Must contain:
 
 - environment workflow
 - environment cards
-- promotion summary
-- promotion status board
+- runtime mode summary
+- runtime status board
 
 This is where the operator inspects the full upgrade path after seeing the hero summary.
 
 ### G. Evidence Zone
 
-Below promotion details.
+Below runtime details.
 
 Contains deeper inspection modules:
 
@@ -168,14 +168,14 @@ Contains:
 ### Hero right should embed these existing blocks or summaries of them
 
 - `environment-summary`
-- `promotion-summary`
-- `promotion-status-board`
+- `runtime-mode-summary`
+- `runtime-mode-board`
 
 ### Promotion detail zone keeps the fuller versions
 
 - `environment-workflow`
 - `environment-cards`
-- `promotion-status-board` or a detailed instance of the same content
+- `runtime-mode-board` or a detailed instance of the same content
 
 ## Structural Rules
 

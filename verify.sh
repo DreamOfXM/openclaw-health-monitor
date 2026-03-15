@@ -67,13 +67,21 @@ require("process_coverage_percent" in memory_summary, "missing memory_summary.pr
 require("headline" in incident, "missing incident_summary.headline")
 require("action" in incident, "missing incident_summary.action")
 require("gateway_healthy" in payload, "missing gateway_healthy")
+require("main_closure_purity_gate" in payload, "missing main_closure_purity_gate")
+
+purity_gate = payload.get("main_closure_purity_gate") or {}
+require("ok" in purity_gate, "missing main_closure_purity_gate.ok")
+require(bool(purity_gate.get("ok", False)), "main closure purity gate failed")
 
 print(f"Gateway healthy: {payload.get('gateway_healthy')}")
+print(f"Main closure purity gate: {purity_gate.get('ok')}")
 print(f"CPU: {metrics.get('cpu')}%")
 print(f"Memory: {metrics.get('mem_used')}G / {metrics.get('mem_total')}G")
 print(f"Memory attribution: {memory_summary.get('summary', '-')}")
 print(f"Incident headline: {incident.get('headline', '-')}")
 print(f"Recent events: {len(recent_events)}")
+if not purity_gate.get("ok", True):
+    print(f"Purity gate reasons: {', '.join(str(item) for item in (purity_gate.get('reasons') or []))}")
 
 items = memory_summary.get("items") or []
 for item in items[:4]:

@@ -7,6 +7,169 @@ import hashlib
 import json
 import sqlite3
 import time
+
+UNKNOWN_REASON_CODE = "unknown_reason"
+
+REASON_CODE_ALIASES = {
+    "dispatch_started": "legacy.dispatch_started",
+    "contract_assigned": "legacy.contract_assigned",
+    "stage_progress": "legacy.stage_progress",
+    "visible_completion": "legacy.visible_completion",
+    "legacy_projection": "legacy.projection",
+    "workflow_not_found": "state.workflow_not_found",
+    "workflow_routed": "workflow.routed",
+    "workflow_failed": "workflow.failed",
+    "workflow_cancelled": "workflow.cancelled",
+    "workflow_accepted": "workflow.accepted",
+    "workflow_queued": "workflow.queued",
+    "workflow_resumed": "workflow.resumed",
+    "manual_retry_requested": "workflow.manual_retry_requested",
+    "executor_started": "step.executor_started",
+    "executor_completed": "step.executor_completed",
+    "pipeline_receipt:started": "receipt.pipeline_started",
+    "pipeline_receipt:completed": "receipt.pipeline_completed",
+    "pipeline_receipt:blocked": "receipt.pipeline_blocked",
+    "receipt_adopted_started": "receipt.adopted_started",
+    "receipt_adopted_completed": "receipt.adopted_completed",
+    "receipt_adopted_blocked": "receipt.adopted_blocked",
+    "finalizer_done": "finalizer.completed",
+    "ready": "finalizer.ready",
+    "finalizer_finalized": "finalizer.finalized",
+    "channel_ack": "delivery.confirmed",
+    "delivery_failed": "delivery.failed",
+    "delivery_dlq_entered": "delivery.dlq_entered",
+    "protocol_violation": "protocol.violation",
+    "background_result": "result.late",
+    "blocked_unverified": "followup.blocked_unverified",
+    "missing_pipeline_receipt": "followup.missing_pipeline_receipt",
+    "manual_followup": "followup.manual_followup",
+    "delivery_retry": "followup.delivery_retry",
+    "await_delivery_confirmation": "followup.await_delivery_confirmation",
+}
+
+REASON_CODE_TAXONOMY = {
+    UNKNOWN_REASON_CODE,
+    "legacy.dispatch_started",
+    "legacy.contract_assigned",
+    "legacy.stage_progress",
+    "legacy.visible_completion",
+    "legacy.projection",
+    "state.workflow_not_found",
+    "workflow.accepted",
+    "workflow.routed",
+    "workflow.queued",
+    "workflow.resumed",
+    "workflow.manual_retry_requested",
+    "workflow.failed",
+    "workflow.cancelled",
+    "workflow.delivery_pending",
+    "workflow.delivery_failed",
+    "workflow.dlq",
+    "workflow.ambiguous_success",
+    "step.executor_started",
+    "step.executor_completed",
+    "step.started",
+    "step.completed",
+    "step.blocked",
+    "receipt.pipeline_started",
+    "receipt.pipeline_completed",
+    "receipt.pipeline_blocked",
+    "receipt.adopted_started",
+    "receipt.adopted_completed",
+    "receipt.adopted_blocked",
+    "finalizer.ready",
+    "finalizer.completed",
+    "finalizer.finalized",
+    "delivery.sent",
+    "delivery.observed",
+    "delivery.confirmed",
+    "delivery.failed",
+    "delivery.dlq_entered",
+    "followup.blocked_unverified",
+    "followup.missing_pipeline_receipt",
+    "followup.manual_followup",
+    "followup.delivery_retry",
+    "followup.await_delivery_confirmation",
+    "followup.pipeline_recovery",
+    "followup.protocol_violation",
+    "binding.switched",
+    "binding.run_pointer_switched",
+    "binding.retarget_existing_root",
+    "binding.retarget_new_root",
+    "correction.applied",
+    "protocol.violation",
+    "result.late",
+}
+
+CORE_EVENT_TYPES = {
+    "request_accepted",
+    "workflow_accepted",
+    "workflow_routed",
+    "workflow_queued",
+    "manual_retry_requested",
+    "workflow_resumed",
+    "step_started",
+    "receipt_adopted_started",
+    "receipt_adopted_completed",
+    "receipt_adopted_blocked",
+    "workflow_failed",
+    "workflow_cancelled",
+    "ambiguous_success_detected",
+    "finalizer_finalized",
+    "delivery_sent",
+    "delivery_observed",
+    "delivery_confirmed",
+    "delivery_failed",
+    "delivery_dlq_entered",
+    "followup_requested",
+    "followup_resolved",
+    "followup_closed",
+    "late_result_recorded",
+    "foreground_binding_switched",
+    "workflow_run_pointer_switched",
+    "retarget_to_existing_root",
+    "retarget_to_new_root",
+    "correction_applied",
+}
+
+DEFAULT_DURATION_PROFILES = {
+    "short": {
+        "first_ack_sla": 30,
+        "heartbeat_interval": 45,
+        "hard_timeout": 180,
+        "soft_followup": 30,
+        "hard_followup": 75,
+        "auto_blocked_unverified": 180,
+        "blocked_user_visible": True,
+    },
+    "medium": {
+        "first_ack_sla": 60,
+        "heartbeat_interval": 120,
+        "hard_timeout": 900,
+        "soft_followup": 60,
+        "hard_followup": 180,
+        "auto_blocked_unverified": 900,
+        "blocked_user_visible": True,
+    },
+    "long": {
+        "first_ack_sla": 120,
+        "heartbeat_interval": 300,
+        "hard_timeout": 2700,
+        "soft_followup": 120,
+        "hard_followup": 420,
+        "auto_blocked_unverified": 2700,
+        "blocked_user_visible": True,
+    },
+}
+
+DEFAULT_PHASE_POLICIES = {
+    "planning": "short",
+    "implementation": "long",
+    "testing": "medium",
+    "calculation": "short",
+    "verification": "short",
+    "risk_assessment": "short",
+}
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -214,6 +377,181 @@ class MonitorStateStore:
 
                 CREATE INDEX IF NOT EXISTS idx_watcher_tasks_env_state_updated
                 ON watcher_tasks(env_id, current_state, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS root_tasks (
+                    root_task_id TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL,
+                    origin_request_id TEXT NOT NULL DEFAULT '',
+                    origin_message_id TEXT NOT NULL DEFAULT '',
+                    reply_to_message_id TEXT NOT NULL DEFAULT '',
+                    user_goal_summary TEXT NOT NULL,
+                    intent_type TEXT NOT NULL DEFAULT '',
+                    contract_type TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    state_reason TEXT NOT NULL DEFAULT '',
+                    current_workflow_run_id TEXT NOT NULL DEFAULT '',
+                    active INTEGER NOT NULL DEFAULT 1,
+                    foreground_priority INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    terminal_at INTEGER NOT NULL DEFAULT 0,
+                    finalized_at INTEGER NOT NULL DEFAULT 0,
+                    superseded_by_root_task_id TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_root_tasks_session_updated
+                ON root_tasks(session_key, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS workflow_runs (
+                    workflow_run_id TEXT PRIMARY KEY,
+                    root_task_id TEXT NOT NULL,
+                    parent_workflow_run_id TEXT NOT NULL DEFAULT '',
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    workflow_type TEXT NOT NULL,
+                    intent_type TEXT NOT NULL DEFAULT '',
+                    contract_type TEXT NOT NULL DEFAULT '',
+                    current_state TEXT NOT NULL,
+                    state_reason TEXT NOT NULL DEFAULT '',
+                    current_step_run_id TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    started_at INTEGER NOT NULL DEFAULT 0,
+                    terminal_at INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_workflow_runs_root_updated
+                ON workflow_runs(root_task_id, updated_at DESC);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_runs_idempotency
+                ON workflow_runs(idempotency_key)
+                WHERE idempotency_key != '';
+
+                CREATE TABLE IF NOT EXISTS step_runs (
+                    step_run_id TEXT PRIMARY KEY,
+                    workflow_run_id TEXT NOT NULL,
+                    root_task_id TEXT NOT NULL,
+                    stable_step_key TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    current_state TEXT NOT NULL,
+                    state_reason TEXT NOT NULL DEFAULT '',
+                    latest_receipt_id TEXT NOT NULL DEFAULT '',
+                    latest_heartbeat_seq INTEGER NOT NULL DEFAULT 0,
+                    last_heartbeat_at INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    started_at INTEGER NOT NULL DEFAULT 0,
+                    terminal_at INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_step_runs_workflow_updated
+                ON step_runs(workflow_run_id, updated_at DESC);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_step_runs_stable_key
+                ON step_runs(workflow_run_id, stable_step_key);
+
+                CREATE TABLE IF NOT EXISTS finalizer_records (
+                    finalization_id TEXT PRIMARY KEY,
+                    root_task_id TEXT NOT NULL,
+                    workflow_run_id TEXT NOT NULL,
+                    decision_state TEXT NOT NULL,
+                    final_status TEXT NOT NULL DEFAULT '',
+                    trigger_reason TEXT NOT NULL DEFAULT '',
+                    delivery_state TEXT NOT NULL DEFAULT '',
+                    delivery_attempt_no INTEGER NOT NULL DEFAULT 0,
+                    delivery_channel TEXT NOT NULL DEFAULT '',
+                    last_delivery_error TEXT NOT NULL DEFAULT '',
+                    user_visible_summary TEXT NOT NULL DEFAULT '',
+                    finalized_by TEXT NOT NULL DEFAULT '',
+                    finalized_at INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_finalizer_records_root_updated
+                ON finalizer_records(root_task_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS delivery_attempts (
+                    delivery_attempt_id TEXT PRIMARY KEY,
+                    root_task_id TEXT NOT NULL,
+                    workflow_run_id TEXT NOT NULL,
+                    finalization_id TEXT NOT NULL DEFAULT '',
+                    attempt_no INTEGER NOT NULL,
+                    channel TEXT NOT NULL,
+                    target TEXT NOT NULL DEFAULT '',
+                    confirmation_level TEXT NOT NULL DEFAULT '',
+                    current_state TEXT NOT NULL,
+                    state_reason TEXT NOT NULL DEFAULT '',
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    terminal_at INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_delivery_attempts_root_updated
+                ON delivery_attempts(root_task_id, updated_at DESC);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_attempts_idempotency
+                ON delivery_attempts(idempotency_key)
+                WHERE idempotency_key != '';
+
+                CREATE TABLE IF NOT EXISTS followups (
+                    followup_id TEXT PRIMARY KEY,
+                    root_task_id TEXT NOT NULL,
+                    workflow_run_id TEXT NOT NULL DEFAULT '',
+                    step_run_id TEXT NOT NULL DEFAULT '',
+                    followup_type TEXT NOT NULL,
+                    trigger_reason TEXT NOT NULL DEFAULT '',
+                    current_state TEXT NOT NULL,
+                    suggested_action TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    resolved_at INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_followups_root_updated
+                ON followups(root_task_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS foreground_bindings (
+                    session_key TEXT PRIMARY KEY,
+                    foreground_root_task_id TEXT NOT NULL,
+                    binding_version INTEGER NOT NULL DEFAULT 1,
+                    reason TEXT NOT NULL DEFAULT '',
+                    updated_at INTEGER NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS core_events (
+                    event_id TEXT PRIMARY KEY,
+                    root_task_id TEXT NOT NULL,
+                    workflow_run_id TEXT NOT NULL DEFAULT '',
+                    step_run_id TEXT NOT NULL DEFAULT '',
+                    delivery_attempt_id TEXT NOT NULL DEFAULT '',
+                    followup_id TEXT NOT NULL DEFAULT '',
+                    event_type TEXT NOT NULL,
+                    event_ts INTEGER NOT NULL,
+                    event_seq INTEGER NOT NULL DEFAULT 0,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_core_events_root_order
+                ON core_events(root_task_id, event_ts ASC, event_seq ASC, event_id ASC);
+
+                CREATE INDEX IF NOT EXISTS idx_core_events_workflow_order
+                ON core_events(workflow_run_id, event_ts ASC, event_seq ASC, event_id ASC);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_core_events_idempotency
+                ON core_events(idempotency_key)
+                WHERE idempotency_key != '';
                 """
             )
             columns = {
@@ -234,6 +572,7 @@ class MonitorStateStore:
             ).fetchall()
             dedupe_map: dict[tuple[str, str, str], int] = {}
             duplicate_ids: list[int] = []
+            pending_updates: list[tuple[str, int]] = []
             for row in rows:
                 event_key = hashlib.sha1(
                     f"{row['event_type']}|{row['payload_json'] or '{}'}".encode("utf-8", errors="ignore")
@@ -244,13 +583,16 @@ class MonitorStateStore:
                     needs_rebuild = True
                     continue
                 dedupe_map[marker] = int(row["id"])
-                conn.execute(
-                    "UPDATE task_events SET event_key = ? WHERE id = ?",
-                    (event_key, row["id"]),
-                )
+                pending_updates.append((event_key, int(row["id"])))
 
             if needs_rebuild:
                 conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
+            for event_key, row_id in pending_updates:
+                conn.execute(
+                    "UPDATE task_events SET event_key = ? WHERE id = ?",
+                    (event_key, row_id),
+                )
+            if needs_rebuild:
                 if duplicate_ids:
                     placeholders = ",".join("?" for _ in duplicate_ids)
                     conn.execute(
@@ -410,6 +752,2010 @@ class MonitorStateStore:
                     mem_total,
                 ),
             )
+
+    @staticmethod
+    def _normalize_reason_code(reason: Any, *, fallback: str = UNKNOWN_REASON_CODE) -> str:
+        raw = str(reason or "").strip()
+        if not raw:
+            return fallback
+        alias = REASON_CODE_ALIASES.get(raw)
+        if alias:
+            return alias
+        if raw in REASON_CODE_TAXONOMY:
+            return raw
+        return fallback
+
+    def _normalized_metadata_with_reason(
+        self,
+        metadata: dict[str, Any] | None,
+        *,
+        original_reason: Any,
+        normalized_reason: str,
+    ) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        original = str(original_reason or "").strip()
+        if original and original != normalized_reason:
+            payload.setdefault("original_reason_code", original)
+        return payload
+
+    def upsert_root_task(self, task: dict[str, Any]) -> None:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(task.get("state_reason"))
+        metadata = self._normalized_metadata_with_reason(
+            task.get("metadata"),
+            original_reason=task.get("state_reason"),
+            normalized_reason=normalized_reason,
+        )
+        payload = {
+            "root_task_id": task["root_task_id"],
+            "session_key": task["session_key"],
+            "origin_request_id": task.get("origin_request_id", ""),
+            "origin_message_id": task.get("origin_message_id", ""),
+            "reply_to_message_id": task.get("reply_to_message_id", ""),
+            "user_goal_summary": task.get("user_goal_summary", ""),
+            "intent_type": task.get("intent_type", ""),
+            "contract_type": task.get("contract_type", ""),
+            "status": task.get("status", "open"),
+            "state_reason": normalized_reason,
+            "current_workflow_run_id": task.get("current_workflow_run_id", ""),
+            "active": int(bool(task.get("active", True))),
+            "foreground_priority": int(task.get("foreground_priority", 0)),
+            "created_at": int(task.get("created_at", now)),
+            "updated_at": int(task.get("updated_at", now)),
+            "terminal_at": int(task.get("terminal_at", 0)),
+            "finalized_at": int(task.get("finalized_at", 0)),
+            "superseded_by_root_task_id": task.get("superseded_by_root_task_id", ""),
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO root_tasks(
+                    root_task_id, session_key, origin_request_id, origin_message_id, reply_to_message_id,
+                    user_goal_summary, intent_type, contract_type, status, state_reason,
+                    current_workflow_run_id, active, foreground_priority, created_at, updated_at,
+                    terminal_at, finalized_at, superseded_by_root_task_id, metadata_json
+                )
+                VALUES(
+                    :root_task_id, :session_key, :origin_request_id, :origin_message_id, :reply_to_message_id,
+                    :user_goal_summary, :intent_type, :contract_type, :status, :state_reason,
+                    :current_workflow_run_id, :active, :foreground_priority, :created_at, :updated_at,
+                    :terminal_at, :finalized_at, :superseded_by_root_task_id, :metadata_json
+                )
+                ON CONFLICT(root_task_id) DO UPDATE SET
+                    session_key = excluded.session_key,
+                    origin_request_id = excluded.origin_request_id,
+                    origin_message_id = excluded.origin_message_id,
+                    reply_to_message_id = excluded.reply_to_message_id,
+                    user_goal_summary = excluded.user_goal_summary,
+                    intent_type = excluded.intent_type,
+                    contract_type = excluded.contract_type,
+                    status = excluded.status,
+                    state_reason = excluded.state_reason,
+                    current_workflow_run_id = excluded.current_workflow_run_id,
+                    active = excluded.active,
+                    foreground_priority = excluded.foreground_priority,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    terminal_at = excluded.terminal_at,
+                    finalized_at = excluded.finalized_at,
+                    superseded_by_root_task_id = excluded.superseded_by_root_task_id,
+                    metadata_json = excluded.metadata_json
+                """,
+                payload,
+            )
+
+    def get_root_task(self, root_task_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM root_tasks WHERE root_task_id = ?",
+                (root_task_id,),
+            ).fetchone()
+        return self._row_to_root_task(row)
+
+    def list_root_tasks(self, *, session_key: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        query = "SELECT * FROM root_tasks"
+        params: list[Any] = []
+        if session_key:
+            query += " WHERE session_key = ?"
+            params.append(session_key)
+        query += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [task for row in rows if (task := self._row_to_root_task(row))]
+
+    def upsert_workflow_run(self, workflow: dict[str, Any]) -> None:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(workflow.get("state_reason"))
+        metadata = self._normalized_metadata_with_reason(
+            workflow.get("metadata"),
+            original_reason=workflow.get("state_reason"),
+            normalized_reason=normalized_reason,
+        )
+        payload = {
+            "workflow_run_id": workflow["workflow_run_id"],
+            "root_task_id": workflow["root_task_id"],
+            "parent_workflow_run_id": workflow.get("parent_workflow_run_id", ""),
+            "idempotency_key": workflow.get("idempotency_key", ""),
+            "workflow_type": workflow.get("workflow_type", "direct_main"),
+            "intent_type": workflow.get("intent_type", ""),
+            "contract_type": workflow.get("contract_type", ""),
+            "current_state": workflow.get("current_state", "accepted"),
+            "state_reason": normalized_reason,
+            "current_step_run_id": workflow.get("current_step_run_id", ""),
+            "created_at": int(workflow.get("created_at", now)),
+            "updated_at": int(workflow.get("updated_at", now)),
+            "started_at": int(workflow.get("started_at", 0)),
+            "terminal_at": int(workflow.get("terminal_at", 0)),
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_runs(
+                    workflow_run_id, root_task_id, parent_workflow_run_id, idempotency_key,
+                    workflow_type, intent_type, contract_type, current_state, state_reason,
+                    current_step_run_id, created_at, updated_at, started_at, terminal_at, metadata_json
+                )
+                VALUES(
+                    :workflow_run_id, :root_task_id, :parent_workflow_run_id, :idempotency_key,
+                    :workflow_type, :intent_type, :contract_type, :current_state, :state_reason,
+                    :current_step_run_id, :created_at, :updated_at, :started_at, :terminal_at, :metadata_json
+                )
+                ON CONFLICT(workflow_run_id) DO UPDATE SET
+                    root_task_id = excluded.root_task_id,
+                    parent_workflow_run_id = excluded.parent_workflow_run_id,
+                    idempotency_key = excluded.idempotency_key,
+                    workflow_type = excluded.workflow_type,
+                    intent_type = excluded.intent_type,
+                    contract_type = excluded.contract_type,
+                    current_state = excluded.current_state,
+                    state_reason = excluded.state_reason,
+                    current_step_run_id = excluded.current_step_run_id,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    started_at = excluded.started_at,
+                    terminal_at = excluded.terminal_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                payload,
+            )
+
+    def get_workflow_run(self, workflow_run_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM workflow_runs WHERE workflow_run_id = ?",
+                (workflow_run_id,),
+            ).fetchone()
+        return self._row_to_workflow_run(row)
+
+    def upsert_step_run(self, step: dict[str, Any]) -> None:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(step.get("state_reason"))
+        metadata = self._normalized_metadata_with_reason(
+            step.get("metadata"),
+            original_reason=step.get("state_reason"),
+            normalized_reason=normalized_reason,
+        )
+        payload = {
+            "step_run_id": step["step_run_id"],
+            "workflow_run_id": step["workflow_run_id"],
+            "root_task_id": step["root_task_id"],
+            "stable_step_key": step.get("stable_step_key", ""),
+            "agent_id": step.get("agent_id", ""),
+            "phase": step.get("phase", ""),
+            "current_state": step.get("current_state", "started"),
+            "state_reason": normalized_reason,
+            "latest_receipt_id": step.get("latest_receipt_id", ""),
+            "latest_heartbeat_seq": int(step.get("latest_heartbeat_seq", 0)),
+            "last_heartbeat_at": int(step.get("last_heartbeat_at", 0)),
+            "created_at": int(step.get("created_at", now)),
+            "updated_at": int(step.get("updated_at", now)),
+            "started_at": int(step.get("started_at", 0)),
+            "terminal_at": int(step.get("terminal_at", 0)),
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO step_runs(
+                    step_run_id, workflow_run_id, root_task_id, stable_step_key, agent_id, phase,
+                    current_state, state_reason, latest_receipt_id, latest_heartbeat_seq,
+                    last_heartbeat_at, created_at, updated_at, started_at, terminal_at, metadata_json
+                )
+                VALUES(
+                    :step_run_id, :workflow_run_id, :root_task_id, :stable_step_key, :agent_id, :phase,
+                    :current_state, :state_reason, :latest_receipt_id, :latest_heartbeat_seq,
+                    :last_heartbeat_at, :created_at, :updated_at, :started_at, :terminal_at, :metadata_json
+                )
+                ON CONFLICT(step_run_id) DO UPDATE SET
+                    workflow_run_id = excluded.workflow_run_id,
+                    root_task_id = excluded.root_task_id,
+                    stable_step_key = excluded.stable_step_key,
+                    agent_id = excluded.agent_id,
+                    phase = excluded.phase,
+                    current_state = excluded.current_state,
+                    state_reason = excluded.state_reason,
+                    latest_receipt_id = excluded.latest_receipt_id,
+                    latest_heartbeat_seq = excluded.latest_heartbeat_seq,
+                    last_heartbeat_at = excluded.last_heartbeat_at,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    started_at = excluded.started_at,
+                    terminal_at = excluded.terminal_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                payload,
+            )
+
+    def list_step_runs(self, workflow_run_id: str) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM step_runs
+                WHERE workflow_run_id = ?
+                ORDER BY created_at ASC, step_run_id ASC
+                """,
+                (workflow_run_id,),
+            ).fetchall()
+        return [step for row in rows if (step := self._row_to_step_run(row))]
+
+    def upsert_finalizer_record(self, record: dict[str, Any]) -> None:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(record.get("trigger_reason"))
+        metadata = self._normalized_metadata_with_reason(
+            record.get("metadata"),
+            original_reason=record.get("trigger_reason"),
+            normalized_reason=normalized_reason,
+        )
+        payload = {
+            "finalization_id": record["finalization_id"],
+            "root_task_id": record["root_task_id"],
+            "workflow_run_id": record["workflow_run_id"],
+            "decision_state": record.get("decision_state", "pending_decision"),
+            "final_status": record.get("final_status", ""),
+            "trigger_reason": normalized_reason,
+            "delivery_state": record.get("delivery_state", ""),
+            "delivery_attempt_no": int(record.get("delivery_attempt_no", 0)),
+            "delivery_channel": record.get("delivery_channel", ""),
+            "last_delivery_error": record.get("last_delivery_error", ""),
+            "user_visible_summary": record.get("user_visible_summary", ""),
+            "finalized_by": record.get("finalized_by", ""),
+            "finalized_at": int(record.get("finalized_at", 0)),
+            "created_at": int(record.get("created_at", now)),
+            "updated_at": int(record.get("updated_at", now)),
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO finalizer_records(
+                    finalization_id, root_task_id, workflow_run_id, decision_state, final_status,
+                    trigger_reason, delivery_state, delivery_attempt_no, delivery_channel,
+                    last_delivery_error, user_visible_summary, finalized_by, finalized_at,
+                    created_at, updated_at, metadata_json
+                )
+                VALUES(
+                    :finalization_id, :root_task_id, :workflow_run_id, :decision_state, :final_status,
+                    :trigger_reason, :delivery_state, :delivery_attempt_no, :delivery_channel,
+                    :last_delivery_error, :user_visible_summary, :finalized_by, :finalized_at,
+                    :created_at, :updated_at, :metadata_json
+                )
+                ON CONFLICT(finalization_id) DO UPDATE SET
+                    root_task_id = excluded.root_task_id,
+                    workflow_run_id = excluded.workflow_run_id,
+                    decision_state = excluded.decision_state,
+                    final_status = excluded.final_status,
+                    trigger_reason = excluded.trigger_reason,
+                    delivery_state = excluded.delivery_state,
+                    delivery_attempt_no = excluded.delivery_attempt_no,
+                    delivery_channel = excluded.delivery_channel,
+                    last_delivery_error = excluded.last_delivery_error,
+                    user_visible_summary = excluded.user_visible_summary,
+                    finalized_by = excluded.finalized_by,
+                    finalized_at = excluded.finalized_at,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                payload,
+            )
+
+    def upsert_delivery_attempt(self, attempt: dict[str, Any]) -> None:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(attempt.get("state_reason"))
+        metadata = self._normalized_metadata_with_reason(
+            attempt.get("metadata"),
+            original_reason=attempt.get("state_reason"),
+            normalized_reason=normalized_reason,
+        )
+        payload = {
+            "delivery_attempt_id": attempt["delivery_attempt_id"],
+            "root_task_id": attempt["root_task_id"],
+            "workflow_run_id": attempt["workflow_run_id"],
+            "finalization_id": attempt.get("finalization_id", ""),
+            "attempt_no": int(attempt.get("attempt_no", 1)),
+            "channel": attempt.get("channel", ""),
+            "target": attempt.get("target", ""),
+            "confirmation_level": attempt.get("confirmation_level", ""),
+            "current_state": attempt.get("current_state", "delivery_pending"),
+            "state_reason": normalized_reason,
+            "idempotency_key": attempt.get("idempotency_key", ""),
+            "created_at": int(attempt.get("created_at", now)),
+            "updated_at": int(attempt.get("updated_at", now)),
+            "terminal_at": int(attempt.get("terminal_at", 0)),
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO delivery_attempts(
+                    delivery_attempt_id, root_task_id, workflow_run_id, finalization_id, attempt_no,
+                    channel, target, confirmation_level, current_state, state_reason, idempotency_key,
+                    created_at, updated_at, terminal_at, metadata_json
+                )
+                VALUES(
+                    :delivery_attempt_id, :root_task_id, :workflow_run_id, :finalization_id, :attempt_no,
+                    :channel, :target, :confirmation_level, :current_state, :state_reason, :idempotency_key,
+                    :created_at, :updated_at, :terminal_at, :metadata_json
+                )
+                ON CONFLICT(delivery_attempt_id) DO UPDATE SET
+                    root_task_id = excluded.root_task_id,
+                    workflow_run_id = excluded.workflow_run_id,
+                    finalization_id = excluded.finalization_id,
+                    attempt_no = excluded.attempt_no,
+                    channel = excluded.channel,
+                    target = excluded.target,
+                    confirmation_level = excluded.confirmation_level,
+                    current_state = excluded.current_state,
+                    state_reason = excluded.state_reason,
+                    idempotency_key = excluded.idempotency_key,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    terminal_at = excluded.terminal_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                payload,
+            )
+
+    def upsert_followup(self, followup: dict[str, Any]) -> None:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(followup.get("trigger_reason"))
+        metadata = self._normalized_metadata_with_reason(
+            followup.get("metadata"),
+            original_reason=followup.get("trigger_reason"),
+            normalized_reason=normalized_reason,
+        )
+        payload = {
+            "followup_id": followup["followup_id"],
+            "root_task_id": followup["root_task_id"],
+            "workflow_run_id": followup.get("workflow_run_id", ""),
+            "step_run_id": followup.get("step_run_id", ""),
+            "followup_type": followup.get("followup_type", ""),
+            "trigger_reason": normalized_reason,
+            "current_state": followup.get("current_state", "open"),
+            "suggested_action": followup.get("suggested_action", ""),
+            "created_by": followup.get("created_by", ""),
+            "created_at": int(followup.get("created_at", now)),
+            "updated_at": int(followup.get("updated_at", now)),
+            "resolved_at": int(followup.get("resolved_at", 0)),
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        }
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO followups(
+                    followup_id, root_task_id, workflow_run_id, step_run_id, followup_type,
+                    trigger_reason, current_state, suggested_action, created_by,
+                    created_at, updated_at, resolved_at, metadata_json
+                )
+                VALUES(
+                    :followup_id, :root_task_id, :workflow_run_id, :step_run_id, :followup_type,
+                    :trigger_reason, :current_state, :suggested_action, :created_by,
+                    :created_at, :updated_at, :resolved_at, :metadata_json
+                )
+                ON CONFLICT(followup_id) DO UPDATE SET
+                    root_task_id = excluded.root_task_id,
+                    workflow_run_id = excluded.workflow_run_id,
+                    step_run_id = excluded.step_run_id,
+                    followup_type = excluded.followup_type,
+                    trigger_reason = excluded.trigger_reason,
+                    current_state = excluded.current_state,
+                    suggested_action = excluded.suggested_action,
+                    created_by = excluded.created_by,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    resolved_at = excluded.resolved_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                payload,
+            )
+
+    def get_foreground_binding(self, session_key: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM foreground_bindings WHERE session_key = ?",
+                (session_key,),
+            ).fetchone()
+        return self._row_to_foreground_binding(row)
+
+    def switch_foreground_root_task(
+        self,
+        *,
+        session_key: str,
+        next_root_task_id: str,
+        reason: str,
+        expected_foreground_root_task_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        now = int(time.time())
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT foreground_root_task_id, binding_version FROM foreground_bindings WHERE session_key = ?",
+                (session_key,),
+            ).fetchone()
+            current = str((row["foreground_root_task_id"] if row else "") or "")
+            version = int((row["binding_version"] if row else 0) or 0)
+            if expected_foreground_root_task_id is not None and current != expected_foreground_root_task_id:
+                return False
+            next_version = version + 1 if row else 1
+            conn.execute(
+                """
+                INSERT INTO foreground_bindings(session_key, foreground_root_task_id, binding_version, reason, updated_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_key) DO UPDATE SET
+                    foreground_root_task_id = excluded.foreground_root_task_id,
+                    binding_version = excluded.binding_version,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    session_key,
+                    next_root_task_id,
+                    next_version,
+                    reason,
+                    now,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+        self.record_core_event(
+            {
+                "event_id": f"foreground-binding:{session_key}:{next_version}:{next_root_task_id}",
+                "root_task_id": next_root_task_id,
+                "event_type": "foreground_binding_switched",
+                "event_ts": now,
+                "event_seq": next_version,
+                "idempotency_key": f"foreground-binding:{session_key}:{next_version}",
+                "payload": {
+                    "reason": "binding.switched",
+                    "session_key": session_key,
+                    "previous_root_task_id": current,
+                    "next_root_task_id": next_root_task_id,
+                    "binding_version": next_version,
+                    "binding_reason": reason,
+                    "metadata": metadata or {},
+                },
+            }
+        )
+        return True
+
+    def switch_current_workflow_run(
+        self,
+        *,
+        root_task_id: str,
+        next_workflow_run_id: str,
+        reason: str,
+        expected_workflow_run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(reason, fallback="binding.run_pointer_switched")
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT current_workflow_run_id, metadata_json FROM root_tasks WHERE root_task_id = ?",
+                (root_task_id,),
+            ).fetchone()
+            if not row:
+                return False
+            current_workflow_run_id = str(row["current_workflow_run_id"] or "")
+            if expected_workflow_run_id is not None and current_workflow_run_id != expected_workflow_run_id:
+                return False
+            root_metadata = self._load_json_field(row["metadata_json"], {})
+            updated_metadata = {
+                **root_metadata,
+                "run_pointer": {
+                    "previous_workflow_run_id": current_workflow_run_id,
+                    "next_workflow_run_id": next_workflow_run_id,
+                    "reason_code": normalized_reason,
+                    "switched_at": now,
+                    "metadata": metadata or {},
+                },
+            }
+            conn.execute(
+                """
+                UPDATE root_tasks
+                SET current_workflow_run_id = ?, updated_at = ?, metadata_json = ?
+                WHERE root_task_id = ?
+                """,
+                (next_workflow_run_id, now, json.dumps(updated_metadata, ensure_ascii=False), root_task_id),
+            )
+        self.record_core_event(
+            {
+                "event_id": f"run-pointer:{root_task_id}:{now}:{next_workflow_run_id}",
+                "root_task_id": root_task_id,
+                "workflow_run_id": next_workflow_run_id,
+                "event_type": "workflow_run_pointer_switched",
+                "event_ts": now,
+                "event_seq": 1,
+                "idempotency_key": f"run-pointer:{root_task_id}:{current_workflow_run_id}:{next_workflow_run_id}:{now}",
+                "payload": {
+                    "reason": normalized_reason,
+                    "previous_workflow_run_id": current_workflow_run_id,
+                    "next_workflow_run_id": next_workflow_run_id,
+                    "metadata": metadata or {},
+                },
+            }
+        )
+        return True
+
+    def record_retarget_event(
+        self,
+        *,
+        source_root_task_id: str,
+        workflow_run_id: str,
+        target_root_task_id: str,
+        reason: str,
+        create_new_root: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        now = int(time.time())
+        event_type = "retarget_to_new_root" if create_new_root else "retarget_to_existing_root"
+        normalized_reason = self._normalize_reason_code(
+            reason,
+            fallback="binding.retarget_new_root" if create_new_root else "binding.retarget_existing_root",
+        )
+        return self.record_core_event(
+            {
+                "event_id": f"retarget:{source_root_task_id}:{target_root_task_id}:{now}:{event_type}",
+                "root_task_id": source_root_task_id,
+                "workflow_run_id": workflow_run_id,
+                "event_type": event_type,
+                "event_ts": now,
+                "event_seq": 1,
+                "idempotency_key": f"retarget:{source_root_task_id}:{workflow_run_id}:{target_root_task_id}:{event_type}:{now}",
+                "payload": {
+                    "reason": normalized_reason,
+                    "source_root_task_id": source_root_task_id,
+                    "target_root_task_id": target_root_task_id,
+                    "metadata": metadata or {},
+                },
+            }
+        )
+
+    def record_correction_event(
+        self,
+        *,
+        root_task_id: str,
+        workflow_run_id: str,
+        correction_type: str,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        now = int(time.time())
+        normalized_reason = self._normalize_reason_code(reason, fallback="correction.applied")
+        return self.record_core_event(
+            {
+                "event_id": f"correction:{root_task_id}:{workflow_run_id}:{correction_type}:{now}",
+                "root_task_id": root_task_id,
+                "workflow_run_id": workflow_run_id,
+                "event_type": "correction_applied",
+                "event_ts": now,
+                "event_seq": 1,
+                "idempotency_key": f"correction:{root_task_id}:{workflow_run_id}:{correction_type}:{now}",
+                "payload": {
+                    "reason": normalized_reason,
+                    "correction_type": correction_type,
+                    "metadata": metadata or {},
+                },
+            }
+        )
+
+    def record_core_event(self, event: dict[str, Any]) -> bool:
+        now = int(time.time())
+        event_type = str(event.get("event_type") or "")
+        if event_type not in CORE_EVENT_TYPES:
+            raise ValueError(f"unsupported_core_event_type:{event_type}")
+        payload = dict(event.get("payload") or {})
+        payload["reason"] = self._normalize_reason_code(payload.get("reason"), fallback=UNKNOWN_REASON_CODE)
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        event_id = str(event["event_id"])
+        idempotency_key = str(event.get("idempotency_key") or "")
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO core_events(
+                    event_id, root_task_id, workflow_run_id, step_run_id, delivery_attempt_id,
+                    followup_id, event_type, event_ts, event_seq, idempotency_key, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    str(event.get("root_task_id") or ""),
+                    str(event.get("workflow_run_id") or ""),
+                    str(event.get("step_run_id") or ""),
+                    str(event.get("delivery_attempt_id") or ""),
+                    str(event.get("followup_id") or ""),
+                    event_type,
+                    int(event.get("event_ts") or now),
+                    int(event.get("event_seq") or 0),
+                    idempotency_key,
+                    payload_json,
+                    now,
+                ),
+            )
+        return bool(getattr(cursor, "rowcount", 0))
+
+    def list_core_events(
+        self,
+        *,
+        root_task_id: str | None = None,
+        workflow_run_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT event_id, root_task_id, workflow_run_id, step_run_id, delivery_attempt_id,
+                   followup_id, event_type, event_ts, event_seq, idempotency_key, payload_json, created_at
+            FROM core_events
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if root_task_id:
+            query += " AND root_task_id = ?"
+            params.append(root_task_id)
+        if workflow_run_id:
+            query += " AND workflow_run_id = ?"
+            params.append(workflow_run_id)
+        query += " ORDER BY event_ts ASC, event_seq ASC, event_id ASC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "root_task_id": row["root_task_id"],
+                "workflow_run_id": row["workflow_run_id"],
+                "step_run_id": row["step_run_id"] or "",
+                "delivery_attempt_id": row["delivery_attempt_id"] or "",
+                "followup_id": row["followup_id"] or "",
+                "event_type": row["event_type"],
+                "event_ts": int(row["event_ts"] or 0),
+                "event_seq": int(row["event_seq"] or 0),
+                "idempotency_key": row["idempotency_key"] or "",
+                "payload": json.loads(row["payload_json"] or "{}"),
+                "created_at": int(row["created_at"] or 0),
+            }
+            for row in rows
+        ]
+
+    def list_finalizer_records(self, *, root_task_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = """
+            SELECT * FROM finalizer_records
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if root_task_id:
+            query += " AND root_task_id = ?"
+            params.append(root_task_id)
+        query += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "finalization_id": row["finalization_id"],
+                "root_task_id": row["root_task_id"],
+                "workflow_run_id": row["workflow_run_id"],
+                "decision_state": row["decision_state"] or "",
+                "final_status": row["final_status"] or "",
+                "trigger_reason": row["trigger_reason"] or "",
+                "delivery_state": row["delivery_state"] or "",
+                "delivery_attempt_no": int(row["delivery_attempt_no"] or 0),
+                "delivery_channel": row["delivery_channel"] or "",
+                "last_delivery_error": row["last_delivery_error"] or "",
+                "user_visible_summary": row["user_visible_summary"] or "",
+                "finalized_by": row["finalized_by"] or "",
+                "finalized_at": int(row["finalized_at"] or 0),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "metadata": self._load_json_field(row["metadata_json"], {}),
+            }
+            for row in rows
+        ]
+
+    def get_finalizer_record(self, finalization_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM finalizer_records WHERE finalization_id = ?",
+                (finalization_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "finalization_id": row["finalization_id"],
+            "root_task_id": row["root_task_id"],
+            "workflow_run_id": row["workflow_run_id"],
+            "decision_state": row["decision_state"] or "",
+            "final_status": row["final_status"] or "",
+            "trigger_reason": row["trigger_reason"] or "",
+            "delivery_state": row["delivery_state"] or "",
+            "delivery_attempt_no": int(row["delivery_attempt_no"] or 0),
+            "delivery_channel": row["delivery_channel"] or "",
+            "last_delivery_error": row["last_delivery_error"] or "",
+            "user_visible_summary": row["user_visible_summary"] or "",
+            "finalized_by": row["finalized_by"] or "",
+            "finalized_at": int(row["finalized_at"] or 0),
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+            "metadata": self._load_json_field(row["metadata_json"], {}),
+        }
+
+    def list_delivery_attempts(self, *, root_task_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = """
+            SELECT * FROM delivery_attempts
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if root_task_id:
+            query += " AND root_task_id = ?"
+            params.append(root_task_id)
+        query += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "delivery_attempt_id": row["delivery_attempt_id"],
+                "root_task_id": row["root_task_id"],
+                "workflow_run_id": row["workflow_run_id"],
+                "finalization_id": row["finalization_id"] or "",
+                "attempt_no": int(row["attempt_no"] or 0),
+                "channel": row["channel"] or "",
+                "target": row["target"] or "",
+                "confirmation_level": row["confirmation_level"] or "",
+                "current_state": row["current_state"] or "",
+                "state_reason": row["state_reason"] or "",
+                "idempotency_key": row["idempotency_key"] or "",
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "terminal_at": int(row["terminal_at"] or 0),
+                "metadata": self._load_json_field(row["metadata_json"], {}),
+            }
+            for row in rows
+        ]
+
+    def get_delivery_attempt(self, delivery_attempt_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM delivery_attempts WHERE delivery_attempt_id = ?",
+                (delivery_attempt_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "delivery_attempt_id": row["delivery_attempt_id"],
+            "root_task_id": row["root_task_id"],
+            "workflow_run_id": row["workflow_run_id"],
+            "finalization_id": row["finalization_id"] or "",
+            "attempt_no": int(row["attempt_no"] or 0),
+            "channel": row["channel"] or "",
+            "target": row["target"] or "",
+            "confirmation_level": row["confirmation_level"] or "",
+            "current_state": row["current_state"] or "",
+            "state_reason": row["state_reason"] or "",
+            "idempotency_key": row["idempotency_key"] or "",
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+            "terminal_at": int(row["terminal_at"] or 0),
+            "metadata": self._load_json_field(row["metadata_json"], {}),
+        }
+
+    def list_followups(self, *, root_task_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = """
+            SELECT * FROM followups
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if root_task_id:
+            query += " AND root_task_id = ?"
+            params.append(root_task_id)
+        query += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "followup_id": row["followup_id"],
+                "root_task_id": row["root_task_id"],
+                "workflow_run_id": row["workflow_run_id"] or "",
+                "step_run_id": row["step_run_id"] or "",
+                "followup_type": row["followup_type"] or "",
+                "trigger_reason": row["trigger_reason"] or "",
+                "current_state": row["current_state"] or "",
+                "suggested_action": row["suggested_action"] or "",
+                "created_by": row["created_by"] or "",
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "resolved_at": int(row["resolved_at"] or 0),
+                "metadata": self._load_json_field(row["metadata_json"], {}),
+            }
+            for row in rows
+        ]
+
+    def get_followup(self, followup_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM followups WHERE followup_id = ?",
+                (followup_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "followup_id": row["followup_id"],
+            "root_task_id": row["root_task_id"],
+            "workflow_run_id": row["workflow_run_id"] or "",
+            "step_run_id": row["step_run_id"] or "",
+            "followup_type": row["followup_type"] or "",
+            "trigger_reason": row["trigger_reason"] or "",
+            "current_state": row["current_state"] or "",
+            "suggested_action": row["suggested_action"] or "",
+            "created_by": row["created_by"] or "",
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+            "resolved_at": int(row["resolved_at"] or 0),
+            "metadata": self._load_json_field(row["metadata_json"], {}),
+        }
+
+    def update_followup(
+        self,
+        followup_id: str,
+        *,
+        current_state: str | None = None,
+        suggested_action: str | None = None,
+        resolved_at: int | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+        updated_at: int | None = None,
+    ) -> None:
+        existing = self.get_followup(followup_id)
+        if not existing:
+            return
+        metadata = dict(existing.get("metadata") or {})
+        if metadata_updates:
+            metadata.update(metadata_updates)
+        payload = {
+            **existing,
+            "current_state": current_state if current_state is not None else existing.get("current_state", "open"),
+            "suggested_action": suggested_action if suggested_action is not None else existing.get("suggested_action", ""),
+            "resolved_at": int(resolved_at if resolved_at is not None else existing.get("resolved_at", 0) or 0),
+            "updated_at": int(updated_at or time.time()),
+            "metadata": metadata,
+        }
+        self.upsert_followup(payload)
+
+    def get_latest_foreground_binding(self) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM foreground_bindings
+                ORDER BY updated_at DESC, binding_version DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return self._row_to_foreground_binding(row)
+
+    def summarize_main_closure(self, *, limit_roots: int = 20, limit_events: int = 50) -> dict[str, Any]:
+        roots = self.list_root_tasks(limit=limit_roots)
+        binding = self.get_latest_foreground_binding()
+        finalizers = self.list_finalizer_records(limit=200)
+        delivery_attempts = self.list_delivery_attempts(limit=200)
+        followups = self.list_followups(limit=200)
+        finalizer_by_root = {
+            str(item.get("root_task_id") or ""): item
+            for item in finalizers
+            if item.get("root_task_id")
+        }
+        delivery_by_root = {
+            str(item.get("root_task_id") or ""): item
+            for item in delivery_attempts
+            if item.get("root_task_id")
+        }
+        open_followups_by_root: dict[str, list[dict[str, Any]]] = {}
+        for item in followups:
+            if str(item.get("current_state") or "") in {"resolved", "closed"}:
+                continue
+            root_id = str(item.get("root_task_id") or "")
+            if not root_id:
+                continue
+            open_followups_by_root.setdefault(root_id, []).append(item)
+        root_items: list[dict[str, Any]] = []
+        active_root_count = 0
+        background_root_count = 0
+        finalization_pending_count = 0
+        delivery_failed_count = 0
+        for root in roots:
+            workflow = self.get_workflow_run(str(root.get("current_workflow_run_id") or ""))
+            current_state = str((workflow or {}).get("current_state") or "")
+            root_id = root["root_task_id"]
+            latest_finalizer = finalizer_by_root.get(root_id) or {}
+            latest_delivery = delivery_by_root.get(root_id) or {}
+            root_open_followups = open_followups_by_root.get(root_id) or []
+            if root.get("active"):
+                active_root_count += 1
+            if binding and root["root_task_id"] != binding.get("foreground_root_task_id"):
+                background_root_count += 1
+            if current_state in {"completed", "blocked", "ambiguous_success", "delivery_pending"}:
+                finalization_pending_count += 1
+            if current_state in {"delivery_failed", "dlq"}:
+                delivery_failed_count += 1
+            root_items.append(
+                {
+                    "root_task_id": root["root_task_id"],
+                    "session_key": root["session_key"],
+                    "user_goal_summary": root["user_goal_summary"],
+                    "status": root["status"],
+                    "state_reason": root["state_reason"],
+                    "current_workflow_run_id": root["current_workflow_run_id"],
+                    "workflow_state": current_state,
+                    "foreground": bool(binding and binding.get("foreground_root_task_id") == root["root_task_id"]),
+                    "finalization_state": str(latest_finalizer.get("decision_state") or ""),
+                    "final_status": str(latest_finalizer.get("final_status") or ""),
+                    "delivery_state": str(latest_finalizer.get("delivery_state") or latest_delivery.get("current_state") or ""),
+                    "delivery_confirmation_level": str(latest_delivery.get("confirmation_level") or ""),
+                    "open_followup_count": len(root_open_followups),
+                    "followup_types": [str(item.get("followup_type") or "") for item in root_open_followups[:5]],
+                    "updated_at": root["updated_at"],
+                }
+            )
+        open_followups = [item for item in followups if str(item.get("current_state") or "") not in {"resolved", "closed"}]
+        all_events = self.list_core_events(limit=limit_events)
+        late_result_count = sum(1 for item in all_events if item.get("event_type") == "late_result_recorded")
+        binding_source_counts: dict[str, int] = {}
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT reason, COUNT(*) AS cnt
+                FROM foreground_bindings
+                GROUP BY reason
+                """
+            ).fetchall()
+            workflow_total = int(
+                conn.execute("SELECT COUNT(*) AS cnt FROM workflow_runs").fetchone()["cnt"] or 0
+            )
+            state_without_events_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM workflow_runs wr
+                    LEFT JOIN core_events ce ON ce.workflow_run_id = wr.workflow_run_id
+                    WHERE wr.current_state NOT IN ('', 'accepted')
+                      AND ce.event_id IS NULL
+                    """
+                ).fetchone()["cnt"]
+                or 0
+            )
+            adopted_receipt_without_step_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM core_events ce
+                    LEFT JOIN step_runs sr ON sr.step_run_id = ce.step_run_id
+                    WHERE ce.event_type IN ('receipt_adopted_started', 'receipt_adopted_completed', 'receipt_adopted_blocked')
+                      AND (ce.step_run_id = '' OR sr.step_run_id IS NULL)
+                    """
+                ).fetchone()["cnt"]
+                or 0
+            )
+            legacy_projection_root_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM root_tasks
+                    WHERE intent_type = 'legacy_projection'
+                       OR root_task_id LIKE 'legacy-root:%'
+                    """
+                ).fetchone()["cnt"]
+                or 0
+            )
+            core_root_ids = {
+                str(row["root_task_id"] or "")
+                for row in conn.execute("SELECT root_task_id FROM root_tasks").fetchall()
+            }
+        for row in rows:
+            binding_source_counts[str(row["reason"] or "unknown")] = int(row["cnt"] or 0)
+        shadow_state_hit_count = 0
+        unknown_reason_code_count = 0
+        for task in self.list_tasks(limit=200):
+            task_id = str(task.get("task_id") or "")
+            if not task_id:
+                continue
+            legacy_root = self.get_root_task(self._legacy_root_task_id(task_id))
+            legacy_workflow = self.get_workflow_run(self._legacy_workflow_run_id(task_id))
+            control = self.derive_task_control_state(task_id)
+            control_state = str(control.get("control_state") or "")
+            workflow_state = str((legacy_workflow or {}).get("current_state") or "")
+            if task.get("status") == "completed" and self._legacy_root_task_id(task_id) not in core_root_ids:
+                shadow_state_hit_count += 1
+                continue
+            if control_state == "completed_verified" and workflow_state not in {"completed", "delivery_pending", "delivered"}:
+                shadow_state_hit_count += 1
+            elif (control_state.startswith("blocked") or control_state.endswith("_blocked")) and workflow_state not in {"blocked", "delivery_failed", "dlq", "failed"}:
+                shadow_state_hit_count += 1
+            elif legacy_root and str(legacy_root.get("status") or "") == "closed" and workflow_state not in {"delivered", "failed", "dlq", "cancelled"}:
+                shadow_state_hit_count += 1
+        with self._connection() as conn:
+            unknown_reason_code_count += int(
+                conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM root_tasks WHERE state_reason = ?",
+                    (UNKNOWN_REASON_CODE,),
+                ).fetchone()["cnt"]
+                or 0
+            )
+            unknown_reason_code_count += int(
+                conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM workflow_runs WHERE state_reason = ?",
+                    (UNKNOWN_REASON_CODE,),
+                ).fetchone()["cnt"]
+                or 0
+            )
+            unknown_reason_code_count += int(
+                conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM step_runs WHERE state_reason = ?",
+                    (UNKNOWN_REASON_CODE,),
+                ).fetchone()["cnt"]
+                or 0
+            )
+            unknown_reason_code_count += int(
+                conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM delivery_attempts WHERE state_reason = ?",
+                    (UNKNOWN_REASON_CODE,),
+                ).fetchone()["cnt"]
+                or 0
+            )
+            unknown_reason_code_count += int(
+                conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM finalizer_records WHERE trigger_reason = ?",
+                    (UNKNOWN_REASON_CODE,),
+                ).fetchone()["cnt"]
+                or 0
+            )
+            unknown_reason_code_count += int(
+                conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM followups WHERE trigger_reason = ?",
+                    (UNKNOWN_REASON_CODE,),
+                ).fetchone()["cnt"]
+                or 0
+            )
+            unknown_reason_code_count += int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM core_events
+                    WHERE json_extract(payload_json, '$.reason') = ?
+                    """,
+                    (UNKNOWN_REASON_CODE,),
+                ).fetchone()["cnt"]
+                or 0
+            )
+        purity_gate_reasons: list[str] = []
+        if state_without_events_count > 0:
+            purity_gate_reasons.append("workflow_state_missing_causal_chain")
+        if adopted_receipt_without_step_count > 0:
+            purity_gate_reasons.append("adopted_receipt_without_step_run")
+        if shadow_state_hit_count > 0:
+            purity_gate_reasons.append("shadow_state_detected")
+        if unknown_reason_code_count > 0:
+            purity_gate_reasons.append("unknown_reason_code_detected")
+        if legacy_projection_root_count > 0:
+            purity_gate_reasons.append("legacy_projection_detected")
+        purity_metrics = {
+            "workflow_total": workflow_total,
+            "state_without_causal_chain_count": state_without_events_count,
+            "state_without_causal_chain_ratio": (state_without_events_count / workflow_total) if workflow_total else 0.0,
+            "adopted_receipt_without_step_count": adopted_receipt_without_step_count,
+            "adopted_receipt_without_step_ratio": (adopted_receipt_without_step_count / workflow_total) if workflow_total else 0.0,
+            "shadow_state_hit_count": shadow_state_hit_count,
+            "shadow_state_hit_ratio": (shadow_state_hit_count / workflow_total) if workflow_total else 0.0,
+            "unknown_reason_code_count": unknown_reason_code_count,
+            "legacy_projection_root_count": legacy_projection_root_count,
+            "purity_gate_ok": not purity_gate_reasons,
+            "purity_gate_reasons": purity_gate_reasons,
+        }
+        return {
+            "foreground_root_task_id": str((binding or {}).get("foreground_root_task_id") or ""),
+            "active_root_count": active_root_count,
+            "background_root_count": background_root_count,
+            "adoption_pending_count": len(open_followups),
+            "finalization_pending_count": finalization_pending_count,
+            "delivery_failed_count": delivery_failed_count,
+            "late_result_count": late_result_count,
+            "binding_source_counts": binding_source_counts,
+            "roots": root_items,
+            "finalizers": finalizers[:50],
+            "delivery_attempts": delivery_attempts[:50],
+            "followups": open_followups[:50],
+            "events": all_events[:limit_events],
+            "purity_metrics": purity_metrics,
+        }
+
+    def get_core_closure_snapshot_for_task(
+        self,
+        task_id: str,
+        *,
+        allow_legacy_projection: bool = True,
+    ) -> dict[str, Any]:
+        root_task_id = self._legacy_root_task_id(task_id)
+        root = None
+        legacy_projection_used = False
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM root_tasks
+                WHERE origin_request_id = ?
+                ORDER BY
+                    CASE WHEN root_task_id LIKE 'legacy-root:%' THEN 1 ELSE 0 END ASC,
+                    updated_at DESC,
+                    created_at DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        root = self._row_to_root_task(row)
+        if root:
+            root_task_id = str(root.get("root_task_id") or root_task_id)
+        if not root:
+            root = self.get_root_task(root_task_id)
+        if root and self._is_native_root_task_id(root_task_id):
+            self.purge_legacy_task_projection(task_id)
+        if not root and allow_legacy_projection and self.get_task(task_id):
+            self.sync_legacy_task_projection(task_id)
+            root = self.get_root_task(root_task_id)
+            legacy_projection_used = bool(root)
+        if not root:
+            return {
+                "root_task_id": root_task_id,
+                "root_task": None,
+                "current_workflow_run": None,
+                "current_finalizer": None,
+                "current_delivery_attempt": None,
+                "current_followups": [],
+                "has_core_projection": False,
+                "workflow_state": "",
+                "delivery_state": "",
+                "delivery_confirmation_level": "",
+                "finalization_state": "",
+                "final_status": "",
+                "is_terminal": False,
+                "is_blocked": False,
+                "is_delivery_pending": False,
+                "needs_followup": False,
+                "legacy_projection_used": False,
+            }
+
+        current_workflow_run_id = str(root.get("current_workflow_run_id") or "")
+        workflow = self.get_workflow_run(current_workflow_run_id) if current_workflow_run_id else None
+        finalizers = self.list_finalizer_records(root_task_id=root_task_id, limit=5)
+        deliveries = self.list_delivery_attempts(root_task_id=root_task_id, limit=10)
+        followups = [
+            item
+            for item in self.list_followups(root_task_id=root_task_id, limit=20)
+            if str(item.get("current_state") or "") not in {"resolved", "closed"}
+        ]
+        current_finalizer = finalizers[0] if finalizers else None
+        current_delivery_attempt = deliveries[0] if deliveries else None
+        workflow_state = str((workflow or {}).get("current_state") or "")
+        delivery_state = str(
+            (current_delivery_attempt or {}).get("current_state")
+            or (current_finalizer or {}).get("delivery_state")
+            or ""
+        )
+        delivery_confirmation_level = str((current_delivery_attempt or {}).get("confirmation_level") or "")
+        finalization_state = str((current_finalizer or {}).get("decision_state") or "")
+        final_status = str((current_finalizer or {}).get("final_status") or "")
+        is_terminal = workflow_state in {"delivered", "failed", "cancelled", "dlq"}
+        is_blocked = workflow_state in {"blocked", "delivery_failed", "failed", "dlq"}
+        is_delivery_pending = workflow_state == "delivery_pending"
+        return {
+            "root_task_id": root_task_id,
+            "root_task": root,
+            "current_workflow_run": workflow,
+            "current_finalizer": current_finalizer,
+            "current_delivery_attempt": current_delivery_attempt,
+            "current_followups": followups,
+            "has_core_projection": True,
+            "workflow_state": workflow_state,
+            "delivery_state": delivery_state,
+            "delivery_confirmation_level": delivery_confirmation_level,
+            "finalization_state": finalization_state,
+            "final_status": final_status,
+            "is_terminal": is_terminal,
+            "is_blocked": is_blocked,
+            "is_delivery_pending": is_delivery_pending,
+            "needs_followup": bool(followups),
+            "legacy_projection_used": legacy_projection_used,
+        }
+
+    @staticmethod
+    def _core_followup_next_actor(followup: dict[str, Any]) -> str:
+        metadata = dict(followup.get("metadata") or {})
+        details = dict(metadata.get("details") or {})
+        pipeline_recovery = dict(details.get("pipeline_recovery") or {})
+        candidates = (
+            metadata.get("next_actor"),
+            details.get("next_actor"),
+            pipeline_recovery.get("rebind_target"),
+            metadata.get("rebind_target"),
+            followup.get("created_by"),
+        )
+        for item in candidates:
+            value = str(item or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _core_followup_summary(followup: dict[str, Any], workflow_state: str) -> str:
+        metadata = dict(followup.get("metadata") or {})
+        details = dict(metadata.get("details") or {})
+        summary = str(metadata.get("summary") or "").strip()
+        if summary:
+            return summary
+        reason = str(followup.get("trigger_reason") or workflow_state or "followup").strip()
+        suggested_action = str(followup.get("suggested_action") or details.get("next_action") or "").strip()
+        if suggested_action:
+            return f"{reason}，建议动作={suggested_action}"
+        return reason or "需要进一步跟进"
+
+    @staticmethod
+    def _is_native_root_task_id(root_task_id: str | None) -> bool:
+        value = str(root_task_id or "").strip()
+        return bool(value) and not value.startswith("legacy-root:")
+
+    def _build_core_control_action(
+        self,
+        snapshot: dict[str, Any],
+        core_supervision: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        followups = list(snapshot.get("current_followups") or [])
+        if not followups:
+            return None
+        lead = dict(followups[0] or {})
+        metadata = dict(lead.get("metadata") or {})
+        details = dict(metadata.get("details") or {})
+        summary = (
+            str(metadata.get("summary") or "").strip()
+            or str(core_supervision.get("followup_summary") or "").strip()
+            or self._core_followup_summary(lead, str(snapshot.get("workflow_state") or ""))
+        )
+        return {
+            "id": None,
+            "source": "core_followup",
+            "action_type": str(lead.get("followup_type") or "followup"),
+            "control_state": str(core_supervision.get("control_state") or ""),
+            "status": str(lead.get("current_state") or "open"),
+            "required_receipts": [],
+            "summary": summary,
+            "attempts": int(details.get("recovery_attempt") or metadata.get("attempts") or 0),
+            "last_followup_at": int(lead.get("updated_at") or 0),
+            "last_error": str(details.get("recovery_error") or metadata.get("last_error") or ""),
+            "details": {
+                **details,
+                "source": "core_followup",
+                "followup_id": str(lead.get("followup_id") or ""),
+                "followup_type": str(lead.get("followup_type") or ""),
+                "next_action": str(lead.get("suggested_action") or ""),
+                "next_actor": self._core_followup_next_actor(lead),
+                "status_template": summary,
+            },
+            "created_at": int(lead.get("created_at") or 0),
+            "updated_at": int(lead.get("updated_at") or 0),
+            "resolved_at": int(lead.get("resolved_at") or 0),
+        }
+
+    def derive_core_task_supervision(self, task_id: str) -> dict[str, Any]:
+        snapshot = self.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+        if not snapshot.get("has_core_projection"):
+            return {
+                "truth_level": "derived",
+                "workflow_state": "",
+                "delivery_state": "",
+                "delivery_confirmation_level": "",
+                "finalization_state": "",
+                "final_status": "",
+                "is_terminal": False,
+                "is_blocked": False,
+                "is_delivery_pending": False,
+                "needs_followup": False,
+                "recovery_candidate": False,
+                "next_action": "",
+                "next_actor": "",
+                "followup_summary": "",
+                "followup_types": [],
+                "control_state": "",
+                "blocked_reason": "",
+            }
+
+        workflow_state = str(snapshot.get("workflow_state") or "")
+        workflow_updated_at = int((snapshot.get("current_workflow_run") or {}).get("updated_at") or 0)
+        followups: list[dict[str, Any]] = []
+        for item in list(snapshot.get("current_followups") or []):
+            metadata = dict(item.get("metadata") or {})
+            source = str(metadata.get("source") or "")
+            updated_at = int(item.get("updated_at") or 0)
+            if (
+                source == "legacy_control_action"
+                and workflow_updated_at
+                and updated_at <= workflow_updated_at
+                and workflow_state in {"started", "completed", "delivery_pending", "delivered"}
+            ):
+                continue
+            followups.append(item)
+        lead_followup = followups[0] if followups else {}
+        followup_type = str(lead_followup.get("followup_type") or "")
+        next_action = str(lead_followup.get("suggested_action") or "").strip()
+        next_actor = self._core_followup_next_actor(lead_followup) if lead_followup else ""
+        followup_summary = self._core_followup_summary(lead_followup, workflow_state) if lead_followup else ""
+        blocked_reason = (
+            str((snapshot.get("current_finalizer") or {}).get("last_delivery_error") or "").strip()
+            or str((snapshot.get("current_workflow_run") or {}).get("state_reason") or "").strip()
+            or str((lead_followup or {}).get("trigger_reason") or "").strip()
+        )
+        recovery_candidate = bool(lead_followup) and (
+            followup_type in {"pipeline_recovery", "delivery_retry", "manual_followup", "control_followup"}
+            or next_action in {"manual_or_session_recovery", "delivery_retry", "manual_followup", "await_delivery_confirmation"}
+            or "recovery" in next_action
+            or "retry" in next_action
+        )
+        control_state = ""
+        if workflow_state == "delivered":
+            control_state = "completed_verified"
+        elif workflow_state == "delivery_pending":
+            control_state = "completed_verified"
+        elif workflow_state in {"blocked", "delivery_failed", "failed", "dlq", "cancelled"}:
+            control_state = "blocked_unverified"
+        elif followups:
+            control_state = "progress_only"
+        return {
+            "truth_level": "core_projection",
+            "workflow_state": workflow_state,
+            "delivery_state": str(snapshot.get("delivery_state") or ""),
+            "delivery_confirmation_level": str(snapshot.get("delivery_confirmation_level") or ""),
+            "finalization_state": str(snapshot.get("finalization_state") or ""),
+            "final_status": str(snapshot.get("final_status") or ""),
+            "is_terminal": bool(snapshot.get("is_terminal")),
+            "is_blocked": bool(snapshot.get("is_blocked")),
+            "is_delivery_pending": bool(snapshot.get("is_delivery_pending")),
+            "needs_followup": bool(snapshot.get("needs_followup")),
+            "recovery_candidate": recovery_candidate,
+            "next_action": next_action,
+            "next_actor": next_actor,
+            "followup_summary": followup_summary,
+            "followup_types": [str(item.get("followup_type") or "") for item in followups],
+            "control_state": control_state,
+            "blocked_reason": blocked_reason,
+        }
+
+    def rebuild_workflow_projection(self, workflow_run_id: str) -> dict[str, Any]:
+        workflow = self.get_workflow_run(workflow_run_id)
+        if not workflow:
+            return {
+                "workflow_run_id": workflow_run_id,
+                "current_state": "missing",
+                "state_reason": "workflow_not_found",
+                "finalized": False,
+                "delivered": False,
+                "events_applied": 0,
+            }
+        events = self.list_core_events(workflow_run_id=workflow_run_id, limit=1000)
+        state = str(workflow.get("current_state") or "accepted")
+        state_reason = str(workflow.get("state_reason") or "")
+        finalized = False
+        delivered = False
+        finalization_id = ""
+        delivery_attempt_id = ""
+        current_step_run_id = str(workflow.get("current_step_run_id") or "")
+        current_step_event_ts = 0
+        finalized_at = 0
+        terminal_at = 0
+        delivery_state = ""
+        delivery_confirmation_level = ""
+        followup_ids_to_resolve: set[str] = set()
+        for event in events:
+            event_type = str(event.get("event_type") or "")
+            payload = event.get("payload") or {}
+            event_ts = int(event.get("event_ts") or 0)
+            step_run_id = str(event.get("step_run_id") or "")
+            if step_run_id and (
+                event_ts > current_step_event_ts
+                or (event_ts == current_step_event_ts and step_run_id != current_step_run_id)
+            ):
+                current_step_run_id = step_run_id
+                current_step_event_ts = event_ts
+            if event_type in {"request_accepted", "workflow_accepted"}:
+                state = "accepted"
+                state_reason = str(payload.get("reason") or event_type)
+            elif event_type == "workflow_routed":
+                state = "routed"
+                state_reason = str(payload.get("reason") or "workflow_routed")
+            elif event_type in {"workflow_queued", "manual_retry_requested", "workflow_resumed"}:
+                state = "queued"
+                state_reason = str(payload.get("reason") or event_type)
+            elif event_type in {"step_started", "receipt_adopted_started"}:
+                state = "started"
+                state_reason = str(payload.get("reason") or event_type)
+            elif event_type == "receipt_adopted_completed":
+                state = "completed"
+                state_reason = str(payload.get("reason") or "receipt_adopted_completed")
+            elif event_type == "receipt_adopted_blocked":
+                state = "blocked"
+                state_reason = str(payload.get("reason") or "receipt_adopted_blocked")
+            elif event_type == "workflow_failed":
+                state = "failed"
+                state_reason = str(payload.get("reason") or "workflow_failed")
+            elif event_type == "workflow_cancelled":
+                state = "cancelled"
+                state_reason = str(payload.get("reason") or "workflow_cancelled")
+            elif event_type == "ambiguous_success_detected":
+                state = "ambiguous_success"
+                state_reason = str(payload.get("reason") or "ambiguous_success")
+            elif event_type == "finalizer_finalized":
+                finalized = True
+                finalization_id = str(payload.get("finalization_id") or finalization_id)
+                finalized_at = max(finalized_at, event_ts)
+                if state == "completed":
+                    state = "delivery_pending"
+                    state_reason = str(payload.get("reason") or "finalizer_finalized")
+            elif event_type in {"delivery_sent", "delivery_observed"}:
+                delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
+                delivery_state = event_type
+                delivery_confirmation_level = event_type
+                if finalized and state in {"completed", "delivery_pending"}:
+                    state = "delivery_pending"
+                    state_reason = str(payload.get("reason") or event_type)
+            elif event_type == "delivery_confirmed":
+                delivered = True
+                delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
+                delivery_state = "delivery_confirmed"
+                delivery_confirmation_level = "delivery_confirmed"
+                state = "delivered"
+                state_reason = str(payload.get("reason") or "delivery_confirmed")
+                terminal_at = max(terminal_at, event_ts)
+            elif event_type == "delivery_failed":
+                delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
+                delivery_state = "delivery_failed"
+                delivery_confirmation_level = "delivery_failed"
+                state = "delivery_failed"
+                state_reason = str(payload.get("reason") or "delivery_failed")
+                terminal_at = max(terminal_at, event_ts)
+            elif event_type == "delivery_dlq_entered":
+                delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
+                delivery_state = "delivery_dlq_entered"
+                delivery_confirmation_level = "delivery_failed"
+                state = "dlq"
+                state_reason = str(payload.get("reason") or "delivery_dlq_entered")
+                terminal_at = max(terminal_at, event_ts)
+            elif event_type in {"workflow_failed", "workflow_cancelled"}:
+                terminal_at = max(terminal_at, event_ts)
+            elif event_type in {"followup_resolved", "followup_closed"}:
+                followup_id = str(payload.get("followup_id") or event.get("followup_id") or "")
+                if followup_id:
+                    followup_ids_to_resolve.add(followup_id)
+        projection = {
+            "workflow_run_id": workflow_run_id,
+            "root_task_id": workflow.get("root_task_id") or "",
+            "current_state": state,
+            "state_reason": state_reason,
+            "finalized": finalized,
+            "delivered": delivered,
+            "finalization_id": finalization_id,
+            "delivery_attempt_id": delivery_attempt_id,
+            "current_step_run_id": current_step_run_id,
+            "events_applied": len(events),
+        }
+        if delivery_attempt_id:
+            existing_attempt = self.get_delivery_attempt(delivery_attempt_id)
+            if existing_attempt:
+                self.upsert_delivery_attempt(
+                    {
+                        **existing_attempt,
+                        "confirmation_level": delivery_confirmation_level or existing_attempt.get("confirmation_level", ""),
+                        "current_state": delivery_state or existing_attempt.get("current_state", ""),
+                        "state_reason": state_reason or existing_attempt.get("state_reason", ""),
+                        "updated_at": int(time.time()),
+                        "terminal_at": terminal_at or int(existing_attempt.get("terminal_at") or 0),
+                    }
+                )
+        if finalization_id:
+            existing_finalizer = self.get_finalizer_record(finalization_id)
+            if existing_finalizer:
+                self.upsert_finalizer_record(
+                    {
+                        **existing_finalizer,
+                        "decision_state": "finalized" if finalized else existing_finalizer.get("decision_state", ""),
+                        "delivery_state": delivery_state or existing_finalizer.get("delivery_state", ""),
+                        "last_delivery_error": state_reason
+                        if delivery_state in {"delivery_failed", "delivery_dlq_entered"}
+                        else existing_finalizer.get("last_delivery_error", ""),
+                        "finalized_at": finalized_at or int(existing_finalizer.get("finalized_at") or 0),
+                        "updated_at": int(time.time()),
+                    }
+                )
+        if state in {"delivered", "failed", "cancelled", "dlq"}:
+            for item in self.list_followups(root_task_id=str(workflow.get("root_task_id") or ""), limit=100):
+                if str(item.get("workflow_run_id") or "") != workflow_run_id:
+                    continue
+                if str(item.get("current_state") or "") in {"resolved", "closed"}:
+                    continue
+                followup_ids_to_resolve.add(str(item.get("followup_id") or ""))
+        for followup_id in followup_ids_to_resolve:
+            existing_followup = self.get_followup(followup_id)
+            if not existing_followup or str(existing_followup.get("current_state") or "") in {"resolved", "closed"}:
+                continue
+            self.upsert_followup(
+                {
+                    **existing_followup,
+                    "current_state": "resolved",
+                    "resolved_at": terminal_at or int(time.time()),
+                    "updated_at": int(time.time()),
+                    "metadata": {
+                        **(existing_followup.get("metadata") or {}),
+                        "resolved_by_reducer": True,
+                        "resolved_workflow_state": state,
+                    },
+                }
+            )
+        self.upsert_workflow_run(
+            {
+                **workflow,
+                "current_state": state,
+                "state_reason": state_reason,
+                "current_step_run_id": current_step_run_id,
+                "updated_at": int(time.time()),
+                "terminal_at": terminal_at if state in {"delivered", "failed", "cancelled", "dlq"} and terminal_at else int(workflow.get("terminal_at") or 0),
+                "metadata": {
+                    **(workflow.get("metadata") or {}),
+                    "projection": {
+                        "finalized": finalized,
+                        "delivered": delivered,
+                        "delivery_state": delivery_state,
+                        "delivery_confirmation_level": delivery_confirmation_level,
+                        "current_step_run_id": current_step_run_id,
+                        "events_applied": len(events),
+                    },
+                },
+            }
+        )
+        root = self.get_root_task(str(workflow.get("root_task_id") or ""))
+        if root:
+            root_status = str(root.get("status") or "open")
+            root_active = bool(root.get("active", True))
+            root_terminal_at = int(root.get("terminal_at") or 0)
+            if str(root.get("superseded_by_root_task_id") or ""):
+                root_status = "superseded"
+                root_active = False
+            elif state == "cancelled":
+                root_status = "cancelled"
+                root_active = False
+                root_terminal_at = max(root_terminal_at, terminal_at)
+            elif state in {"delivered", "failed", "dlq"}:
+                root_status = "closed"
+                root_active = False
+                root_terminal_at = max(root_terminal_at, terminal_at)
+            else:
+                root_status = "open"
+                root_active = True
+            self.upsert_root_task(
+                {
+                    **root,
+                    "status": root_status,
+                    "state_reason": state_reason,
+                    "current_workflow_run_id": workflow_run_id,
+                    "active": root_active,
+                    "updated_at": int(time.time()),
+                    "terminal_at": root_terminal_at,
+                    "finalized_at": max(int(root.get("finalized_at") or 0), finalized_at),
+                    "metadata": {
+                        **(root.get("metadata") or {}),
+                        "projection": {
+                            "workflow_state": state,
+                            "delivery_state": delivery_state,
+                            "delivery_confirmation_level": delivery_confirmation_level,
+                            "current_step_run_id": current_step_run_id,
+                        },
+                    },
+                }
+            )
+        return projection
+
+    @staticmethod
+    def _legacy_root_task_id(task_id: str) -> str:
+        return f"legacy-root:{task_id}"
+
+    @staticmethod
+    def _legacy_workflow_run_id(task_id: str) -> str:
+        return f"legacy-run:{task_id}"
+
+    @staticmethod
+    def _legacy_finalization_id(task_id: str) -> str:
+        return f"legacy-finalizer:{task_id}"
+
+    @staticmethod
+    def _legacy_delivery_attempt_id(task_id: str) -> str:
+        return f"legacy-delivery:{task_id}:1"
+
+    @staticmethod
+    def _legacy_step_run_id(task_id: str, agent: str, phase: str) -> str:
+        return f"legacy-step:{task_id}:{agent}:{phase}"
+
+    @staticmethod
+    def _legacy_followup_id(task_id: str, source: str, suffix: str) -> str:
+        return f"legacy-followup:{task_id}:{source}:{suffix}"
+
+    def purge_legacy_task_projection(self, task_id: str) -> None:
+        root_task_id = self._legacy_root_task_id(task_id)
+        workflow_run_id = self._legacy_workflow_run_id(task_id)
+        finalizer_id = self._legacy_finalization_id(task_id)
+        delivery_attempt_id = self._legacy_delivery_attempt_id(task_id)
+        followup_like = f"legacy-followup:{task_id}:%"
+        step_like = f"legacy-step:{task_id}:%"
+        with self._connection() as conn:
+            conn.execute("DELETE FROM root_tasks WHERE root_task_id = ?", (root_task_id,))
+            conn.execute("DELETE FROM workflow_runs WHERE workflow_run_id = ?", (workflow_run_id,))
+            conn.execute("DELETE FROM finalizer_records WHERE finalization_id = ?", (finalizer_id,))
+            conn.execute("DELETE FROM delivery_attempts WHERE delivery_attempt_id = ?", (delivery_attempt_id,))
+            conn.execute("DELETE FROM step_runs WHERE step_run_id LIKE ?", (step_like,))
+            conn.execute("DELETE FROM followups WHERE followup_id LIKE ?", (followup_like,))
+            conn.execute(
+                """
+                DELETE FROM core_events
+                WHERE root_task_id = ?
+                   OR workflow_run_id = ?
+                   OR step_run_id LIKE ?
+                   OR followup_id LIKE ?
+                """,
+                (root_task_id, workflow_run_id, step_like, followup_like),
+            )
+
+    @staticmethod
+    def _legacy_step_state(action: str) -> str:
+        if action == "completed":
+            return "completed"
+        if action == "blocked":
+            return "blocked"
+        return "started"
+
+    @staticmethod
+    def _legacy_root_status(task: dict[str, Any]) -> str:
+        status = str(task.get("status") or "")
+        if status == "completed":
+            return "closed"
+        if status == "blocked":
+            return "open"
+        if status == "background":
+            return "open"
+        if status == "no_reply":
+            return "open"
+        return "open"
+
+    @staticmethod
+    def _legacy_workflow_state(task: dict[str, Any]) -> str:
+        status = str(task.get("status") or "")
+        if status == "blocked":
+            return "blocked"
+        if status in {"completed", "no_reply"}:
+            return "completed"
+        return "accepted"
+
+    def sync_legacy_task_projection(self, task_id: str) -> None:
+        task = self.get_task(task_id)
+        if not task:
+            return
+        root_task_id = self._legacy_root_task_id(task_id)
+        workflow_run_id = self._legacy_workflow_run_id(task_id)
+        root_task = {
+            "root_task_id": root_task_id,
+            "session_key": str(task.get("session_key") or ""),
+            "origin_request_id": task_id,
+            "origin_message_id": task_id,
+            "user_goal_summary": str(task.get("question") or task.get("last_user_message") or ""),
+            "intent_type": "legacy_projection",
+            "contract_type": str((self.get_task_contract(task_id) or {}).get("id") or ""),
+            "status": self._legacy_root_status(task),
+            "state_reason": str(task.get("blocked_reason") or ""),
+            "current_workflow_run_id": workflow_run_id,
+            "active": str(task.get("status") or "") in {"running", "blocked", "background"},
+            "foreground_priority": 0 if str(task.get("status") or "") != "background" else 1,
+            "created_at": int(task.get("created_at") or int(time.time())),
+            "updated_at": int(task.get("updated_at") or int(time.time())),
+            "terminal_at": int(task.get("completed_at") or 0),
+            "finalized_at": int(task.get("completed_at") or 0),
+            "metadata": {"source": "legacy_task_registry", "legacy_task_id": task_id},
+        }
+        self.upsert_root_task(root_task)
+        self.upsert_workflow_run(
+            {
+                "workflow_run_id": workflow_run_id,
+                "root_task_id": root_task_id,
+                "idempotency_key": workflow_run_id,
+                "workflow_type": str((self.get_task_contract(task_id) or {}).get("id") or "legacy_projection"),
+                "intent_type": "legacy_projection",
+                "contract_type": str((self.get_task_contract(task_id) or {}).get("id") or ""),
+                "current_state": self._legacy_workflow_state(task),
+                "state_reason": str(task.get("blocked_reason") or ""),
+                "created_at": int(task.get("created_at") or int(time.time())),
+                "updated_at": int(task.get("updated_at") or int(time.time())),
+                "started_at": int(task.get("started_at") or 0),
+                "terminal_at": int(task.get("completed_at") or 0),
+                "metadata": {"source": "legacy_task_registry", "legacy_task_id": task_id},
+            }
+        )
+        if str(task.get("status") or "") != "background":
+            self.switch_foreground_root_task(
+                session_key=str(task.get("session_key") or ""),
+                next_root_task_id=root_task_id,
+                reason="legacy_task_projection",
+                metadata={"legacy_task_id": task_id},
+            )
+
+        events = self.list_task_events(task_id, limit=200)
+        for item in sorted(events, key=lambda event: (int(event.get("created_at") or 0), str(event.get("event_key") or ""))):
+            event_type = str(item.get("event_type") or "")
+            payload = item.get("payload") or {}
+            created_at = int(item.get("created_at") or int(time.time()))
+            event_key = str(item.get("event_key") or hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest())
+            core_event: dict[str, Any] | None = None
+            if event_type == "dispatch_started":
+                core_event = {
+                    "event_id": f"legacy:{task_id}:dispatch_started:{event_key}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "event_type": "workflow_accepted",
+                    "event_ts": created_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:workflow_accepted:{event_key}",
+                    "payload": {"reason": "dispatch_started", **payload},
+                }
+            elif event_type == "contract_assigned":
+                core_event = {
+                    "event_id": f"legacy:{task_id}:contract_assigned:{event_key}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "event_type": "workflow_routed",
+                    "event_ts": created_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:workflow_routed:{event_key}",
+                    "payload": {"reason": "contract_assigned", **payload},
+                }
+            elif event_type == "stage_progress":
+                core_event = {
+                    "event_id": f"legacy:{task_id}:stage_progress:{event_key}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "event_type": "workflow_queued",
+                    "event_ts": created_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:workflow_queued:{event_key}",
+                    "payload": {"reason": "stage_progress", **payload},
+                }
+            elif event_type == "pipeline_receipt":
+                receipt = dict(payload.get("receipt") or {})
+                agent = str(receipt.get("agent") or "unknown")
+                phase = str(receipt.get("phase") or "execution")
+                action = str(receipt.get("action") or "started")
+                step_run_id = self._legacy_step_run_id(task_id, agent, phase)
+                self.upsert_step_run(
+                    {
+                        "step_run_id": step_run_id,
+                        "workflow_run_id": workflow_run_id,
+                        "root_task_id": root_task_id,
+                        "stable_step_key": f"{agent}:{phase}",
+                        "agent_id": agent,
+                        "phase": phase,
+                        "current_state": self._legacy_step_state(action),
+                        "state_reason": str(receipt.get("evidence") or ""),
+                        "latest_receipt_id": f"legacy-receipt:{task_id}:{event_key}",
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "started_at": created_at,
+                        "terminal_at": created_at if action in {"completed", "blocked"} else 0,
+                        "metadata": {"source": "legacy_task_registry", "receipt": receipt},
+                    }
+                )
+                mapped_event = {
+                    "started": "receipt_adopted_started",
+                    "completed": "receipt_adopted_completed",
+                    "blocked": "receipt_adopted_blocked",
+                }.get(action, "receipt_adopted_started")
+                core_event = {
+                    "event_id": f"legacy:{task_id}:pipeline_receipt:{event_key}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "step_run_id": step_run_id,
+                    "event_type": mapped_event,
+                    "event_ts": created_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:pipeline_receipt:{event_key}",
+                    "payload": {"reason": f"pipeline_receipt:{action}", "receipt": receipt},
+                }
+            elif event_type == "visible_completion":
+                finalization_id = self._legacy_finalization_id(task_id)
+                delivery_attempt_id = self._legacy_delivery_attempt_id(task_id)
+                self.upsert_finalizer_record(
+                    {
+                        "finalization_id": finalization_id,
+                        "root_task_id": root_task_id,
+                        "workflow_run_id": workflow_run_id,
+                        "decision_state": "finalized",
+                        "final_status": "completed",
+                        "trigger_reason": "visible_completion",
+                        "delivery_state": "delivery_confirmed",
+                        "delivery_attempt_no": 1,
+                        "delivery_channel": str(task.get("channel") or ""),
+                        "user_visible_summary": str(payload.get("message") or ""),
+                        "finalized_by": "legacy_projection",
+                        "finalized_at": created_at,
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "metadata": {"source": "legacy_task_registry"},
+                    }
+                )
+                self.upsert_delivery_attempt(
+                    {
+                        "delivery_attempt_id": delivery_attempt_id,
+                        "root_task_id": root_task_id,
+                        "workflow_run_id": workflow_run_id,
+                        "finalization_id": finalization_id,
+                        "attempt_no": 1,
+                        "channel": str(task.get("channel") or ""),
+                        "target": str(task.get("session_key") or ""),
+                        "confirmation_level": "delivery_confirmed",
+                        "current_state": "delivery_confirmed",
+                        "state_reason": "visible_completion",
+                        "idempotency_key": delivery_attempt_id,
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "terminal_at": created_at,
+                        "metadata": {
+                            "source": "legacy_task_registry",
+                            "message": str(payload.get("message") or ""),
+                        },
+                    }
+                )
+                core_event = {
+                    "event_id": f"legacy:{task_id}:visible_completion:{event_key}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "event_type": "finalizer_finalized",
+                    "event_ts": created_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:finalizer_finalized:{event_key}",
+                    "payload": {
+                        "reason": "visible_completion",
+                        "finalization_id": self._legacy_finalization_id(task_id),
+                        **payload,
+                    },
+                }
+                self.record_core_event(
+                    {
+                        "event_id": f"legacy:{task_id}:delivery_confirmed:{event_key}",
+                        "root_task_id": root_task_id,
+                        "workflow_run_id": workflow_run_id,
+                        "event_type": "delivery_confirmed",
+                        "event_ts": created_at,
+                        "event_seq": 2,
+                        "idempotency_key": f"legacy:{task_id}:delivery_confirmed:{event_key}",
+                        "payload": {
+                            "reason": "visible_completion",
+                            "delivery_attempt_id": delivery_attempt_id,
+                            "delivery_channel": str(task.get("channel") or ""),
+                            **payload,
+                        },
+                    }
+                )
+            elif event_type == "protocol_violation":
+                followup_id = self._legacy_followup_id(task_id, "protocol", event_key)
+                self.upsert_followup(
+                    {
+                        "followup_id": followup_id,
+                        "root_task_id": root_task_id,
+                        "workflow_run_id": workflow_run_id,
+                        "followup_type": "protocol_followup",
+                        "trigger_reason": "protocol_violation",
+                        "current_state": "open",
+                        "suggested_action": "manual_followup",
+                        "created_by": "legacy_projection",
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "metadata": {"source": "legacy_task_registry", **payload},
+                    }
+                )
+                core_event = {
+                    "event_id": f"legacy:{task_id}:protocol_violation:{event_key}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "event_type": "followup_requested",
+                    "event_ts": created_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:followup_requested:{event_key}",
+                    "payload": {
+                        "reason": "protocol_violation",
+                        "followup_id": followup_id,
+                        **payload,
+                    },
+                }
+            elif event_type == "background_result":
+                core_event = {
+                    "event_id": f"legacy:{task_id}:background_result:{event_key}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "event_type": "late_result_recorded",
+                    "event_ts": created_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:late_result_recorded:{event_key}",
+                    "payload": {"reason": "background_result", **payload},
+                }
+            if core_event:
+                self.record_core_event(core_event)
+
+        control_actions = self.list_task_control_actions(task_id=task_id, statuses=["pending", "sent", "blocked"], limit=20)
+        for item in control_actions:
+            followup_id = self._legacy_followup_id(task_id, "control", str(item["id"]))
+            updated_at = int(item.get("updated_at") or int(time.time()))
+            current_state = "open" if str(item.get("status") or "") in {"pending", "sent", "blocked"} else "resolved"
+            self.upsert_followup(
+                {
+                    "followup_id": followup_id,
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "followup_type": str(item.get("action_type") or "control_action"),
+                    "trigger_reason": str(item.get("control_state") or "control_action"),
+                    "current_state": current_state,
+                    "suggested_action": str((item.get("details") or {}).get("next_action") or ""),
+                    "created_by": "guardian",
+                    "created_at": int(item.get("created_at") or updated_at),
+                    "updated_at": updated_at,
+                    "resolved_at": int(item.get("resolved_at") or 0),
+                    "metadata": {
+                        "source": "legacy_control_action",
+                        "control_action_id": item["id"],
+                        "summary": item.get("summary") or "",
+                        "required_receipts": item.get("required_receipts") or [],
+                        "details": item.get("details") or {},
+                    },
+                }
+            )
+            event_type = "followup_requested" if current_state == "open" else "followup_resolved"
+            self.record_core_event(
+                {
+                    "event_id": f"legacy:{task_id}:control_followup:{item['id']}:{current_state}",
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": workflow_run_id,
+                    "followup_id": followup_id,
+                    "event_type": event_type,
+                    "event_ts": updated_at,
+                    "event_seq": 1,
+                    "idempotency_key": f"legacy:{task_id}:control_followup:{item['id']}:{current_state}",
+                    "payload": {
+                        "reason": str(item.get("control_state") or "control_action"),
+                        "followup_id": followup_id,
+                        "control_action_id": item["id"],
+                        "summary": item.get("summary") or "",
+                        "suggested_action": str((item.get("details") or {}).get("next_action") or ""),
+                    },
+                }
+            )
+        self.rebuild_workflow_projection(workflow_run_id)
 
     def upsert_task(self, task: dict[str, Any]) -> None:
         now = int(time.time())
@@ -848,6 +3194,8 @@ class MonitorStateStore:
         now = int(time.time())
         task_id = task["task_id"]
         env_id = str(task.get("env_id") or "primary")
+        core_snapshot = self.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+        root_task_id = str((core_snapshot.get("root_task") or {}).get("root_task_id") or "")
         next_action = str(control.get("next_action") or "none")
         summary = str(control.get("approved_summary") or "")
         missing = list(control.get("missing_receipts") or [])
@@ -868,6 +3216,18 @@ class MonitorStateStore:
             statuses=["pending", "sent", "blocked"],
             limit=20,
         )
+
+        if self._is_native_root_task_id(root_task_id):
+            with self._connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE task_control_actions
+                    SET status = 'resolved', summary = ?, control_state = ?, updated_at = ?, resolved_at = ?
+                    WHERE task_id = ? AND status IN ('pending', 'sent', 'blocked')
+                    """,
+                    (summary, control_state, now, now, task_id),
+                )
+            return control.get("control_action")
 
         if next_action == "none":
             with self._connection() as conn:
@@ -1022,6 +3382,108 @@ class MonitorStateStore:
         self.update_task_fields(task_id, **fields)
         return True
 
+    @staticmethod
+    def _infer_active_phase(task: dict[str, Any], latest_receipt: dict[str, Any], control_state: str) -> str:
+        receipt_phase = str(latest_receipt.get("phase") or "").strip().lower()
+        if receipt_phase in DEFAULT_PHASE_POLICIES:
+            return receipt_phase
+        stage = str(task.get("current_stage") or "").strip().lower()
+        for phase in DEFAULT_PHASE_POLICIES:
+            if phase in stage:
+                return phase
+        mapping = {
+            "planning_only": "planning",
+            "dev_running": "implementation",
+            "awaiting_test": "testing",
+            "test_running": "testing",
+            "calculator_running": "calculation",
+            "awaiting_verifier": "verification",
+            "received_only": "planning",
+            "progress_only": "implementation",
+        }
+        return mapping.get(control_state, "planning")
+
+    @staticmethod
+    def _resolve_timing_metadata(contract: dict[str, Any], phase: str) -> dict[str, Any]:
+        policies = dict(DEFAULT_PHASE_POLICIES)
+        policies.update(contract.get("phase_policies") or {})
+        profile = str(policies.get(phase) or "medium")
+        profiles = dict(DEFAULT_DURATION_PROFILES)
+        profiles.update(contract.get("duration_profiles") or {})
+        timing = dict(DEFAULT_DURATION_PROFILES.get(profile, DEFAULT_DURATION_PROFILES["medium"]))
+        timing.update((profiles.get(profile) or {}))
+        first_ack_sla = int(timing.get("first_ack_sla") or 0)
+        heartbeat_interval = int(timing.get("heartbeat_interval") or 0)
+        hard_timeout = int(timing.get("hard_timeout") or 0)
+        timing["soft_followup"] = int(timing.get("soft_followup") or first_ack_sla)
+        timing["hard_followup"] = int(timing.get("hard_followup") or min(hard_timeout, first_ack_sla + heartbeat_interval))
+        timing["auto_blocked_unverified"] = int(timing.get("auto_blocked_unverified") or hard_timeout)
+        timing["blocked_user_visible"] = bool(timing.get("blocked_user_visible", True))
+        timing["profile"] = profile
+        timing["phase"] = phase
+        return timing
+
+    @staticmethod
+    def _derive_followup_stage(task: dict[str, Any], control_action: dict[str, Any] | None, timing: dict[str, Any], *, now: int) -> str | None:
+        attempts = int((control_action or {}).get("attempts") or 0)
+        action_status = str((control_action or {}).get("status") or "")
+        if attempts >= 2 or str(task.get("blocked_reason") or "") in {"missing_pipeline_receipt", "control_followup_failed"}:
+            return "blocked"
+        started_at = int(task.get("started_at") or now)
+        last_progress_at = int(task.get("last_progress_at") or started_at)
+        first_ack_sla = int(timing.get("first_ack_sla") or 0)
+        heartbeat_interval = int(timing.get("heartbeat_interval") or 0)
+        hard_timeout = int(timing.get("hard_timeout") or 0)
+        since_start = max(0, now - started_at)
+        since_progress = max(0, now - last_progress_at)
+        if hard_timeout and (since_start >= hard_timeout or since_progress >= hard_timeout):
+            if action_status in {"sent", "blocked"} or attempts > 0:
+                return "blocked"
+            return "soft"
+        if attempts >= 1 or (action_status in {"sent", "blocked"} and first_ack_sla and since_progress >= first_ack_sla + heartbeat_interval):
+            return "hard"
+        if first_ack_sla and (since_start >= first_ack_sla or since_progress >= heartbeat_interval):
+            return "soft"
+        return None
+
+    def _derive_v2_truth_snapshot(
+        self,
+        *,
+        contract: dict[str, Any],
+        flags: dict[str, bool],
+        seen_receipts: set[str],
+        task_status: str,
+        blocked_reason: str,
+    ) -> dict[str, Any]:
+        terminal_receipts = list(contract.get("terminal_receipts") or [])
+        terminal_seen = [item for item in terminal_receipts if item in seen_receipts]
+        has_structured_start = bool(flags.get("pipeline_receipt"))
+        has_structured_completion = any(
+            item.endswith(":completed") and item in seen_receipts for item in terminal_receipts
+        )
+        delivered = bool(terminal_seen) and task_status == "completed"
+        if blocked_reason == "missing_pipeline_receipt":
+            v2_state = "blocked"
+        elif delivered:
+            v2_state = "delivered"
+        elif has_structured_completion:
+            v2_state = "awaiting_delivery"
+        elif has_structured_start:
+            v2_state = "confirmed"
+        elif flags.get("dispatch_started") or flags.get("dispatch_completed"):
+            v2_state = "received"
+        else:
+            v2_state = "unknown"
+        return {
+            "state": v2_state,
+            "request_seen": bool(flags.get("dispatch_started") or flags.get("dispatch_completed")),
+            "confirmed": has_structured_start,
+            "completed": has_structured_completion,
+            "delivered": delivered,
+            "terminal_receipts_expected": terminal_receipts,
+            "terminal_receipts_seen": terminal_seen,
+        }
+
     def derive_task_control_state(self, task_id: str) -> dict[str, Any]:
         """
         控制面核心判定函数：基于证据推导任务控制状态。
@@ -1057,12 +3519,141 @@ class MonitorStateStore:
             }
 
         events = self.list_task_events(task_id, limit=50)
+        core_snapshot = self.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+        core_supervision = self.derive_core_task_supervision(task_id)
+        if not core_snapshot.get("has_core_projection"):
+            self.sync_legacy_task_projection(task_id)
+            core_snapshot = self.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+            core_supervision = self.derive_core_task_supervision(task_id)
         contract = self.get_task_contract(task_id) or {
             "id": "single_agent",
             "required_receipts": [],
         }
         contract_view = dict(contract)
         contract_view.setdefault("mode", "observation_template")
+        root_task = dict(core_snapshot.get("root_task") or {})
+        native_root_task_id = str(root_task.get("root_task_id") or "")
+        if native_root_task_id and not native_root_task_id.startswith("legacy-root:"):
+            workflow = dict(core_snapshot.get("current_workflow_run") or {})
+            finalizer = dict(core_snapshot.get("current_finalizer") or {})
+            delivery_attempt = dict(core_snapshot.get("current_delivery_attempt") or {})
+            workflow_state = str(core_supervision.get("workflow_state") or "")
+            active_phase = str(workflow.get("phase") or workflow_state or task.get("current_stage") or "")
+            timing = self._resolve_timing_metadata(contract_view, active_phase)
+            step_updated_at = int(workflow.get("updated_at") or task.get("last_progress_at") or task.get("started_at") or 0)
+            now = int(time.time())
+            heartbeat_age = max(0, now - step_updated_at) if step_updated_at else 0
+            heartbeat_ok = heartbeat_age <= int(timing.get("heartbeat_interval") or 0)
+            followup_stage = "healthy"
+            if core_supervision.get("is_blocked"):
+                followup_stage = "blocked"
+            elif core_supervision.get("needs_followup"):
+                followup_stage = "soft"
+            control_state = str(core_supervision.get("control_state") or "")
+            if not control_state:
+                if workflow_state in {"accepted", "routed"}:
+                    control_state = "received_only"
+                elif workflow_state in {"queued", "started"}:
+                    control_state = "progress_only"
+                elif workflow_state in {"completed", "delivery_pending", "delivered"}:
+                    control_state = "completed_verified"
+                elif workflow_state in {"blocked", "delivery_failed", "failed", "dlq", "cancelled"}:
+                    control_state = "blocked_unverified"
+                else:
+                    control_state = "received_only"
+            approved_summary = (
+                str(core_supervision.get("followup_summary") or "").strip()
+                or str(finalizer.get("user_visible_summary") or "").strip()
+                or (
+                    "主闭环已完成并确认送达。"
+                    if workflow_state == "delivered"
+                    else "主闭环最终结论已形成，当前等待送达确认。"
+                    if workflow_state == "delivery_pending"
+                    else "主闭环当前处于阻塞状态。"
+                    if core_supervision.get("is_blocked")
+                    else "主闭环已进入原生工作流。"
+                )
+            )
+            next_action = str(core_supervision.get("next_action") or "")
+            next_actor = str(core_supervision.get("next_actor") or "")
+            if workflow_state == "delivered":
+                next_action = "none"
+                next_actor = ""
+            elif workflow_state == "delivery_pending" and not next_action:
+                next_action = "await_delivery_confirmation"
+                next_actor = "main"
+            elif core_supervision.get("is_blocked") and not next_action:
+                next_action = "manual_or_session_recovery"
+            claim_level = "proven" if workflow_state == "delivered" else "strong"
+            protocol_status = {
+                "request": "seen",
+                "confirmed": "seen",
+                "final": "seen" if workflow_state in {"completed", "delivery_pending", "delivered"} else "missing",
+                "blocked": "seen" if core_supervision.get("is_blocked") else "missing",
+                "ack_id": str((workflow.get("current_step_run_id") or workflow.get("workflow_run_id") or task_id) or ""),
+            }
+            native_state = {
+                "source": "core_events",
+                "dispatch_started": True,
+                "dispatch_completed": workflow_state not in {"accepted", "routed", "queued", ""},
+                "pipeline_progress_seen": workflow_state in {"started", "completed", "delivery_pending", "delivered"},
+                "pipeline_receipt_seen": workflow_state in {"started", "completed", "delivery_pending", "delivered", "blocked"},
+                "latest_receipt": {},
+                "status": str(task.get("status") or ""),
+                "stage": active_phase,
+            }
+            derived_state = {
+                "control_state": control_state,
+                "approved_summary": approved_summary,
+                "next_action": next_action,
+                "next_actor": next_actor,
+                "claim_level": claim_level,
+                "missing_receipts": [],
+                "contract_id": str(contract_view.get("id") or "single_agent"),
+                "v2_state": workflow_state or "unknown",
+            }
+            evidence_summary = (
+                f"workflow_state={workflow_state or 'unknown'}; finalization_state={core_snapshot.get('finalization_state') or '-'}; "
+                f"delivery_state={core_snapshot.get('delivery_state') or '-'}; delivery_confirmation={core_snapshot.get('delivery_confirmation_level') or '-'}; "
+                f"next_actor={next_actor or '-'}; action={next_action or '-'}; phase={active_phase or '-'}; "
+                f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage}"
+            )
+            return {
+                "truth_level": "core_projection",
+                "evidence_level": "strong",
+                "evidence_summary": evidence_summary,
+                "control_state": control_state,
+                "approved_summary": approved_summary,
+                "next_action": next_action,
+                "next_actor": next_actor,
+                "action_reason": approved_summary,
+                "claim_level": claim_level,
+                "user_visible_progress": approved_summary,
+                "protocol": protocol_status,
+                "contract": contract_view,
+                "missing_receipts": [],
+                "control_action": self._build_core_control_action(core_snapshot, core_supervision),
+                "phase_statuses": [],
+                "flags": {},
+                "latest_receipt": {},
+                "pipeline_recovery": {},
+                "latest_recovery": {},
+                "latest_protocol_violation": {},
+                "native_state": native_state,
+                "derived_state": derived_state,
+                "v2_truth": {
+                    "state": workflow_state or "unknown",
+                    "reason": str(workflow.get("state_reason") or ""),
+                },
+                "heuristic_state": {},
+                "core_supervision": core_supervision,
+                "timing": timing,
+                "active_phase": active_phase,
+                "followup_stage": followup_stage,
+                "heartbeat_age_seconds": heartbeat_age,
+                "heartbeat_ok": heartbeat_ok,
+                "terminal_state_seen": bool(core_supervision.get("is_terminal") or core_supervision.get("is_blocked")),
+            }
         flags = {
             "dispatch_started": False,
             "dispatch_completed": False,
@@ -1249,6 +3840,11 @@ class MonitorStateStore:
                 approved_summary = "产品、开发、测试链路都已收到结构化回执。"
                 next_action = "none"
                 next_actor = ""
+            elif not missing_receipts:
+                control_state = "test_running"
+                approved_summary = "测试回执已完成，但主链路交付完成态尚未确认。"
+                next_action = "await_delivery_confirmation"
+                next_actor = "main"
             elif flags["test_blocked"]:
                 control_state = "test_blocked"
                 approved_summary = "测试阶段已阻塞。"
@@ -1364,6 +3960,13 @@ class MonitorStateStore:
             )
         phase_statuses = self._build_contract_phase_statuses(contract_id, flags, seen_receipts)
         claim_level = self._summarize_claim_level(control_state, evidence_level, missing_receipts)
+        control_action = self.get_open_control_action(task_id)
+        active_phase = self._infer_active_phase(task, latest_receipt, control_state)
+        timing = self._resolve_timing_metadata(contract_view, active_phase)
+        now = int(time.time())
+        followup_stage = self._derive_followup_stage(task, control_action, timing, now=now)
+        heartbeat_age = max(0, now - int(task.get("last_progress_at") or task.get("started_at") or now))
+        heartbeat_ok = heartbeat_age <= int(timing.get("heartbeat_interval") or 0)
         protocol_status = {
             "request": "seen" if (flags["dispatch_started"] or flags["dispatch_completed"] or bool(task.get("question"))) else "missing",
             "confirmed": "seen" if (flags["pipeline_progress"] or flags["pipeline_receipt"] or bool(latest_receipt)) else "missing",
@@ -1386,6 +3989,13 @@ class MonitorStateStore:
             "question_candidate": self.get_task_question_candidate(task_id) or "",
             "latest_protocol_violation": latest_protocol_violation,
         }
+        v2_truth = self._derive_v2_truth_snapshot(
+            contract=contract_view,
+            flags=flags,
+            seen_receipts=seen_receipts,
+            task_status=str(task.get("status") or ""),
+            blocked_reason=blocked_reason,
+        )
         derived_state = {
             "control_state": control_state,
             "approved_summary": approved_summary,
@@ -1394,10 +4004,15 @@ class MonitorStateStore:
             "claim_level": claim_level,
             "missing_receipts": missing_receipts,
             "contract_id": str(contract_view.get("id") or "single_agent"),
+            "v2_state": v2_truth.get("state") or "unknown",
         }
         evidence_summary = (
             f"evidence={evidence_level}; claim={claim_level}; missing_receipts={','.join(missing_receipts) if missing_receipts else 'none'}; "
-            f"next_actor={next_actor or '-'}; action={next_action}"
+            f"next_actor={next_actor or '-'}; action={next_action}; phase={active_phase}; profile={timing.get('profile')}; "
+            f"first_ack_sla={timing.get('first_ack_sla')}; heartbeat_interval={timing.get('heartbeat_interval')}; "
+            f"soft_followup={timing.get('soft_followup')}; hard_followup={timing.get('hard_followup')}; hard_timeout={timing.get('hard_timeout')}; "
+            f"auto_blocked_unverified={timing.get('auto_blocked_unverified')}; blocked_user_visible={str(timing.get('blocked_user_visible')).lower()}; "
+            f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage or 'healthy'}"
         )
         action_reason = approved_summary
         user_visible_progress = self._render_user_visible_progress(
@@ -1408,8 +4023,53 @@ class MonitorStateStore:
             missing_receipts=missing_receipts,
         )
 
+        action_status = str((control_action or {}).get("status") or "")
+        recent_runtime_window = max(int(timing.get("hard_timeout") or 0) * 2, 3600)
+        followup_visible = (
+            action_status in {"sent", "blocked", "resolved"}
+            or int((control_action or {}).get("attempts") or 0) > 0
+            or heartbeat_age <= recent_runtime_window
+        )
+        if control_state in {"dev_running", "test_running", "calculator_running", "awaiting_verifier", "planning_only", "progress_only", "received_only"} and followup_visible:
+            if followup_stage == "blocked":
+                user_visible_progress = "追证失败，已 blocked：任务缺少可验证结构化回执，主人当前可见为阻塞状态。"
+            elif followup_stage in {"soft", "hard"}:
+                user_visible_progress = f"超过窗口，正在追证：当前阶段={active_phase}，已进入{followup_stage}追证窗口。"
+            elif heartbeat_ok and control_state not in {"received_only", "planning_only"}:
+                user_visible_progress = f"已开始且心跳正常：当前阶段={active_phase}，心跳窗口={timing.get('heartbeat_interval')}s。"
+
+        action_template = str(((control_action or {}).get("details") or {}).get("status_template") or "").strip()
+        if action_template and action_status in {"sent", "blocked", "resolved"}:
+            user_visible_progress = action_template
+
+        truth_level = "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived"
+        if truth_level == "core_projection":
+            workflow_state = str(core_supervision.get("workflow_state") or "")
+            if core_supervision.get("is_terminal"):
+                if workflow_state == "delivered":
+                    control_state = "completed_verified"
+                    approved_summary = "主闭环已完成并确认送达。"
+                    next_action = "none"
+                    next_actor = ""
+                else:
+                    approved_summary = core_supervision.get("followup_summary") or approved_summary
+                    next_action = "manual_or_session_recovery" if core_supervision.get("is_blocked") else next_action
+            elif core_supervision.get("is_delivery_pending"):
+                control_state = "completed_verified"
+                approved_summary = core_supervision.get("followup_summary") or "最终结论已形成，当前等待送达确认。"
+                next_action = "await_delivery_confirmation"
+                next_actor = next_actor or "main"
+            elif core_supervision.get("needs_followup"):
+                approved_summary = core_supervision.get("followup_summary") or approved_summary
+                next_action = str(core_supervision.get("next_action") or next_action)
+                next_actor = str(core_supervision.get("next_actor") or next_actor)
+            if core_supervision.get("control_state"):
+                control_state = str(core_supervision.get("control_state") or control_state)
+            if core_supervision.get("is_blocked") and core_supervision.get("blocked_reason"):
+                blocked_reason = str(core_supervision.get("blocked_reason") or blocked_reason)
+
         return {
-            "truth_level": "derived",
+            "truth_level": truth_level,
             "evidence_level": evidence_level,
             "evidence_summary": evidence_summary,
             "control_state": control_state,
@@ -1422,7 +4082,7 @@ class MonitorStateStore:
             "protocol": protocol_status,
             "contract": contract_view,
             "missing_receipts": missing_receipts,
-            "control_action": self.get_open_control_action(task_id),
+            "control_action": control_action,
             "phase_statuses": phase_statuses,
             "flags": flags,
             "latest_receipt": latest_receipt,
@@ -1431,7 +4091,15 @@ class MonitorStateStore:
             "latest_protocol_violation": latest_protocol_violation,
             "native_state": native_state,
             "derived_state": derived_state,
+            "v2_truth": v2_truth,
             "heuristic_state": heuristic_state,
+            "core_supervision": core_supervision,
+            "timing": timing,
+            "active_phase": active_phase,
+            "followup_stage": followup_stage,
+            "heartbeat_age_seconds": heartbeat_age,
+            "heartbeat_ok": heartbeat_ok,
+            "terminal_state_seen": bool(protocol_status["final"] == "seen" or protocol_status["blocked"] == "seen"),
         }
 
     def get_current_task(self, *, env_id: str | None = None) -> dict[str, Any] | None:
@@ -1532,18 +4200,23 @@ class MonitorStateStore:
         protocol_violations = self.count_task_events("protocol_violation", env_id=env_id)
         for task in tasks:
             control = self.derive_task_control_state(task["task_id"])
+            core = self.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
+            core_supervision = self.derive_core_task_supervision(task["task_id"])
             claim = str(control.get("claim_level") or "received_only")
             if claim in claim_counts:
                 claim_counts[claim] += 1
-            next_actor = str(control.get("next_actor") or "")
+            next_actor = str(core_supervision.get("next_actor") or control.get("next_actor") or "")
             if next_actor:
                 next_actor_counts[next_actor] = next_actor_counts.get(next_actor, 0) + 1
+            workflow_state = str(core.get("workflow_state") or "")
             control_state = str(control.get("control_state") or "")
-            if control_state.startswith("blocked") or control_state.endswith("_blocked"):
+            if workflow_state in {"blocked", "delivery_failed", "dlq", "failed", "cancelled"}:
                 blocked += 1
+            elif core_supervision.get("needs_followup"):
+                recoverable += 1
             elif str(control.get("next_action") or "") not in {"none", "manual_or_session_recovery"}:
                 recoverable += 1
-            if claim in {"execution_verified", "completed_verified"}:
+            if workflow_state in {"completed", "delivery_pending", "delivered"} or claim in {"execution_verified", "completed_verified"}:
                 verified += 1
 
         sent = status_counts["sent"] + status_counts["resolved"]
@@ -1593,14 +4266,56 @@ class MonitorStateStore:
                 "summary": "当前会话没有已登记任务。",
             }
 
-        active = next(
-            (
-                task
-                for task in tasks
-                if task.get("status") in {"running", "blocked", "background"}
-            ),
-            tasks[0],
-        )
+        foreground_root_id = str((self.get_foreground_binding(session_key) or {}).get("foreground_root_task_id") or "")
+        task_core_snapshots = {
+            task["task_id"]: self.get_core_closure_snapshot_for_task(
+                task["task_id"],
+                allow_legacy_projection=False,
+            )
+            for task in tasks
+        }
+        task_core_supervision = {
+            task["task_id"]: self.derive_core_task_supervision(task["task_id"])
+            for task in tasks
+        }
+
+        def _is_core_active(task: dict[str, Any]) -> bool:
+            task_id = str(task.get("task_id") or "")
+            snapshot = task_core_snapshots.get(task_id) or {}
+            supervision = task_core_supervision.get(task_id) or {}
+            workflow_state = str(snapshot.get("workflow_state") or "")
+            if not workflow_state:
+                return False
+            if bool(supervision.get("is_terminal")):
+                return False
+            if (
+                str(task.get("status") or "") == "completed"
+                and workflow_state == "completed"
+                and not bool(supervision.get("is_delivery_pending"))
+                and not bool(supervision.get("needs_followup"))
+            ):
+                return False
+            return workflow_state not in {"delivered", "failed", "dlq", "cancelled"}
+
+        active = None
+        if foreground_root_id:
+            active = next(
+                (
+                    task
+                    for task in tasks
+                    if str((task_core_snapshots.get(task["task_id"], {}).get("root_task") or {}).get("root_task_id") or "") == foreground_root_id
+                ),
+                None,
+            )
+        if active is None:
+            active = next(
+                (
+                    task
+                    for task in tasks
+                    if _is_core_active(task) or task.get("status") in {"running", "blocked", "background"}
+                ),
+                tasks[0],
+            )
         active_started = max(int(active.get("created_at") or 0), int(active.get("started_at") or 0))
         late_completed = [
             {
@@ -1667,7 +4382,16 @@ class MonitorStateStore:
                 )
             except sqlite3.IntegrityError:
                 return False
-        return bool(getattr(cursor, "rowcount", 0))
+        inserted = bool(getattr(cursor, "rowcount", 0))
+        if inserted and self.get_task(task_id):
+            try:
+                snapshot = self.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+                root_task_id = str((snapshot.get("root_task") or {}).get("root_task_id") or "")
+                if not root_task_id or root_task_id.startswith("legacy-root:"):
+                    self.sync_legacy_task_projection(task_id)
+            except Exception:
+                pass
+        return inserted
 
     def upsert_learning(
         self,
@@ -1898,6 +4622,95 @@ class MonitorStateStore:
             if state not in {"delivered", "failed", "error"} and not in_dlq:
                 summary["active"] += 1
         return summary
+
+    @staticmethod
+    def _load_json_field(raw: Any, default: Any) -> Any:
+        if raw in (None, ""):
+            return default
+        try:
+            return json.loads(raw)
+        except Exception:
+            return default
+
+    def _row_to_root_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "root_task_id": row["root_task_id"],
+            "session_key": row["session_key"],
+            "origin_request_id": row["origin_request_id"] or "",
+            "origin_message_id": row["origin_message_id"] or "",
+            "reply_to_message_id": row["reply_to_message_id"] or "",
+            "user_goal_summary": row["user_goal_summary"] or "",
+            "intent_type": row["intent_type"] or "",
+            "contract_type": row["contract_type"] or "",
+            "status": row["status"] or "",
+            "state_reason": row["state_reason"] or "",
+            "current_workflow_run_id": row["current_workflow_run_id"] or "",
+            "active": bool(row["active"]),
+            "foreground_priority": int(row["foreground_priority"] or 0),
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+            "terminal_at": int(row["terminal_at"] or 0),
+            "finalized_at": int(row["finalized_at"] or 0),
+            "superseded_by_root_task_id": row["superseded_by_root_task_id"] or "",
+            "metadata": self._load_json_field(row["metadata_json"], {}),
+        }
+
+    def _row_to_workflow_run(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "workflow_run_id": row["workflow_run_id"],
+            "root_task_id": row["root_task_id"],
+            "parent_workflow_run_id": row["parent_workflow_run_id"] or "",
+            "idempotency_key": row["idempotency_key"] or "",
+            "workflow_type": row["workflow_type"] or "",
+            "intent_type": row["intent_type"] or "",
+            "contract_type": row["contract_type"] or "",
+            "current_state": row["current_state"] or "",
+            "state_reason": row["state_reason"] or "",
+            "current_step_run_id": row["current_step_run_id"] or "",
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+            "started_at": int(row["started_at"] or 0),
+            "terminal_at": int(row["terminal_at"] or 0),
+            "metadata": self._load_json_field(row["metadata_json"], {}),
+        }
+
+    def _row_to_step_run(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "step_run_id": row["step_run_id"],
+            "workflow_run_id": row["workflow_run_id"],
+            "root_task_id": row["root_task_id"],
+            "stable_step_key": row["stable_step_key"] or "",
+            "agent_id": row["agent_id"] or "",
+            "phase": row["phase"] or "",
+            "current_state": row["current_state"] or "",
+            "state_reason": row["state_reason"] or "",
+            "latest_receipt_id": row["latest_receipt_id"] or "",
+            "latest_heartbeat_seq": int(row["latest_heartbeat_seq"] or 0),
+            "last_heartbeat_at": int(row["last_heartbeat_at"] or 0),
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+            "started_at": int(row["started_at"] or 0),
+            "terminal_at": int(row["terminal_at"] or 0),
+            "metadata": self._load_json_field(row["metadata_json"], {}),
+        }
+
+    def _row_to_foreground_binding(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "session_key": row["session_key"],
+            "foreground_root_task_id": row["foreground_root_task_id"],
+            "binding_version": int(row["binding_version"] or 0),
+            "reason": row["reason"] or "",
+            "updated_at": int(row["updated_at"] or 0),
+            "metadata": self._load_json_field(row["metadata_json"], {}),
+        }
 
     def _row_to_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if not row:

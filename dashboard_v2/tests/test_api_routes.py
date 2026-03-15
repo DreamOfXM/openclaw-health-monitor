@@ -236,10 +236,20 @@ class TestFlaskRoutes(unittest.TestCase):
             '/api/v2/tasks',
             '/api/v2/agents',
             '/api/v2/learnings',
+            '/api/v2/heartbeat/openclaw',
         ]:
             with self.subTest(path=path):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
+
+    def test_openclaw_heartbeat_endpoint_returns_structured_payload(self):
+        response = self.client.get('/api/v2/heartbeat/openclaw')
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'])
+        self.assertIn('status', payload['data'])
+        self.assertIn('every', payload['data'])
+        self.assertIn('effective_prompt_count', payload['data'])
 
     def test_legacy_status_endpoint_still_available(self):
         """旧脚本依赖的状态接口应继续可用"""
@@ -257,30 +267,23 @@ class TestFlaskRoutes(unittest.TestCase):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
 
-    def test_promote_returns_structured_preflight_failure_without_http_500(self):
+    def test_restart_route_returns_structured_payload(self):
         with mock.patch('routes.environments.get_collector') as get_collector:
-            get_collector.return_value.promote_environment.return_value = {
-                'status': 'failed_preflight',
-                'preflight': {'safe_to_promote': False},
-            }
-            response = self.client.post('/api/v2/environments/promote', json={'confirmation': 'PROMOTE'})
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertFalse(payload['success'])
-        self.assertEqual(payload['data']['status'], 'failed_preflight')
-
-    def test_official_auto_update_toggle_route(self):
-        with mock.patch('routes.environments.get_collector') as get_collector:
-            get_collector.return_value.set_official_auto_update.return_value = {
+            get_collector.return_value.restart_environment.return_value = {
                 'success': True,
-                'message': '已启用官方自动更新',
-                'enabled': True,
+                'message': 'Primary 已开始重启',
+                'environment': 'primary',
             }
-            response = self.client.post('/api/v2/environments/official-auto-update', json={'enabled': True})
+            response = self.client.post('/api/v2/environments/restart', json={})
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload['success'])
-        self.assertTrue(payload['data']['enabled'])
+        self.assertEqual(payload['data']['environment'], 'primary')
+
+    def test_switch_route_rejects_missing_environment(self):
+        with mock.patch('routes.environments.get_collector') as get_collector:
+            response = self.client.post('/api/v2/environments/switch', json={})
+        self.assertEqual(response.status_code, 400)
 
 
 if __name__ == '__main__':

@@ -65,11 +65,11 @@ class DashboardMemoryTests(unittest.TestCase):
     def test_active_env_id_defaults_to_primary(self):
         with mock.patch.object(dashboard.STORE, "load_runtime_value", side_effect=[
             {},
-            {"env_id": "official"},
+            {"env_id": "primary"},
             {"env_id": "weird"},
         ]):
             self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "primary"}), "primary")
-            self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "official"}), "official")
+            self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "legacy"}), "primary")
             self.assertEqual(dashboard.active_env_id({"ACTIVE_OPENCLAW_ENV": "weird"}), "primary")
 
     @mock.patch("dashboard_backend.create_config_snapshots")
@@ -100,100 +100,84 @@ class DashboardMemoryTests(unittest.TestCase):
                 "http://127.0.0.1:19021/#token=abc123&gatewayUrl=ws%3A%2F%2F127.0.0.1%3A19021",
             )
 
+    def test_probe_channel_readiness_parses_multiple_channels(self):
+        summary = "\n".join(
+            [
+                "- Feishu default: enabled, configured",
+                "- DingTalk default: enabled, configured",
+            ]
+        )
+        completed = mock.Mock(returncode=0, stdout=summary, stderr="")
+
+        with mock.patch("dashboard_backend.subprocess.run", return_value=completed):
+            readiness = dashboard.probe_channel_readiness_for_env({"home": "/tmp/openclaw-main", "port": 18789})
+
+        self.assertEqual(readiness["status"], "ready")
+        self.assertIn("channels", readiness)
+        self.assertEqual(readiness["channels"]["feishu"]["detail"], "enabled, configured")
+        self.assertEqual(readiness["channels"]["dingtalk"]["detail"], "enabled, configured")
+        self.assertEqual(readiness["feishu"]["status"], "ready")
+        self.assertEqual(readiness["dingtalk"]["status"], "ready")
+
+    @mock.patch("dashboard_backend.urllib.request.urlopen")
+    def test_check_gateway_health_for_env_uses_http_health_endpoint(self, mock_urlopen):
+        response = mock.Mock()
+        response.read.return_value = b'{"ok": true, "status": "live"}'
+        mock_urlopen.return_value.__enter__.return_value = response
+
+        healthy = dashboard.check_gateway_health_for_env({"id": "primary", "port": 18789})
+
+        self.assertTrue(healthy)
+        request_arg = mock_urlopen.call_args[0][0]
+        self.assertEqual(request_arg.full_url, "http://127.0.0.1:18789/health")
+
+    @mock.patch("dashboard_backend.check_gateway_health_for_env", return_value=True)
+    @mock.patch("dashboard_backend.load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"})
+    @mock.patch("dashboard_backend.env_spec", return_value={"id": "primary", "port": 18789})
+    @mock.patch("dashboard_backend.active_env_id", return_value="primary")
+    def test_check_gateway_health_delegates_to_active_env_http_probe(
+        self,
+        mock_active_env_id,
+        mock_env_spec,
+        mock_load_config,
+        mock_check_gateway_health_for_env,
+    ):
+        self.assertTrue(dashboard.check_gateway_health())
+        mock_check_gateway_health_for_env.assert_called_once_with({"id": "primary", "port": 18789})
+
     @mock.patch("dashboard_backend.check_gateway_health_for_env")
     @mock.patch("dashboard_backend.env_has_control_ui_assets")
     @mock.patch("dashboard_backend.read_git_head")
     @mock.patch("dashboard_backend.get_listener_pid")
     def test_list_openclaw_environments_marks_active_environment(self, listener_pid, read_git_head, control_ui_ready, health):
-        listener_pid.side_effect = [1111, None]
-        read_git_head.side_effect = ["abc123", "def456"]
-        control_ui_ready.side_effect = [True, True]
+        listener_pid.return_value = 1111
+        read_git_head.return_value = "abc123"
+        control_ui_ready.return_value = True
         health.side_effect = [True]
         config = {
             "ACTIVE_OPENCLAW_ENV": "primary",
             "OPENCLAW_HOME": "/tmp/openclaw-main",
             "OPENCLAW_CODE": "/tmp/openclaw-code",
             "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
         }
 
         with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
             envs = dashboard.list_openclaw_environments(config)
 
-        self.assertEqual(len(envs), 2)
+        self.assertEqual(len(envs), 1)
         self.assertEqual(envs[0]["id"], "primary")
         self.assertTrue(envs[0]["active"])
         self.assertTrue(envs[0]["running"])
         self.assertTrue(envs[0]["healthy"])
         self.assertTrue(envs[0]["control_ui_ready"])
 
-    @mock.patch("dashboard_backend.Path.exists")
-    @mock.patch("dashboard_backend.check_gateway_health_for_env")
-    @mock.patch("dashboard_backend.env_has_control_ui_assets")
-    @mock.patch("dashboard_backend.read_git_head")
-    @mock.patch("dashboard_backend.get_listener_pid")
-    def test_list_openclaw_environments_auto_update_follows_config(
-        self,
-        listener_pid,
-        read_git_head,
-        control_ui_ready,
-        health,
-        path_exists,
-    ):
-        listener_pid.side_effect = [1111, 2222]
-        read_git_head.side_effect = ["abc123", "def456"]
-        control_ui_ready.side_effect = [True, True]
-        health.side_effect = [True, True]
-        path_exists.return_value = True
-        config = {
-            "ACTIVE_OPENCLAW_ENV": "official",
-            "OPENCLAW_HOME": "/tmp/openclaw-main",
-            "OPENCLAW_CODE": "/tmp/openclaw-code",
-            "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
-            "OPENCLAW_OFFICIAL_AUTO_UPDATE": False,
-        }
-
-        with mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "official"}), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}):
-            envs = dashboard.list_openclaw_environments(config)
-
-        official = next(item for item in envs if item["id"] == "official")
-        self.assertFalse(official["auto_update_enabled"])
-        self.assertFalse(official["auto_update_expected"])
-        self.assertTrue(official["auto_update_installed"])
-        self.assertTrue(official["auto_update_drift"])
-        self.assertEqual(envs[0]["listener_pid"], 1111)
-        self.assertEqual(envs[1]["id"], "official")
-        self.assertTrue(envs[1]["active"])
-        self.assertTrue(envs[1]["running"])
-
-    def test_detect_environment_inconsistencies_reports_dual_listener(self):
+    def test_detect_environment_inconsistencies_single_env_is_clean(self):
         envs = [
             {"id": "primary", "active": True, "running": True},
-            {"id": "official", "active": False, "running": True},
         ]
         with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
             issues = dashboard.detect_environment_inconsistencies(envs, "primary")
-        codes = {item["code"] for item in issues}
-        self.assertIn("dual_listener", codes)
-        self.assertIn("official_running_while_primary_active", codes)
-        self.assertIn("unbound_listener_official", codes)
-
-    def test_detect_environment_inconsistencies_reports_binding_mismatch(self):
-        envs = [
-            {"id": "primary", "active": True, "running": True},
-            {"id": "official", "active": False, "running": False},
-        ]
-        with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}):
-            issues = dashboard.detect_environment_inconsistencies(envs, "primary")
-        codes = {item["code"] for item in issues}
-        self.assertIn("binding_config_mismatch", codes)
-        self.assertIn("bound_env_not_running_official", codes)
+        self.assertEqual(issues, [])
 
     def test_build_model_failure_summary_classifies_auth_failure(self):
         summary = dashboard.build_model_failure_summary(
@@ -216,9 +200,6 @@ class DashboardMemoryTests(unittest.TestCase):
                         "OPENCLAW_HOME": str(home),
                         "OPENCLAW_CODE": str(code),
                         "GATEWAY_PORT": 18789,
-                        "OPENCLAW_OFFICIAL_STATE": str(home.parent / ".openclaw-official"),
-                        "OPENCLAW_OFFICIAL_CODE": str(code.parent / "official-code"),
-                        "OPENCLAW_OFFICIAL_PORT": 19021,
                     }
                 )
         self.assertFalse(readiness["ready"])
@@ -252,9 +233,6 @@ class DashboardMemoryTests(unittest.TestCase):
                         "OPENCLAW_HOME": str(home),
                         "OPENCLAW_CODE": str(code),
                         "GATEWAY_PORT": 18789,
-                        "OPENCLAW_OFFICIAL_STATE": str(home.parent / ".openclaw-official"),
-                        "OPENCLAW_OFFICIAL_CODE": str(code.parent / "official-code"),
-                        "OPENCLAW_OFFICIAL_PORT": 19021,
                     }
                 )
         self.assertFalse(readiness["ready"])
@@ -288,9 +266,6 @@ class DashboardMemoryTests(unittest.TestCase):
                         "OPENCLAW_HOME": str(home),
                         "OPENCLAW_CODE": str(code),
                         "GATEWAY_PORT": 18789,
-                        "OPENCLAW_OFFICIAL_STATE": str(home.parent / ".openclaw-official"),
-                        "OPENCLAW_OFFICIAL_CODE": str(code.parent / "official-code"),
-                        "OPENCLAW_OFFICIAL_PORT": 19021,
                     }
                 )
         self.assertTrue(readiness["ready"])
@@ -309,32 +284,26 @@ class DashboardMemoryTests(unittest.TestCase):
         control_ui_ready,
         health,
     ):
-        listener_pid.side_effect = [1111, 2222]
-        read_git_head.side_effect = ["abc123", "def456"]
-        read_git_target_head.return_value = "def456"
-        control_ui_ready.side_effect = [True, True, True, True]
-        health.side_effect = [True, True]
+        listener_pid.return_value = 1111
+        read_git_head.return_value = "abc123"
+        read_git_target_head.return_value = "abc123"
+        control_ui_ready.return_value = True
+        health.return_value = True
         config = {
             "ACTIVE_OPENCLAW_ENV": "primary",
             "OPENCLAW_HOME": "/tmp/openclaw-main",
             "OPENCLAW_CODE": "/tmp/openclaw-code",
             "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
         }
 
         with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
             envs = dashboard.list_openclaw_environments(config)
         primary = next(item for item in envs if item["id"] == "primary")
-        official = next(item for item in envs if item["id"] == "official")
 
         self.assertTrue(primary["active"])
         self.assertTrue(primary["running"])
         self.assertEqual(primary["dashboard_open_link"], "/open-dashboard/primary")
-        self.assertFalse(official["active"])
-        self.assertTrue(official["running"])
-        self.assertEqual(official["dashboard_open_link"], "")
+        self.assertEqual(len(envs), 1)
 
     @mock.patch("dashboard_backend.check_gateway_health_for_env")
     @mock.patch("dashboard_backend.env_has_control_ui_assets")
@@ -349,29 +318,72 @@ class DashboardMemoryTests(unittest.TestCase):
         control_ui_ready,
         health,
     ):
-        listener_pid.side_effect = [1111, 2222]
-        read_git_head.side_effect = ["abc123", "def456"]
-        read_git_target_head.return_value = "def456"
-        control_ui_ready.side_effect = [True, False]
-        health.side_effect = [True, True]
+        listener_pid.return_value = 1111
+        read_git_head.return_value = "abc123"
+        read_git_target_head.return_value = "abc123"
+        control_ui_ready.return_value = False
+        health.return_value = True
         config = {
-            "ACTIVE_OPENCLAW_ENV": "official",
+            "ACTIVE_OPENCLAW_ENV": "primary",
             "OPENCLAW_HOME": "/tmp/openclaw-main",
             "OPENCLAW_CODE": "/tmp/openclaw-code",
             "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
         }
 
-        with mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "official"}):
+        with mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "primary"}):
             envs = dashboard.list_openclaw_environments(config)
-        official = next(item for item in envs if item["id"] == "official")
+        primary = next(item for item in envs if item["id"] == "primary")
 
-        self.assertTrue(official["active"])
-        self.assertTrue(official["running"])
-        self.assertFalse(official["control_ui_ready"])
-        self.assertEqual(official["dashboard_open_link"], "")
+        self.assertTrue(primary["active"])
+        self.assertTrue(primary["running"])
+        self.assertFalse(primary["control_ui_ready"])
+        self.assertEqual(primary["dashboard_open_link"], "")
+
+    @mock.patch("dashboard_backend.check_gateway_health_for_env")
+    @mock.patch("dashboard_backend.env_has_control_ui_assets")
+    @mock.patch("dashboard_backend.read_git_head")
+    @mock.patch("dashboard_backend.get_listener_pid")
+    def test_list_openclaw_environments_refreshes_stale_channel_readiness_after_ttl(
+        self,
+        listener_pid,
+        read_git_head,
+        control_ui_ready,
+        health,
+    ):
+        listener_pid.return_value = 1111
+        read_git_head.return_value = "abc123"
+        control_ui_ready.return_value = True
+        health.return_value = True
+        config = {
+            "ACTIVE_OPENCLAW_ENV": "primary",
+            "OPENCLAW_HOME": "/tmp/openclaw-main",
+            "OPENCLAW_CODE": "/tmp/openclaw-code",
+            "GATEWAY_PORT": 18789,
+        }
+        stale_checked_at = int(time.time()) - dashboard.CHANNEL_READINESS_TTL_SECONDS - 5
+        runtime_values = {
+            "channel_readiness:primary": {
+                "env_id": "primary",
+                "checked_at": stale_checked_at,
+                "config_path": "/tmp/openclaw-main/openclaw.json",
+                "status": "warning",
+                "summary": "old",
+            }
+        }
+
+        with mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}), \
+            mock.patch.object(dashboard.STORE, "load_runtime_value", side_effect=lambda key, default=None: runtime_values.get(key, default)), \
+            mock.patch.object(dashboard.STORE, "save_runtime_value") as save_runtime_value, \
+            mock.patch.object(
+                dashboard,
+                "probe_channel_readiness_for_env",
+                return_value={"status": "ready", "summary": "fresh", "config_path": "/tmp/openclaw-main/openclaw.json", "checked_at": int(time.time()), "channels": {}},
+            ) as probe:
+            envs = dashboard.list_openclaw_environments(config)
+
+        probe.assert_called_once()
+        save_runtime_value.assert_called_once()
+        self.assertEqual(envs[0]["channel_readiness"]["summary"], "fresh")
 
     def test_get_task_registry_payload_includes_summary_and_timeline(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -436,14 +448,56 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["current"]["task_id"], "task-1")
             self.assertEqual(payload["current"]["receipt_summary"]["agent"], "dev")
             self.assertEqual(payload["current"]["control"]["control_state"], "dev_running")
-            self.assertEqual(payload["current"]["control"]["truth_level"], "derived")
+            self.assertEqual(payload["current"]["control"]["truth_level"], "core_projection")
             self.assertEqual(payload["current"]["control"]["claim_level"], "phase_verified")
             self.assertEqual(payload["current"]["control"]["next_actor"], "dev")
             self.assertEqual(payload["current"]["control"]["native_state"]["status"], "running")
             self.assertEqual(payload["current"]["control"]["derived_state"]["contract_id"], "delivery_pipeline")
+            self.assertEqual(payload["current"]["root_task"]["root_task_id"], "legacy-root:task-1")
+            self.assertEqual(payload["current"]["current_workflow_run"]["workflow_run_id"], "legacy-run:task-1")
+            self.assertEqual(payload["current"]["core_truth"]["truth_level"], "core_projection")
             self.assertEqual(payload["control_queue"][0]["action_type"], "await_dev_completion")
             self.assertEqual(payload["session_resolution"]["active_task_id"], "task-1")
             self.assertEqual(len(payload["current"]["timeline"]), 3)
+
+    def test_get_task_registry_payload_prefers_foreground_root_task_as_current(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(Path(base))
+            session_key = "agent:main:feishu:direct:ou_test"
+            for task_id, status, updated_at in (("task-1", "running", 2), ("task-2", "background", 3)):
+                store.upsert_task(
+                    {
+                        "task_id": task_id,
+                        "session_key": session_key,
+                        "env_id": "primary",
+                        "channel": "feishu_dm",
+                        "status": status,
+                        "current_stage": "DEV_IMPLEMENTING",
+                        "question": task_id,
+                        "last_user_message": task_id,
+                        "started_at": 1,
+                        "last_progress_at": updated_at,
+                        "created_at": 1,
+                        "updated_at": updated_at,
+                        "latest_receipt": {"agent": "dev", "phase": "implementation", "action": "started"},
+                    }
+                )
+                store.record_task_event(task_id, "dispatch_started", {"question": task_id})
+                store.sync_legacy_task_projection(task_id)
+            store.switch_foreground_root_task(
+                session_key=session_key,
+                next_root_task_id="legacy-root:task-2",
+                reason="test_override",
+            )
+
+            with mock.patch.object(dashboard, "STORE", store), \
+                mock.patch.object(dashboard, "load_config", return_value={"ENABLE_TASK_REGISTRY": True}), \
+                mock.patch.object(dashboard, "active_env_id", return_value="primary"), \
+                mock.patch.object(dashboard, "env_spec", return_value={"id": "primary"}):
+                payload = dashboard.get_task_registry_payload(limit=5)
+
+            self.assertEqual(payload["current"]["task_id"], "task-2")
 
     def test_get_active_agent_activity_reads_recent_session_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,15 +584,14 @@ class DashboardMemoryTests(unittest.TestCase):
             agent_ids = {item["agent_id"] for item in payload["agents"]}
             self.assertEqual(agent_ids, {"pm", "dev"})
 
-    def test_build_environment_promotion_summary_requires_healthy_official(self):
+    def test_build_runtime_mode_summary_reports_single_primary(self):
         environments = [
-            {"id": "primary", "git_head": "aaa111", "running": False, "healthy": False},
-            {"id": "official", "git_head": "bbb222", "running": True, "healthy": True},
+            {"id": "primary", "git_head": "aaa111", "running": True, "healthy": True},
         ]
         task_registry = {"summary": {"blocked": 0}, "current": {"control": {"control_state": "completed_verified"}}}
-        summary = dashboard.build_environment_promotion_summary(environments, task_registry)
-        self.assertTrue(summary["safe_to_promote"])
-        self.assertIn("bbb222", " ".join(summary["reasons"]))
+        summary = dashboard.build_runtime_mode_summary(environments, task_registry)
+        self.assertEqual(summary["mode"], "single_primary")
+        self.assertIn("单环境", summary["headline"])
 
     def test_get_learning_center_payload_exposes_summary_and_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -938,6 +991,23 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(payload["status"], "healthy")
         self.assertEqual(payload["env"], "primary")
 
+    def test_load_main_closure_purity_gate_normalizes_payload(self):
+        with mock.patch.object(
+            dashboard.STORE,
+            "load_runtime_value",
+            return_value={
+                "generated_at": 123,
+                "env_id": "primary",
+                "ok": False,
+                "reasons": ["shadow_state_detected"],
+                "metrics": {"shadow_state_hit_count": 1},
+            },
+        ):
+            payload = dashboard.load_main_closure_purity_gate("primary")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reasons"], ["shadow_state_detected"])
+        self.assertEqual(payload["metrics"]["shadow_state_hit_count"], 1)
+
     def test_api_shared_state_exposes_normalized_objects(self):
         with mock.patch.object(dashboard, "build_shared_state_snapshot", return_value={"runtime_health": {}, "learning_backlog": {}}):
             with dashboard.app.test_client() as client:
@@ -956,9 +1026,6 @@ class DashboardMemoryTests(unittest.TestCase):
                 "OPENCLAW_HOME": str(home),
                 "OPENCLAW_CODE": str(Path(tmp) / "code"),
                 "GATEWAY_PORT": 18789,
-                "OPENCLAW_OFFICIAL_STATE": str(Path(tmp) / ".openclaw-official"),
-                "OPENCLAW_OFFICIAL_CODE": str(Path(tmp) / "code-official"),
-                "OPENCLAW_OFFICIAL_PORT": 19021,
             }
             with mock.patch.object(dashboard, "load_config", return_value=cfg), \
                 mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
@@ -974,9 +1041,6 @@ class DashboardMemoryTests(unittest.TestCase):
             "OPENCLAW_HOME": "/tmp/openclaw-main",
             "OPENCLAW_CODE": "/tmp/openclaw-code",
             "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
         }
         with mock.patch.object(dashboard, "load_config", return_value=cfg), \
             mock.patch.object(dashboard, "list_openclaw_environments", return_value=[]), \
@@ -985,7 +1049,7 @@ class DashboardMemoryTests(unittest.TestCase):
             mock.patch.object(dashboard, "get_learning_center_payload", return_value={}), \
             mock.patch.object(dashboard, "build_learning_supervision_snapshot", return_value={"generated_at": 1, "env_id": "primary", "memory_freshness": 120, "reuse_evidence_count": 2, "reuse_evidence_7d": 1}), \
             mock.patch.object(dashboard, "build_self_check_supervision_snapshot", return_value={"generated_at": 1, "env_id": "primary", "self_check_status": "succeeded", "events": [], "delivery_retry_count": 1, "completed_not_delivered_count": 0, "stale_subagent_count": 0}), \
-            mock.patch.object(dashboard, "build_main_closure_supervision_snapshot", return_value={"generated_at": 1, "env_id": "primary", "foreground_root_task_id": "rt-1", "events": [], "delivery_failed_count": 0, "adoption_pending_count": 0}), \
+            mock.patch.object(dashboard, "build_main_closure_supervision_snapshot", return_value={"generated_at": 1, "env_id": "primary", "foreground_root_task_id": "rt-1", "events": [], "delivery_failed_count": 0, "adoption_pending_count": 0, "purity_gate_ok": True, "purity_gate_reasons": [], "purity_metrics": {}}), \
             mock.patch.object(dashboard, "get_system_metrics", return_value={}), \
             mock.patch.object(dashboard, "get_recent_anomalies", return_value=[]), \
             mock.patch.object(dashboard, "build_bootstrap_status", return_value={"env_id": "primary", "config_merge": {"applied": ["session.memoryFlush"], "preserved": []}, "context_readiness": {"status": "degraded"}}), \
@@ -1001,6 +1065,7 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertIn("self_check_runtime_status", payload)
         self.assertIn("self_check_events", payload)
         self.assertIn("main_closure_runtime_status", payload)
+        self.assertIn("main_closure_purity_gate", payload)
         self.assertIn("main_closure_events", payload)
         self.assertIn("restart_runtime_status", payload)
         self.assertIn("restart_events", payload)
@@ -1024,7 +1089,11 @@ class DashboardMemoryTests(unittest.TestCase):
                         "delivery_failed_count": 1,
                         "late_result_count": 1,
                         "binding_source_counts": {"followup_default": 2},
+                        "purity_metrics": {"workflow_total": 3, "shadow_state_hit_count": 0, "purity_gate_ok": True, "purity_gate_reasons": []},
                         "roots": [{"root_task_id": "rt-1", "status": "active"}],
+                        "finalizers": [{"finalization_id": "fin-1", "decision_state": "finalized"}],
+                        "delivery_attempts": [{"delivery_attempt_id": "da-1", "current_state": "delivery_failed"}],
+                        "followups": [{"followup_id": "fu-1", "current_state": "open"}],
                     },
                     ensure_ascii=False,
                 ),
@@ -1049,6 +1118,12 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["foreground_root_task_id"], "rt-1")
             self.assertEqual(payload["delivery_failed_count"], 1)
             self.assertEqual(payload["recent_event_types"][0], "final_delivery_failed")
+            self.assertEqual(payload["finalizers"][0]["finalization_id"], "fin-1")
+            self.assertEqual(payload["delivery_attempts"][0]["delivery_attempt_id"], "da-1")
+            self.assertEqual(payload["followups"][0]["followup_id"], "fu-1")
+            self.assertEqual(payload["purity_metrics"]["workflow_total"], 3)
+            self.assertTrue(payload["purity_gate_ok"])
+            self.assertEqual(payload["purity_gate_reasons"], [])
 
     def test_get_health_acceptance_payload_flags_main_closure_delivery_failure(self):
         with mock.patch.object(dashboard, "load_config", return_value={"TASK_SILENT_TIMEOUT_SECONDS": 900}), \
@@ -1069,16 +1144,45 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertIn("未成功送达", payload["headline"])
         self.assertEqual(payload["main_closure"]["delivery_failed_count"], 1)
 
-    def test_snapshot_env_id_detects_official_suffix(self):
-        self.assertEqual(dashboard.snapshot_env_id("20260311-before-config-change-official"), "official")
+    def test_get_health_acceptance_payload_flags_shadow_state_gate_failure(self):
+        with mock.patch.object(dashboard, "load_config", return_value={"TASK_SILENT_TIMEOUT_SECONDS": 900}), \
+            mock.patch.object(dashboard, "active_env_id", return_value="primary"), \
+            mock.patch.object(dashboard, "env_spec", return_value={"id": "primary"}), \
+            mock.patch.object(dashboard.STORE, "summarize_tasks", return_value={"completed": 0, "no_reply": 0}), \
+            mock.patch.object(dashboard.STORE, "summarize_watcher_tasks", return_value={"total": 0, "undelivered": 0}), \
+            mock.patch.object(dashboard.STORE, "list_tasks", return_value=[]), \
+            mock.patch.object(dashboard.STORE, "list_learnings", return_value=[]), \
+            mock.patch.object(dashboard.STORE, "list_reflection_runs", return_value=[]), \
+            mock.patch.object(dashboard, "get_learning_center_payload", return_value={"source_mode": "legacy_store", "learnings": []}), \
+            mock.patch.object(dashboard, "build_context_lifecycle_readiness", return_value={"status": "ready", "checks": []}), \
+            mock.patch.object(dashboard, "build_learning_supervision_snapshot", return_value={"artifact_status": "ready", "repeat_error_trend": "flat"}), \
+            mock.patch.object(dashboard, "build_self_check_supervision_snapshot", return_value={"self_check_artifact_status": "ready", "self_check_status": "succeeded"}), \
+            mock.patch.object(
+                dashboard,
+                "build_main_closure_supervision_snapshot",
+                return_value={
+                    "main_closure_artifact_status": "ready",
+                    "delivery_failed_count": 0,
+                    "adoption_pending_count": 0,
+                    "purity_metrics": {
+                        "purity_gate_ok": False,
+                        "purity_gate_reasons": ["shadow_state_detected"],
+                    },
+                },
+            ):
+            payload = dashboard.get_health_acceptance_payload()
+        self.assertEqual(payload["status"], "critical")
+        self.assertIn("主闭环纯净度失真", payload["headline"])
+
+    def test_snapshot_env_id_always_returns_primary(self):
+        self.assertEqual(dashboard.snapshot_env_id("20260311-before-config-change-official"), "primary")
         self.assertEqual(dashboard.snapshot_env_id("20260311-before-config-change-primary"), "primary")
 
-    def test_restore_snapshot_and_restart_skips_restart_for_inactive_env(self):
+    def test_restore_snapshot_and_restart_restarts_primary(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            official_home = base / ".openclaw-official"
             snapshot_root = base / "snapshots"
-            target = snapshot_root / "20260311-test-official"
+            target = snapshot_root / "20260311-test-primary"
             target.mkdir(parents=True)
             (target / "manifest.json").write_text("{}", encoding="utf-8")
             cfg = {
@@ -1086,20 +1190,18 @@ class DashboardMemoryTests(unittest.TestCase):
                 "OPENCLAW_HOME": str(base / ".openclaw"),
                 "OPENCLAW_CODE": str(base / "code-primary"),
                 "GATEWAY_PORT": 18789,
-                "OPENCLAW_OFFICIAL_STATE": str(official_home),
-                "OPENCLAW_OFFICIAL_CODE": str(base / "code-official"),
-                "OPENCLAW_OFFICIAL_PORT": 19021,
             }
             with mock.patch.object(dashboard, "BASE_DIR", base), \
                 mock.patch.object(dashboard, "load_config", return_value=cfg), \
                 mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}), \
                 mock.patch.object(dashboard, "restart_active_openclaw_environment") as restart_env, \
                 mock.patch("dashboard_backend.SnapshotManager.restore_snapshot") as restore_snapshot:
-                ok, message = dashboard.restore_snapshot_and_restart("20260311-test-official")
+                restart_env.return_value = (True, "primary restarted", "1111", "2222", "primary")
+                ok, message = dashboard.restore_snapshot_and_restart("20260311-test-primary")
         self.assertTrue(ok)
-        self.assertIn("未切换当前活动环境", message)
+        self.assertIn("primary restarted", message)
         restore_snapshot.assert_called_once()
-        restart_env.assert_not_called()
+        restart_env.assert_called_once()
 
     def test_get_control_plane_overview_reports_recoverable_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1152,156 +1254,15 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["tasks"]["recoverable"], 1)
             self.assertEqual(payload["tasks"]["next_actor_counts"]["dev"], 1)
 
-    @mock.patch("dashboard_backend.wait_for_env_listener")
-    @mock.patch("dashboard_backend.run_script")
-    @mock.patch("dashboard_backend.save_config")
-    @mock.patch("dashboard_backend.get_listener_pid", return_value=None)
-    @mock.patch("dashboard_backend.enforce_single_active_listener")
-    @mock.patch("dashboard_backend.restore_environment_after_failed_switch")
-    def test_switch_openclaw_environment_rolls_back_when_primary_does_not_start(
-        self,
-        restore_previous,
-        single_active,
-        _get_listener_pid,
-        save_config,
-        run_script,
-        wait_for_env_listener,
-    ):
-        restore_previous.return_value = (True, "restored")
-        single_active.return_value = (True, "ok")
-        cfg = {"ACTIVE_OPENCLAW_ENV": "official"}
+    def test_switch_openclaw_environment_is_noop_for_primary(self):
+        ok, message = dashboard.switch_openclaw_environment("primary")
+        self.assertTrue(ok)
+        self.assertIn("当前已是 primary", message)
 
-        def fake_save_config(key, value):
-            cfg[key] = value
-            return True
-
-        save_config.side_effect = fake_save_config
-        run_script.side_effect = [
-            (0, "", ""),
-            (0, "", ""),
-            (0, "started", ""),
-        ]
-        wait_for_env_listener.return_value = False
-
-        with mock.patch.object(dashboard, "load_config", side_effect=lambda: dict(cfg)), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}), \
-            mock.patch.object(dashboard, "STORE") as store:
-            store.load_runtime_value.side_effect = lambda key, default=None: {"env_id": "official"} if key == "active_openclaw_env" else default
-            ok, message = dashboard.switch_openclaw_environment("primary")
-
+    def test_switch_openclaw_environment_rejects_non_primary_target(self):
+        ok, message = dashboard.switch_openclaw_environment("official")
         self.assertFalse(ok)
-        self.assertIn("Gateway 未成功启动", message)
-        self.assertEqual(save_config.call_args_list[0].args, ("ACTIVE_OPENCLAW_ENV", "primary"))
-        self.assertEqual(save_config.call_args_list[1].args, ("ACTIVE_OPENCLAW_ENV", "official"))
-        restore_previous.assert_called_once_with("official")
-        self.assertEqual(store.save_runtime_value.call_args_list[0].args[1]["env_id"], "primary")
-        self.assertIn("official", [call.args[1]["env_id"] for call in store.save_runtime_value.call_args_list])
-
-    @mock.patch("dashboard_backend.wait_for_env_listener")
-    @mock.patch("dashboard_backend.run_script")
-    @mock.patch("dashboard_backend.save_config")
-    @mock.patch("dashboard_backend.enforce_single_active_listener")
-    def test_switch_openclaw_environment_succeeds_when_primary_listener_is_ready(
-        self,
-        single_active,
-        save_config,
-        run_script,
-        wait_for_env_listener,
-    ):
-        single_active.return_value = (True, "ok")
-        cfg = {"ACTIVE_OPENCLAW_ENV": "official"}
-
-        def fake_save_config(key, value):
-            cfg[key] = value
-            return True
-
-        save_config.side_effect = fake_save_config
-        run_script.side_effect = [
-            (0, "", ""),
-            (0, "", ""),
-            (0, "started", ""),
-        ]
-        wait_for_env_listener.return_value = True
-
-        with mock.patch.object(dashboard, "load_config", side_effect=lambda: dict(cfg)), \
-            mock.patch.object(dashboard, "active_binding", side_effect=lambda current_cfg: {
-                "active_env": current_cfg.get("ACTIVE_OPENCLAW_ENV", "primary"),
-                "expected": {
-                    "gateway_port": 18789 if current_cfg.get("ACTIVE_OPENCLAW_ENV") != "official" else 19001,
-                    "gateway_label": "ai.openclaw.gateway" if current_cfg.get("ACTIVE_OPENCLAW_ENV") != "official" else "ai.openclaw.gateway.official",
-                    "config_path": "/tmp/openclaw.json",
-                },
-            }), \
-            mock.patch.object(dashboard, "get_env_specs", return_value={
-                "primary": {
-                    "id": "primary",
-                    "name": "当前主用版",
-                    "port": 18789,
-                    "gateway_label": "ai.openclaw.gateway",
-                    "config_path": Path("/tmp/openclaw.json"),
-                },
-                "official": {
-                    "id": "official",
-                    "name": "官方验证版",
-                    "port": 19001,
-                    "gateway_label": "ai.openclaw.gateway.official",
-                    "config_path": Path("/tmp/openclaw-official.json"),
-                },
-            }), \
-            mock.patch.object(dashboard, "get_listener_pid", side_effect=[None, None, 1111, None]), \
-            mock.patch.object(dashboard, "STORE") as store:
-            ok, message = dashboard.switch_openclaw_environment("primary")
-
-        self.assertTrue(ok)
-        self.assertEqual(message, "started")
-        self.assertEqual(save_config.call_count, 1)
-        self.assertEqual(store.save_runtime_value.call_args.args[1]["env_id"], "primary")
-
-    @mock.patch("dashboard_backend.wait_for_env_listener")
-    @mock.patch("dashboard_backend.run_script")
-    @mock.patch("dashboard_backend.get_listener_pid")
-    @mock.patch("dashboard_backend.enforce_single_active_listener")
-    def test_restart_active_openclaw_environment_restarts_official_only(
-        self,
-        single_active,
-        get_listener_pid,
-        run_script,
-        wait_for_env_listener,
-    ):
-        single_active.return_value = (True, "ok")
-        run_script.side_effect = [
-            (0, "", ""),
-            (0, "", ""),
-            (0, "official started", ""),
-        ]
-        get_listener_pid.side_effect = [2222, 3333]
-        wait_for_env_listener.return_value = True
-
-        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "official"}), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}), \
-            mock.patch.object(dashboard, "write_active_binding") as write_active_binding:
-            with mock.patch.object(dashboard, "STORE") as store:
-                store.load_runtime_value.side_effect = lambda key, default=None: {"env_id": "official"} if key == "active_openclaw_env" else default
-                ok, message, old_pid, new_pid, env_id = dashboard.restart_active_openclaw_environment()
-
-        self.assertTrue(ok)
-        self.assertEqual(message, "official started")
-        self.assertEqual(old_pid, "2222")
-        self.assertEqual(new_pid, "3333")
-        self.assertEqual(env_id, "official")
-        self.assertEqual(store.append_runtime_event.call_count, 4)
-        write_active_binding.assert_called_once()
-        self.assertEqual(write_active_binding.call_args.args[2], "official")
-        self.assertEqual(write_active_binding.call_args.kwargs["switch_state"], "committed")
-        self.assertEqual(
-            [call.args[0] for call in run_script.call_args_list],
-            [
-                [str(dashboard.OFFICIAL_MANAGER), "stop"],
-                [str(dashboard.DESKTOP_RUNTIME), "stop", "gateway"],
-                [str(dashboard.OFFICIAL_MANAGER), "start"],
-            ],
-        )
-        wait_for_env_listener.assert_called_once_with("official")
+        self.assertIn("只支持 primary", message)
 
     @mock.patch("dashboard_backend.wait_for_env_listener")
     @mock.patch("dashboard_backend.run_script")
@@ -1324,13 +1285,18 @@ class DashboardMemoryTests(unittest.TestCase):
         wait_for_env_listener.return_value = True
 
         with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"}), \
+            mock.patch.object(
+                dashboard,
+                "build_main_closure_supervision_snapshot",
+                return_value={"purity_gate_ok": True, "purity_gate_reasons": []},
+            ), \
             mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}), \
             mock.patch.object(dashboard, "write_active_binding") as write_active_binding:
             with mock.patch.object(dashboard, "STORE") as store:
                 ok, message, old_pid, new_pid, env_id = dashboard.restart_active_openclaw_environment()
 
         self.assertTrue(ok)
-        self.assertEqual(message, "primary started")
+        self.assertEqual(message, "Gateway 已重启")
         self.assertEqual(old_pid, "1111")
         self.assertEqual(new_pid, "4444")
         self.assertEqual(env_id, "primary")
@@ -1341,164 +1307,51 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in run_script.call_args_list],
             [
-                [str(dashboard.OFFICIAL_MANAGER), "stop"],
                 [str(dashboard.DESKTOP_RUNTIME), "stop", "gateway"],
                 [str(dashboard.DESKTOP_RUNTIME), "start", "gateway"],
             ],
         )
         wait_for_env_listener.assert_called_once_with("primary")
 
-    @mock.patch("dashboard_backend.record_change")
-    @mock.patch("dashboard_backend.PromotionController")
-    @mock.patch("dashboard_backend.get_task_registry_payload")
-    @mock.patch("dashboard_backend.list_openclaw_environments")
-    @mock.patch("dashboard_backend.load_config")
-    def test_execute_official_promotion_records_success(
-        self,
-        load_config,
-        list_openclaw_environments,
-        get_task_registry_payload,
-        promotion_controller,
-        record_change,
-    ):
-        load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "official"}
-        list_openclaw_environments.return_value = [{"id": "primary"}, {"id": "official"}]
-        get_task_registry_payload.return_value = {"summary": {"blocked": 0}}
-        controller = promotion_controller.return_value
-        controller.run.return_value = {
-            "status": "promoted",
-            "preflight": {"primary_git_head": "aaa111", "official_git_head": "bbb222"},
-            "backups": {"primary": "snap-a", "official": "snap-b"},
-        }
+    def test_restart_active_openclaw_environment_blocks_on_purity_gate_failure(self):
+        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"}), \
+            mock.patch.object(
+                dashboard,
+                "build_main_closure_supervision_snapshot",
+                return_value={"purity_gate_ok": False, "purity_gate_reasons": ["shadow_state_detected"]},
+            ), \
+            mock.patch.object(dashboard, "run_script") as run_script, \
+            mock.patch.object(dashboard, "record_restart_event") as restart_event:
+            ok, message, old_pid, new_pid, env_id = dashboard.restart_active_openclaw_environment()
 
-        result = dashboard.execute_official_promotion()
+        self.assertFalse(ok)
+        self.assertIn("主闭环纯净度门禁失败", message)
+        self.assertIsNone(old_pid)
+        self.assertIsNone(new_pid)
+        self.assertEqual(env_id, "primary")
+        run_script.assert_not_called()
+        restart_event.assert_called_once()
 
-        self.assertEqual(result["status"], "promoted")
-        record_change.assert_called_once()
-        self.assertIn("官方验证版晋升为当前主用版", record_change.call_args.args[1])
-
-    @mock.patch("dashboard_backend.execute_official_promotion")
-    def test_api_promote_environment_returns_preflight_failure_message(self, execute_official_promotion):
-        execute_official_promotion.return_value = {
-            "status": "failed_preflight",
-            "preflight": {
-                "checks": [
-                    {"name": "official_running", "ok": False, "detail": "官方验证环境未运行"},
-                    {"name": "blocked_tasks", "ok": True, "detail": "没有阻塞任务"},
-                ]
-            },
-        }
-
-        with dashboard.app.test_client() as client:
-            response = client.post("/api/environments/promote", json={"source_env": "official", "target_env": "primary"})
-
-        payload = response.get_json()
-        self.assertFalse(payload["success"])
-        self.assertEqual(payload["status"], "failed_preflight")
-        self.assertIn("官方验证环境未运行", payload["message"])
-
-    @mock.patch("dashboard_backend.get_listener_pid")
-    @mock.patch("dashboard_backend.run_script")
-    def test_enforce_single_active_listener_stops_inactive_env(self, run_script, get_listener_pid):
-        get_listener_pid.side_effect = [1111, 2222, None]
-        with mock.patch.object(
-            dashboard,
-            "load_config",
-            return_value={
-                "ACTIVE_OPENCLAW_ENV": "primary",
-                "OPENCLAW_HOME": "/tmp/openclaw-main",
-                "OPENCLAW_CODE": "/tmp/openclaw-code",
-                "GATEWAY_PORT": 18789,
-                "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-                "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-                "OPENCLAW_OFFICIAL_PORT": 19001,
-            },
-        ), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
-            ok, message = dashboard.enforce_single_active_listener("primary")
+    def test_enforce_single_active_listener_is_noop_in_single_env_mode(self):
+        ok, message = dashboard.enforce_single_active_listener("primary")
         self.assertTrue(ok)
-        self.assertIn("listener", message)
-        self.assertEqual(run_script.call_args.args[0], [str(dashboard.OFFICIAL_MANAGER), "stop"])
+        self.assertIn("单环境模式", message)
 
     def test_active_binding_prefers_runtime_store_binding(self):
         cfg = {"ACTIVE_OPENCLAW_ENV": "primary"}
         with mock.patch.object(dashboard, "load_config", return_value=cfg), \
             mock.patch("dashboard_backend.read_active_binding", return_value={"active_env": "primary", "switch_state": "committed", "binding_version": 1, "updated_at": 1, "expected": {}}), \
-            mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "official", "switch_state": "committed", "updated_at": 2}):
+            mock.patch.object(dashboard.STORE, "load_runtime_value", return_value={"env_id": "primary", "switch_state": "committed", "updated_at": 2}):
             binding = dashboard.active_binding(cfg)
-        self.assertEqual(binding["active_env"], "official")
+        self.assertEqual(binding["active_env"], "primary")
 
-    @mock.patch("dashboard_backend.get_listener_pid")
-    @mock.patch("dashboard_backend.run_script")
-    @mock.patch("dashboard_backend.terminate_listener_pid")
-    def test_enforce_single_active_listener_kills_unbound_env_when_stop_leaves_listener_alive(self, terminate_listener_pid, run_script, get_listener_pid):
-        get_listener_pid.side_effect = [1111, 2222, 2222]
-        terminate_listener_pid.return_value = (True, "killed")
-        with mock.patch.object(dashboard, "load_config", return_value={
-            "ACTIVE_OPENCLAW_ENV": "primary",
-            "OPENCLAW_HOME": "/tmp/openclaw-main",
-            "OPENCLAW_CODE": "/tmp/openclaw-code",
-            "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
-        }), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
-            ok, message = dashboard.enforce_single_active_listener("primary")
-        self.assertTrue(ok)
-        self.assertIn("未绑定环境", message)
-        terminate_listener_pid.assert_called_once_with(2222, "官方验证版")
+    def test_api_promote_environment_returns_single_env_message(self):
+        with dashboard.app.test_client() as client:
+            response = client.post("/api/environments/promote", json={"source_env": "official", "target_env": "primary"})
 
-    def test_enforce_single_active_listener_rejects_unbound_target_env(self):
-        with mock.patch.object(dashboard, "load_config", return_value={
-            "ACTIVE_OPENCLAW_ENV": "primary",
-            "OPENCLAW_HOME": "/tmp/openclaw-main",
-            "OPENCLAW_CODE": "/tmp/openclaw-code",
-            "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
-        }), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
-            ok, message = dashboard.enforce_single_active_listener("official")
-        self.assertFalse(ok)
-        self.assertIn("拒绝操作未绑定环境", message)
-
-    @mock.patch("dashboard_backend.manage_official_environment")
-    @mock.patch("dashboard_backend.save_config")
-    def test_set_official_auto_update_enabled(self, save_config, manage_official_environment):
-        save_config.return_value = True
-        manage_official_environment.return_value = (True, "Removed official OpenClaw update schedule.")
-        config = {
-            "ACTIVE_OPENCLAW_ENV": "official",
-            "OPENCLAW_HOME": "/tmp/openclaw-main",
-            "OPENCLAW_CODE": "/tmp/openclaw-code",
-            "GATEWAY_PORT": 18789,
-            "OPENCLAW_OFFICIAL_STATE": "/tmp/openclaw-official",
-            "OPENCLAW_OFFICIAL_CODE": "/tmp/openclaw-official-code",
-            "OPENCLAW_OFFICIAL_PORT": 19001,
-            "OPENCLAW_OFFICIAL_AUTO_UPDATE": False,
-        }
-        with mock.patch.object(dashboard, "load_config", return_value=config), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "official"}), \
-            mock.patch("dashboard_backend.Path.exists", return_value=False), \
-            mock.patch("dashboard_backend.get_listener_pid", side_effect=[1111, 2222]), \
-            mock.patch("dashboard_backend.read_git_head", side_effect=["abc123", "def456"]), \
-            mock.patch("dashboard_backend.env_has_control_ui_assets", side_effect=[True, True]), \
-            mock.patch("dashboard_backend.check_gateway_health_for_env", side_effect=[True, True]):
-            ok, message, official = dashboard.set_official_auto_update_enabled(False)
-        self.assertTrue(ok)
-        self.assertIn("Removed", message)
-        self.assertEqual(official["id"], "official")
-        save_config.assert_called_once_with("OPENCLAW_OFFICIAL_AUTO_UPDATE", "false")
-        manage_official_environment.assert_called_once_with("remove-schedule")
-
-    def test_manage_official_environment_blocks_start_when_not_active(self):
-        with mock.patch.object(dashboard, "load_config", return_value={"ACTIVE_OPENCLAW_ENV": "primary"}), \
-            mock.patch.object(dashboard, "active_binding", return_value={"active_env": "primary"}):
-            ok, message = dashboard.manage_official_environment("start")
-        self.assertFalse(ok)
-        self.assertIn("切换到 official", message)
+        payload = response.get_json()
+        self.assertFalse(payload["success"])
+        self.assertIn("无需版本晋升", payload["message"])
 
     def test_build_shared_state_snapshot_includes_context_and_policy(self):
         with mock.patch.object(dashboard, "list_openclaw_environments", return_value=[]), \

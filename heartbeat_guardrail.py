@@ -73,6 +73,101 @@ class HeartbeatConfig:
     retry_delays: list[int] = field(default_factory=lambda: [5, 15])
 
 
+class DurationProfile(str, Enum):
+    SHORT = "short"
+    MEDIUM = "medium"
+    LONG = "long"
+
+
+@dataclass(frozen=True)
+class TimingWindow:
+    profile: DurationProfile
+    phase: HeartbeatPhase
+    first_ack_sla: int
+    heartbeat_interval: int
+    hard_timeout: int
+
+    @property
+    def soft_followup_after(self) -> int:
+        return self.first_ack_sla
+
+    @property
+    def hard_followup_after(self) -> int:
+        return min(self.hard_timeout, self.first_ack_sla + self.heartbeat_interval)
+
+
+TIMING_MATRIX: dict[DurationProfile, dict[HeartbeatPhase, TimingWindow]] = {
+    DurationProfile.SHORT: {
+        HeartbeatPhase.PLANNING: TimingWindow(DurationProfile.SHORT, HeartbeatPhase.PLANNING, 30, 45, 180),
+        HeartbeatPhase.IMPLEMENTATION: TimingWindow(DurationProfile.SHORT, HeartbeatPhase.IMPLEMENTATION, 45, 60, 300),
+        HeartbeatPhase.TESTING: TimingWindow(DurationProfile.SHORT, HeartbeatPhase.TESTING, 45, 60, 300),
+        HeartbeatPhase.CALCULATION: TimingWindow(DurationProfile.SHORT, HeartbeatPhase.CALCULATION, 30, 45, 180),
+        HeartbeatPhase.VERIFICATION: TimingWindow(DurationProfile.SHORT, HeartbeatPhase.VERIFICATION, 30, 45, 180),
+        HeartbeatPhase.RISK_ASSESSMENT: TimingWindow(DurationProfile.SHORT, HeartbeatPhase.RISK_ASSESSMENT, 30, 45, 180),
+        HeartbeatPhase.IDLE: TimingWindow(DurationProfile.SHORT, HeartbeatPhase.IDLE, 30, 45, 180),
+    },
+    DurationProfile.MEDIUM: {
+        HeartbeatPhase.PLANNING: TimingWindow(DurationProfile.MEDIUM, HeartbeatPhase.PLANNING, 60, 90, 600),
+        HeartbeatPhase.IMPLEMENTATION: TimingWindow(DurationProfile.MEDIUM, HeartbeatPhase.IMPLEMENTATION, 90, 180, 1200),
+        HeartbeatPhase.TESTING: TimingWindow(DurationProfile.MEDIUM, HeartbeatPhase.TESTING, 60, 120, 900),
+        HeartbeatPhase.CALCULATION: TimingWindow(DurationProfile.MEDIUM, HeartbeatPhase.CALCULATION, 45, 90, 600),
+        HeartbeatPhase.VERIFICATION: TimingWindow(DurationProfile.MEDIUM, HeartbeatPhase.VERIFICATION, 45, 90, 600),
+        HeartbeatPhase.RISK_ASSESSMENT: TimingWindow(DurationProfile.MEDIUM, HeartbeatPhase.RISK_ASSESSMENT, 45, 90, 600),
+        HeartbeatPhase.IDLE: TimingWindow(DurationProfile.MEDIUM, HeartbeatPhase.IDLE, 60, 120, 600),
+    },
+    DurationProfile.LONG: {
+        HeartbeatPhase.PLANNING: TimingWindow(DurationProfile.LONG, HeartbeatPhase.PLANNING, 120, 180, 1200),
+        HeartbeatPhase.IMPLEMENTATION: TimingWindow(DurationProfile.LONG, HeartbeatPhase.IMPLEMENTATION, 180, 300, 1800),
+        HeartbeatPhase.TESTING: TimingWindow(DurationProfile.LONG, HeartbeatPhase.TESTING, 120, 240, 1500),
+        HeartbeatPhase.CALCULATION: TimingWindow(DurationProfile.LONG, HeartbeatPhase.CALCULATION, 90, 180, 1200),
+        HeartbeatPhase.VERIFICATION: TimingWindow(DurationProfile.LONG, HeartbeatPhase.VERIFICATION, 90, 180, 1200),
+        HeartbeatPhase.RISK_ASSESSMENT: TimingWindow(DurationProfile.LONG, HeartbeatPhase.RISK_ASSESSMENT, 90, 180, 1200),
+        HeartbeatPhase.IDLE: TimingWindow(DurationProfile.LONG, HeartbeatPhase.IDLE, 120, 180, 1200),
+    },
+}
+
+
+def resolve_timing_window(*, phase: HeartbeatPhase, profile: DurationProfile | str | None = None) -> TimingWindow:
+    resolved_profile = DurationProfile((profile or DurationProfile.MEDIUM).value if isinstance(profile, DurationProfile) else (profile or DurationProfile.MEDIUM))
+    return TIMING_MATRIX[resolved_profile][phase]
+
+
+def infer_duration_profile(*, phase: HeartbeatPhase, task: dict[str, Any] | None = None, control: dict[str, Any] | None = None) -> DurationProfile:
+    task = task or {}
+    control = control or {}
+    explicit = (
+        (task.get("duration_profile") or "")
+        or ((task.get("metadata") or {}).get("duration_profile") if isinstance(task.get("metadata"), dict) else "")
+        or ((control.get("contract") or {}).get("duration_profile") if isinstance(control.get("contract"), dict) else "")
+    )
+    if explicit in {"short", "medium", "long"}:
+        return DurationProfile(explicit)
+    if phase in {HeartbeatPhase.PLANNING, HeartbeatPhase.CALCULATION, HeartbeatPhase.VERIFICATION, HeartbeatPhase.RISK_ASSESSMENT}:
+        return DurationProfile.SHORT
+    if phase == HeartbeatPhase.TESTING:
+        return DurationProfile.MEDIUM
+    if phase == HeartbeatPhase.IMPLEMENTATION:
+        return DurationProfile.LONG
+    return DurationProfile.MEDIUM
+
+
+def build_user_visible_status_template(
+    *,
+    control_state: str,
+    phase: HeartbeatPhase,
+    timing: TimingWindow,
+    heartbeat_ok: bool,
+    followup_stage: str | None = None,
+) -> str:
+    if control_state in {"blocked_unverified", "blocked_control_followup_failed"}:
+        return "追证失败，已 blocked：任务缺少可验证结构化回执，主人当前可见为阻塞状态。"
+    if followup_stage:
+        return f"超过窗口，正在追证：当前阶段={phase.value}，已进入{followup_stage}追证窗口。"
+    if heartbeat_ok:
+        return f"已开始且心跳正常：当前阶段={phase.value}，心跳窗口={timing.heartbeat_interval}s。"
+    return f"已开始：当前阶段={phase.value}，等待下一次结构化心跳（窗口 {timing.heartbeat_interval}s）。"
+
+
 @dataclass
 class Heartbeat:
     """心跳记录"""
@@ -407,8 +502,8 @@ class GuardrailEngine:
         task = self.store.get_task(task_id)
         if not task:
             return {"success": False, "error": "task_not_found"}
-        
-        current_state = TaskState(task.get("status", "pending"))
+
+        current_state = self._normalize_task_state(task.get("status", "pending"))
         
         # 检查是否可以转换
         transition = self.get_transition(current_state, trigger)
@@ -458,6 +553,14 @@ class GuardrailEngine:
             "to_state": transition.to_state.value,
             "action": action.value,
         }
+
+    @staticmethod
+    def _normalize_task_state(raw_state: str | None) -> TaskState:
+        """兼容健康助手 registry 中的运行态别名。"""
+        state = (raw_state or "pending").strip().lower()
+        if state == "background":
+            return TaskState.RUNNING
+        return TaskState(state)
 
 
 class TaskWatcher:

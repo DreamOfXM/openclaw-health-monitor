@@ -6,24 +6,49 @@ document.addEventListener('DOMContentLoaded', () => {
     initOverview();
 });
 
-let useRealtimePush = true;
+let useRealtimePush = false;
+let overviewRefreshStarted = false;
+const METRICS_CACHE_KEY = 'dashboard_v2_metrics_cache';
+
+function restoreCachedMetrics() {
+    try {
+        const cached = localStorage.getItem(METRICS_CACHE_KEY);
+        if (!cached) return;
+        const data = JSON.parse(cached);
+        if (!data || typeof data !== 'object') return;
+        if (typeof data.cpu_percent !== 'number' || typeof data.memory_percent !== 'number') return;
+        updateMetricsUI(data);
+    } catch (error) {
+        console.error('恢复指标缓存失败:', error);
+    }
+}
+
+function persistMetricsCache(data) {
+    try {
+        localStorage.setItem(METRICS_CACHE_KEY, JSON.stringify({
+            cpu_percent: Number(data.cpu_percent || 0),
+            memory_percent: Number(data.memory_percent || 0),
+            memory_used_gb: Number(data.memory_used_gb || 0),
+            memory_total_gb: Number(data.memory_total_gb || 0),
+            sessions: Number(data.sessions || 0),
+            pid: data.pid || null,
+            gateway_healthy: Boolean(data.gateway_healthy),
+            timestamp: data.timestamp || new Date().toISOString(),
+        }));
+    } catch (error) {
+        console.error('写入指标缓存失败:', error);
+    }
+}
 
 async function initOverview() {
+    restoreCachedMetrics();
     await Promise.all([
         loadHealthScore(),
         loadMetrics(),
-        loadEnvironment(),
+        loadEnvironment(true),
         loadEvents()
     ]);
-    
-    if (useRealtimePush && typeof EventSource !== 'undefined') {
-        startRealtimeStreams();
-    } else {
-        AutoRefresh.start('healthScore', loadHealthScore, AppState.refreshIntervals.healthScore);
-        AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
-        AutoRefresh.start('events', loadEvents, AppState.refreshIntervals.events);
-        AutoRefresh.start('environment', loadEnvironment, AppState.refreshIntervals.environment);
-    }
+    startOverviewRefresh();
     
     const toggleBtn = document.getElementById('toggle-events');
     const eventsContainer = document.getElementById('events-container');
@@ -46,6 +71,37 @@ async function initOverview() {
     document.querySelector('#settings-modal .modal-overlay')?.addEventListener('click', hideSettingsModal);
     
     loadSettings();
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            stopOverviewRefresh();
+            return;
+        }
+        startOverviewRefresh();
+        loadHealthScore();
+        loadMetrics();
+        loadEnvironment(true);
+        loadEvents();
+    });
+}
+
+function startOverviewRefresh() {
+    if (overviewRefreshStarted) return;
+    overviewRefreshStarted = true;
+    if (useRealtimePush && typeof EventSource !== 'undefined') {
+        startRealtimeStreams();
+        return;
+    }
+    AutoRefresh.start('healthScore', loadHealthScore, AppState.refreshIntervals.healthScore);
+    AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
+    AutoRefresh.start('events', loadEvents, AppState.refreshIntervals.events);
+    AutoRefresh.start('environment', loadEnvironment, AppState.refreshIntervals.environment);
+}
+
+function stopOverviewRefresh() {
+    overviewRefreshStarted = false;
+    AutoRefresh.stopAll();
+    RealtimePush.disconnectAll();
 }
 
 function startRealtimeStreams() {
@@ -54,19 +110,14 @@ function startRealtimeStreams() {
             updateHealthScoreUI(data);
         }
     });
-    
-    RealtimePush.startMetricsStream((data) => {
-        if (data) {
-            updateMetricsUI(data);
-        }
-    });
-    
+
     RealtimePush.startEventsStream((events) => {
         if (events) {
             updateEventsUI(events);
         }
     });
-    
+
+    AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
     AutoRefresh.start('environment', loadEnvironment, AppState.refreshIntervals.environment);
 }
 
@@ -129,9 +180,9 @@ function updateHealthScoreUI(data) {
  */
 function getStatusText(status) {
     const statusMap = {
-        'excellent': '系统健康',
-        'good': '运行良好',
-        'warning': '需要关注',
+        'excellent': '运行状态正常',
+        'good': '运行基本正常',
+        'warning': '存在待处理风险',
         'critical': '需要立即处理'
     };
     return statusMap[status] || '未知状态';
@@ -149,11 +200,20 @@ function updateNextActionUI(action) {
     if (!actionCard || !priorityEl || !messageEl || !btnEl) return;
     
     // 更新优先级标签
-    priorityEl.textContent = action.priority_label;
+    const priorityLabelMap = {
+        immediate: '立即处理',
+        today: '优先处理',
+        week: '持续关注',
+        none: '无需处理',
+    };
+    const normalizedPriority = action.priority || 'none';
+    priorityEl.textContent = priorityLabelMap[normalizedPriority] || action.priority_label || '待确认';
     priorityEl.className = 'action-priority ' + action.priority;
     
     // 更新消息
-    messageEl.textContent = action.message;
+    messageEl.textContent = normalizedPriority === 'none'
+        ? '当前没有需要你立刻处理的问题，继续观察系统运行即可。'
+        : (action.message || '请查看当前风险项并处理。');
     
     // 更新按钮
     if (action.action) {
@@ -188,6 +248,7 @@ async function loadMetrics() {
         
         const data = response.data;
         AppState.cache.metrics = data;
+        persistMetricsCache(data);
         
         // 更新指标UI
         updateMetricsUI(data);
@@ -262,9 +323,9 @@ function getMetricClass(value, warningThreshold, dangerThreshold) {
 /**
  * 加载环境信息
  */
-async function loadEnvironment() {
+async function loadEnvironment(forceRefresh = false) {
     try {
-        const response = await API.getEnvironment();
+        const response = await API.getEnvironment(forceRefresh);
         
         if (!response.success) {
             console.error('获取环境失败:', response.error);
@@ -293,11 +354,11 @@ function updateEnvironmentUI(data) {
     const statePath = document.getElementById('state-path');
     
     if (envBadge) {
-        envBadge.textContent = (data.active_environment || 'unknown').toUpperCase();
+        envBadge.textContent = '运行中实例';
     }
     
     if (envId) {
-        envId.textContent = (data.active_environment || 'unknown').toUpperCase();
+        envId.textContent = 'OpenClaw 当前运行实例';
     }
     
     if (envHealthy) {
@@ -330,7 +391,7 @@ function updateConsoleButton(data) {
     
     if (!consoleLink || !consoleBadge) return;
     
-    const activeEnv = data.active_environment || 'unknown';
+    const activeEnv = data.active_environment || 'primary';
     const gatewayHealthy = data.gateway_healthy || false;
     const isActive = activeEnv === 'primary' && gatewayHealthy;
     
@@ -350,9 +411,7 @@ function updateConsoleButton(data) {
         consoleBadge.className = 'console-badge inactive';
         if (consoleCard) consoleCard.classList.add('inactive');
         if (consoleMessage) {
-            consoleMessage.textContent = activeEnv === 'official' 
-                ? '当前激活的是Official环境，Primary环境未激活' 
-                : '环境未激活或Gateway不健康';
+            consoleMessage.textContent = '运行环境未运行或 Gateway 不健康';
             consoleMessage.style.display = 'block';
         }
     }
@@ -490,18 +549,18 @@ function loadSettings() {
  * 应用设置
  */
 function applySettings() {
-    AppState.refreshIntervals.healthScore = currentSettings.refreshInterval * 1000;
-    AppState.refreshIntervals.metrics = currentSettings.refreshInterval * 1000;
-    AppState.refreshIntervals.events = currentSettings.refreshInterval * 1000;
+    const intervalSeconds = Math.max(5, currentSettings.refreshInterval || 5);
+    AppState.refreshIntervals.healthScore = intervalSeconds * 1000;
+    AppState.refreshIntervals.metrics = intervalSeconds * 1000;
+    AppState.refreshIntervals.events = intervalSeconds * 1000;
+    AppState.refreshIntervals.environment = Math.max(intervalSeconds * 2000, 10000);
     
     if (useRealtimePush) {
-        RealtimePush.disconnectAll();
-        startRealtimeStreams();
+        stopOverviewRefresh();
+        startOverviewRefresh();
     } else {
-        AutoRefresh.stopAll();
-        AutoRefresh.start('healthScore', loadHealthScore, AppState.refreshIntervals.healthScore);
-        AutoRefresh.start('metrics', loadMetrics, AppState.refreshIntervals.metrics);
-        AutoRefresh.start('events', loadEvents, AppState.refreshIntervals.events);
+        stopOverviewRefresh();
+        startOverviewRefresh();
     }
     
     const eventsSection = document.querySelector('.events-section');

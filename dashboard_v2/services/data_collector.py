@@ -135,7 +135,7 @@ class DataCollector:
     """数据收集器"""
 
     REFRESH_INTERVALS = {
-        "health_score": 10,
+        "health_score": 5,
         "metrics": 5,
         "events": 5,
         "environment": 10,
@@ -143,7 +143,7 @@ class DataCollector:
         "tasks": 10,
         "learnings": 60,
         "config": -1,
-        "snapshots": -1,
+        "snapshots": 30,
     }
 
     def __init__(self):
@@ -168,13 +168,24 @@ class DataCollector:
     def _shared_state(self, name: str, default: Any) -> Any:
         return _read_json_file(SHARED_STATE_DIR / name, default)
 
+    def _shared_state_fresh(self, name: str, default: Any, *, max_age_seconds: int) -> Any:
+        payload = self._shared_state(name, default)
+        if not isinstance(payload, dict):
+            return default
+        generated_at = int(payload.get("generated_at") or 0)
+        if generated_at <= 0:
+            return default
+        if (int(time.time()) - generated_at) > max_age_seconds:
+            return default
+        return payload
+
     def _load_runtime_context(self) -> Dict[str, Any]:
         legacy = _legacy_dashboard()
         config = legacy.load_config()
         runtime_binding = _runtime_value(legacy, "active_openclaw_env", {})
-        active_env = "primary"  # 只支持 primary 环境
+        # 单环境模式：即使历史 runtime 里残留 official，也只返回 primary。
+        active_env = "primary"
         selected_env = legacy.env_spec(active_env, config)
-        task_registry = legacy.get_task_registry_payload(limit=20)
         return {
             "legacy": legacy,
             "config": config,
@@ -186,7 +197,6 @@ class DataCollector:
             },
             "active_env": active_env,
             "selected_env": selected_env,
-            "task_registry": task_registry,
         }
 
     def get_health_score_data(self, force_refresh: bool = False) -> Dict[str, Any]:
@@ -197,12 +207,46 @@ class DataCollector:
         )
 
     def _fetch_health_score_data(self) -> Dict[str, Any]:
+        environment = self._fetch_environment_data()
+        task_registry = self._shared_state("task-registry-snapshot.json", {})
+        learning_runtime = self._shared_state("learning-runtime-status.json", {})
+        control_plane = self._shared_state("control-plane-summary.json", {})
+        main_closure_purity_gate = self._shared_state("main-closure-purity-gate.json", {})
+        task_summary = (task_registry or {}).get("summary") if isinstance(task_registry, dict) else {}
+        learning_freshness = 0
+        if isinstance(learning_runtime, dict):
+            learning_freshness = int(
+                learning_runtime.get("reflection_freshness")
+                or learning_runtime.get("learning_freshness")
+                or 0
+            )
+        error_categories: list[str] = []
+        if isinstance(control_plane, dict):
+            actions = control_plane.get("actions") or {}
+            tasks = control_plane.get("tasks") or {}
+            if int(actions.get("pending") or 0) > 0:
+                error_categories.append("pending_actions")
+            if int(tasks.get("protocol_violations") or 0) > 0:
+                error_categories.append("protocol_violations")
+            if int(tasks.get("blocked") or 0) > 0:
+                error_categories.append("blocked_tasks")
+        if isinstance(main_closure_purity_gate, dict) and not bool(main_closure_purity_gate.get("ok", True)):
+            error_categories.append("main_closure_purity_gate_failed")
         return {
-            "environment": self.get_environment(),
+            "environment": {
+                "gateway_healthy": bool(environment.get("gateway_healthy")),
+            },
             "metrics": self.get_metrics(),
-            "tasks": self.get_tasks(),
-            "learning": self.get_learnings(),
-            "errors": self._fetch_error_data(),
+            "tasks": {
+                "blocked_count": int((task_summary or {}).get("blocked", 0) or 0),
+            },
+            "learning": {
+                "is_fresh": bool(learning_freshness == 0 or learning_freshness < 86400),
+            },
+            "errors": {
+                "categories": error_categories,
+                "count": len(error_categories),
+            },
         }
 
     def get_metrics(self, force_refresh: bool = False) -> Dict[str, Any]:
@@ -217,40 +261,54 @@ class DataCollector:
         memory_percent = 0.0
         memory_used_gb = 0.0
         memory_total_gb = 0.0
-        try:
-            import psutil
-
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory()
-            memory_percent = memory.percent
-            memory_used_gb = memory.used / (1024 ** 3)
-            memory_total_gb = memory.total / (1024 ** 3)
-        except Exception:
+        runtime_health = self._shared_state_fresh("runtime-health.json", {}, max_age_seconds=20)
+        runtime_metrics = (runtime_health or {}).get("metrics") if isinstance(runtime_health, dict) else {}
+        if isinstance(runtime_metrics, dict) and runtime_metrics:
+            cpu_percent = _coerce_number(runtime_metrics.get("cpu"))
+            memory_used_gb = _coerce_number(runtime_metrics.get("mem_used"))
+            memory_total_gb = _coerce_number(runtime_metrics.get("mem_total"))
+            if memory_total_gb > 0:
+                memory_percent = (memory_used_gb / memory_total_gb) * 100
+        if (
+            not runtime_metrics
+            or (cpu_percent <= 0 and memory_used_gb <= 0)
+            or memory_total_gb <= 0
+        ):
             try:
-                legacy_metrics = _legacy_dashboard().get_system_metrics()
-                cpu_percent = _coerce_number(legacy_metrics.get("cpu"))
-                memory_used_gb = _coerce_number(legacy_metrics.get("mem_used"))
-                memory_total_gb = _coerce_number(legacy_metrics.get("mem_total"))
-                if memory_total_gb > 0:
-                    memory_percent = (memory_used_gb / memory_total_gb) * 100
+                import psutil
+
+                cpu_percent = psutil.cpu_percent(interval=None)
+                memory = psutil.virtual_memory()
+                memory_percent = memory.percent
+                memory_used_gb = memory.used / (1024 ** 3)
+                memory_total_gb = memory.total / (1024 ** 3)
             except Exception:
-                pass
+                try:
+                    legacy_metrics = _legacy_dashboard().get_system_metrics()
+                    cpu_percent = _coerce_number(legacy_metrics.get("cpu"))
+                    memory_used_gb = _coerce_number(legacy_metrics.get("mem_used"))
+                    memory_total_gb = _coerce_number(legacy_metrics.get("mem_total"))
+                    if memory_total_gb > 0:
+                        memory_percent = (memory_used_gb / memory_total_gb) * 100
+                except Exception:
+                    pass
 
         gateway_pid = None
-        gateway_healthy = False
+        gateway_healthy = bool(runtime_health.get("gateway_healthy")) if isinstance(runtime_health, dict) else False
         sessions = 0
         guardian_pid = None
         try:
             context = self._load_runtime_context()
             legacy = context["legacy"]
             selected_env = context["selected_env"]
-            task_registry = context["task_registry"]
             gateway = legacy.get_gateway_process_for_env(selected_env)
             guardian = legacy.get_guardian_process_info()
             gateway_pid = (gateway or {}).get("pid")
             guardian_pid = (guardian or {}).get("pid")
-            gateway_healthy = bool(legacy.check_gateway_health_for_env(selected_env))
-            summary = task_registry.get("summary") or {}
+            if not gateway_healthy:
+                gateway_healthy = bool(legacy.check_gateway_health_for_env(selected_env))
+            task_registry = self._shared_state("task-registry-snapshot.json", {})
+            summary = (task_registry or {}).get("summary") if isinstance(task_registry, dict) else {}
             sessions = int(summary.get("running", 0) or 0) + int(summary.get("background", 0) or 0)
         except Exception:
             pass
@@ -307,39 +365,113 @@ class DataCollector:
         try:
             context = self._load_runtime_context()
             legacy = context["legacy"]
-            config = context["config"]
             active_env = context["active_env"]
             selected_env = context["selected_env"]
-            task_registry = context["task_registry"]
-
-            raw_environments = legacy.list_openclaw_environments(config)
-            environments = [self._normalize_environment(item) for item in raw_environments]
-            for item in environments:
-                item["active"] = item.get("id") == active_env
-            selected = next((item for item in environments if item.get("id") == active_env), {})
-            bootstrap_status = legacy.build_bootstrap_status(config)
-            context_readiness = legacy.build_context_lifecycle_readiness(config)
+            runtime_binding = context.get("binding") or {}
+            runtime_health = self._shared_state_fresh("runtime-health.json", {}, max_age_seconds=20)
+            bootstrap_status = self._shared_state("bootstrap-status.json", {})
             watcher_summary = self._shared_state("watcher-summary.json", {})
             restart_runtime_status = self._shared_state("restart-runtime-status.json", {})
-            runtime_binding = context.get("binding") or {}
+
+            if not isinstance(bootstrap_status, dict) or str(bootstrap_status.get("env_id") or active_env) != active_env:
+                bootstrap_status = _runtime_value(legacy, f"bootstrap_status:{active_env}", {}) or {}
+
+            context_readiness = {}
+            if isinstance(bootstrap_status, dict):
+                context_readiness = bootstrap_status.get("context_readiness") or {}
+            if not context_readiness:
+                baseline = self._shared_state("context-lifecycle-baseline.json", {})
+                if isinstance(baseline, dict):
+                    bootstrap_snapshot = baseline.get("bootstrap_status") or {}
+                    if isinstance(bootstrap_snapshot, dict):
+                        context_readiness = bootstrap_snapshot.get("context_readiness") or {}
+
+            gateway_process = None
+            listener_pid = None
+            try:
+                gateway_process = legacy.get_gateway_process_for_env(selected_env)
+                listener_pid = (gateway_process or {}).get("pid")
+            except Exception:
+                gateway_process = None
+
+            runtime_matches = isinstance(runtime_health, dict) and str(runtime_health.get("env_id") or active_env) == active_env
+            running = bool(runtime_health.get("gateway_running")) if runtime_matches else False
+            if listener_pid:
+                running = True
+
+            # 当前实例一旦有 listener，就优先信实时 /health 探测，而不是旧 shared-state。
+            healthy = False
+            if listener_pid or running:
+                try:
+                    healthy = bool(legacy.check_gateway_health_for_env(selected_env))
+                except Exception:
+                    healthy = bool(runtime_health.get("gateway_healthy")) if runtime_matches else False
+
+            try:
+                control_ui_ready = bool(legacy.env_has_control_ui_assets(selected_env))
+            except Exception:
+                control_ui_ready = False
+
+            channel_readiness = _runtime_value(legacy, f"channel_readiness:{active_env}", {}) or {}
+            expected_config_path = str(Path(str(selected_env.get("home") or "")) / "openclaw.json")
+            if not isinstance(channel_readiness, dict):
+                channel_readiness = {}
+            checked_at = int(channel_readiness.get("checked_at") or 0) if isinstance(channel_readiness, dict) else 0
+            if (
+                not channel_readiness
+                or str(channel_readiness.get("config_path") or "") != expected_config_path
+                or checked_at <= 0
+                or (int(time.time()) - checked_at) > 120
+            ):
+                channel_readiness = {}
+
+            selected = self._normalize_environment(
+                {
+                    "id": active_env,
+                    "name": selected_env.get("name") or "OpenClaw",
+                    "description": selected_env.get("description") or "当前唯一运行环境",
+                    "active": True,
+                    "running": running,
+                    "healthy": healthy,
+                    "port": selected_env.get("port"),
+                    "code": str(selected_env.get("code") or ""),
+                    "home": str(selected_env.get("home") or ""),
+                    "git_head": str(selected_env.get("git_head") or ""),
+                    "target_head": str(selected_env.get("git_head") or ""),
+                    "listener_pid": listener_pid,
+                    "token_prefix": "",
+                    "control_ui_ready": control_ui_ready,
+                    "dashboard_url": legacy.env_dashboard_url(selected_env) if hasattr(legacy, "env_dashboard_url") else "",
+                    "dashboard_open_link": legacy.env_open_link(selected_env) if hasattr(legacy, "env_open_link") and running and control_ui_ready else "",
+                    "auto_update_enabled": False,
+                    "auto_update_expected": False,
+                    "auto_update_installed": False,
+                    "auto_update_drift": False,
+                    "update_hour": None,
+                    "update_minute": None,
+                    "channel_readiness": channel_readiness,
+                }
+            )
+            environments = [selected]
+
             recent_binding_events = _runtime_value(legacy, "binding_audit_events", [])
             if not isinstance(recent_binding_events, list):
                 recent_binding_events = []
+            recent_binding_events = [
+                item
+                for item in recent_binding_events
+                if str((item or {}).get("env_id") or "primary") == "primary"
+            ]
             binding_audit = {
-                "active_env": runtime_binding.get("active_env") or active_env,
+                "active_env": "primary",
                 "switch_state": runtime_binding.get("switch_state") or "committed",
                 "updated_at": runtime_binding.get("updated_at") or 0,
                 "source": "runtime_db",
                 "recent_events": recent_binding_events,
             }
             environment_integrity = []
-            detect_integrity = getattr(legacy, "detect_environment_inconsistencies", None)
-            if callable(detect_integrity):
-                environment_integrity = detect_integrity(raw_environments, active_env)
-            promotion_summary = legacy.build_environment_promotion_summary(raw_environments, task_registry)
-
             return {
-                "gateway_healthy": bool(legacy.check_gateway_health_for_env(selected_env)),
+                "gateway_healthy": bool(healthy),
                 "active_environment": active_env,
                 "environments": environments,
                 "active": selected,
@@ -357,7 +489,6 @@ class DataCollector:
                 "restart_runtime_status": restart_runtime_status,
                 "binding_audit": binding_audit,
                 "environment_integrity": environment_integrity,
-                "promotion_summary": promotion_summary,
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as exc:
@@ -375,7 +506,6 @@ class DataCollector:
                 "restart_runtime_status": {},
                 "binding_audit": {},
                 "environment_integrity": [],
-                "promotion_summary": {},
                 "error": str(exc),
                 "timestamp": datetime.now().isoformat(),
             }
@@ -389,17 +519,48 @@ class DataCollector:
 
     def _normalize_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         control = task.get("control") or {}
-        latest_receipt = task.get("latest_receipt") or {}
+        if not control and any(key in task for key in ("control_state", "approved_summary", "next_action", "claim_level")):
+            control = {
+                "control_state": task.get("control_state") or "",
+                "approved_summary": task.get("approved_summary") or "",
+                "next_action": task.get("next_action") or "",
+                "next_actor": task.get("next_actor") or "",
+                "claim_level": task.get("claim_level") or "",
+                "evidence_level": task.get("evidence_level") or "",
+                "evidence_summary": task.get("evidence_summary") or "",
+                "missing_receipts": list(task.get("missing_receipts") or []),
+                "phase_statuses": list(task.get("phase_statuses") or []),
+                "control_action": task.get("control_action"),
+                "protocol": task.get("protocol") or {},
+                "pipeline_recovery": task.get("pipeline_recovery") or {},
+            }
+        latest_receipt = task.get("latest_receipt") or (control.get("latest_receipt") if isinstance(control, dict) else {}) or {}
         task_id = str(task.get("task_id") or "")
+        root_task = task.get("current_root_task") or task.get("root_task") or {}
+        current_workflow = task.get("current_workflow_run") or {}
+        current_finalizer = task.get("current_finalizer") or {}
+        current_delivery = task.get("current_delivery_attempt") or {}
+        current_followups = list(task.get("current_followups") or [])
         question = str(task.get("question") or task.get("last_user_message") or task_id or "未命名任务").strip()
         raw_status = str(task.get("status") or "unknown")
         status = raw_status
         control_state = str(control.get("control_state") or "")
+        workflow_state = str(current_workflow.get("current_state") or root_task.get("workflow_state") or "")
         blocked_reason = str(task.get("blocked_reason") or "")
         if control_state.startswith("blocked") or blocked_reason:
             status = "blocked"
+        elif workflow_state in {"blocked", "delivery_failed", "dlq", "failed", "cancelled"}:
+            status = "blocked"
+        elif workflow_state == "delivered":
+            status = "completed"
+        elif workflow_state in {"accepted", "routed", "queued", "started", "completed", "delivery_pending", "ambiguous_success"}:
+            status = "running"
         elif raw_status == "background":
             status = "running"
+        current_stage = str(task.get("current_stage") or "").strip()
+        if workflow_state and not current_stage:
+            current_stage = workflow_state
+        truth_level = "core_projection" if root_task or current_workflow else "derived"
         return {
             "id": task_id,
             "task_id": task_id,
@@ -414,7 +575,50 @@ class DataCollector:
             "agent": latest_receipt.get("agent") or control.get("next_actor") or "-",
             "env_id": task.get("env_id") or "",
             "channel": task.get("channel") or "",
-            "current_stage": task.get("current_stage") or "",
+            "root_task": {
+                "root_task_id": root_task.get("root_task_id") or "",
+                "user_goal_summary": root_task.get("user_goal_summary") or "",
+                "workflow_state": root_task.get("workflow_state") or "",
+                "foreground": bool(root_task.get("foreground")),
+                "finalization_state": root_task.get("finalization_state") or "",
+                "final_status": root_task.get("final_status") or "",
+                "delivery_state": root_task.get("delivery_state") or "",
+                "delivery_confirmation_level": root_task.get("delivery_confirmation_level") or "",
+                "open_followup_count": int(root_task.get("open_followup_count") or 0),
+                "followup_types": list(root_task.get("followup_types") or []),
+            },
+            "current_workflow_run": {
+                "workflow_run_id": current_workflow.get("workflow_run_id") or "",
+                "current_state": current_workflow.get("current_state") or "",
+                "state_reason": current_workflow.get("state_reason") or "",
+                "terminal_at": current_workflow.get("terminal_at") or 0,
+            },
+            "current_finalizer": {
+                "finalization_id": current_finalizer.get("finalization_id") or "",
+                "decision_state": current_finalizer.get("decision_state") or "",
+                "final_status": current_finalizer.get("final_status") or "",
+                "delivery_state": current_finalizer.get("delivery_state") or "",
+                "user_visible_summary": current_finalizer.get("user_visible_summary") or "",
+            },
+            "current_delivery_attempt": {
+                "delivery_attempt_id": current_delivery.get("delivery_attempt_id") or "",
+                "current_state": current_delivery.get("current_state") or "",
+                "confirmation_level": current_delivery.get("confirmation_level") or "",
+                "channel": current_delivery.get("channel") or "",
+                "target": current_delivery.get("target") or "",
+            },
+            "current_followups": [
+                {
+                    "followup_id": item.get("followup_id") or "",
+                    "followup_type": item.get("followup_type") or "",
+                    "trigger_reason": item.get("trigger_reason") or "",
+                    "current_state": item.get("current_state") or "",
+                    "suggested_action": item.get("suggested_action") or "",
+                }
+                for item in current_followups[:10]
+            ],
+            "followup_count": len(current_followups),
+            "current_stage": current_stage,
             "blocked_reason": task.get("blocked_reason") or "",
             "last_progress_label": task.get("last_progress_label") or "-",
             "latest_receipt": {
@@ -428,17 +632,35 @@ class DataCollector:
                 "next_action": control.get("next_action") or "",
                 "next_actor": control.get("next_actor") or "",
                 "claim_level": control.get("claim_level") or "",
+                "user_visible_progress": task.get("user_visible_progress") or control.get("user_visible_progress") or "",
+                "followup_stage": task.get("followup_stage") or control.get("followup_stage") or "",
+                "heartbeat_age_seconds": task.get("heartbeat_age_seconds") if task.get("heartbeat_age_seconds") is not None else control.get("heartbeat_age_seconds"),
+                "heartbeat_ok": task.get("heartbeat_ok") if task.get("heartbeat_ok") is not None else control.get("heartbeat_ok"),
+                "timing": task.get("timing") or control.get("timing") or {},
             },
             "session_key": task.get("session_key") or "",
-            "truth_level": "derived",
+            "truth_level": truth_level,
         }
 
     def _fetch_task_data(self) -> Dict[str, Any]:
         try:
+            current_facts = _read_json_file(PROJECT_ROOT / "data" / "current-task-facts.json", {})
             payload = self._shared_state("task-registry-snapshot.json", {})
-            if not isinstance(payload, dict) or not payload.get("summary"):
+            main_closure = self._shared_state("main-closure-runtime-status.json", {})
+            has_current_facts = isinstance(current_facts, dict) and isinstance(current_facts.get("current_task"), dict)
+            if not isinstance(payload, dict) or (not payload.get("summary") and not has_current_facts):
                 payload = _legacy_dashboard().get_task_registry_payload(limit=120)
+            closure_roots = list((main_closure or {}).get("roots") or []) if isinstance(main_closure, dict) else []
+            closure_by_session = {
+                str(item.get("session_key") or ""): item
+                for item in closure_roots
+                if item.get("session_key")
+            }
             raw_tasks = list(payload.get("tasks") or [])
+            for item in raw_tasks:
+                session_key = str(item.get("session_key") or "")
+                if session_key and session_key in closure_by_session:
+                    item["root_task"] = closure_by_session[session_key]
             raw_tasks.sort(
                 key=lambda item: int(item.get("updated_at") or item.get("last_progress_at") or item.get("created_at") or 0),
                 reverse=True,
@@ -446,9 +668,28 @@ class DataCollector:
             tasks = [self._normalize_task(item) for item in raw_tasks[:50]]
             current = payload.get("current")
             summary = payload.get("summary") or {}
-            current_facts = _read_json_file(PROJECT_ROOT / "data" / "current-task-facts.json", {})
             if (not isinstance(current, dict) or not current) and isinstance(current_facts, dict):
                 current = current_facts.get("current_task") or None
+            current_root = current_facts.get("current_root_task") if isinstance(current_facts, dict) else None
+            if not current and isinstance(current_root, dict):
+                current = next(
+                    (
+                        item
+                        for item in raw_tasks
+                        if str(((item.get("root_task") or {}).get("root_task_id") or "")) == str(current_root.get("root_task_id") or "")
+                    ),
+                    None,
+                )
+            if isinstance(current, dict) and isinstance(current_facts, dict):
+                if isinstance(current_root, dict):
+                    current["current_root_task"] = current_root
+                for key in ("current_workflow_run", "current_finalizer", "current_delivery_attempt"):
+                    value = current_facts.get(key)
+                    if isinstance(value, dict):
+                        current[key] = value
+                followups = current_facts.get("current_followups")
+                if isinstance(followups, list):
+                    current["current_followups"] = followups
             return {
                 "blocked_count": int(summary.get("blocked", 0) or 0),
                 "total_count": int(summary.get("total", 0) or 0),
@@ -457,6 +698,7 @@ class DataCollector:
                 "tasks": tasks,
                 "summary": summary,
                 "control_queue": list(payload.get("control_queue") or [])[:20],
+                "current_root_task": current_root if isinstance(current_root, dict) else None,
                 "session_resolution": payload.get("session_resolution") or (current_facts.get("session_resolution") if isinstance(current_facts, dict) else {}) or {},
                 "timestamp": datetime.now().isoformat(),
             }
@@ -469,6 +711,7 @@ class DataCollector:
                 "tasks": [],
                 "summary": {},
                 "control_queue": [],
+                "current_root_task": None,
                 "session_resolution": {},
                 "error": str(exc),
                 "timestamp": datetime.now().isoformat(),
@@ -644,16 +887,63 @@ class DataCollector:
 
     def _normalize_learning(self, item: Dict[str, Any]) -> Dict[str, Any]:
         ts = int(item.get("updated_at") or item.get("created_at") or item.get("last_seen_at") or 0)
+        category = str(item.get("category") or "misc")
+        title = str(item.get("title") or item.get("summary") or "未命名 learning")
+        description = str(item.get("detail") or item.get("action") or "")
+        promoted_target = str(item.get("promoted_target") or "")
+        internal_control = self._is_internal_control_learning(item)
+        if internal_control:
+            capability_title = "任务闭环保护规则"
+            capability_summary = self._summarize_internal_control_learning(title, description)
+            audience = "internal"
+        else:
+            capability_title = title
+            capability_summary = description
+            audience = "user"
         return {
             "id": item.get("id") or item.get("learning_key") or "",
-            "title": item.get("title") or item.get("summary") or "未命名 learning",
-            "description": item.get("detail") or item.get("action") or "",
+            "title": title,
+            "description": description,
             "status": item.get("status") or "pending",
-            "category": item.get("category") or "misc",
+            "category": category,
             "occurrences": int(item.get("occurrences") or 0),
             "timestamp": _iso_from_timestamp(ts),
-            "promoted_target": item.get("promoted_target") or "",
+            "promoted_target": promoted_target,
+            "audience": audience,
+            "capability_title": capability_title,
+            "capability_summary": capability_summary,
+            "internal_control": internal_control,
         }
+
+    def _is_internal_control_learning(self, item: Dict[str, Any]) -> bool:
+        category = str(item.get("category") or "")
+        title = str(item.get("title") or item.get("summary") or "")
+        detail = str(item.get("detail") or item.get("action") or "")
+        combined = f"{title} {detail}".lower()
+        if category == "control_plane":
+            return True
+        return any(
+            marker in combined
+            for marker in (
+                "missing_pipeline_receipt",
+                "control_followup_failed",
+                "blocked_reason=",
+                "control=",
+                "task=",
+            )
+        )
+
+    def _summarize_internal_control_learning(self, title: str, detail: str) -> str:
+        lowered = detail.lower()
+        if "missing_pipeline_receipt" in lowered:
+            return "系统学到：当结构化回执缺失时，任务不能被视为真正完成，必须先补齐回执再允许收口。"
+        if "control_followup_failed" in lowered:
+            return "系统学到：当自动追问链路失败时，不能假设任务仍在稳定推进，需要显式记录异常并触发人工关注。"
+        if "blocked_reason=" in lowered:
+            return "系统学到：任务阻塞必须形成结构化原因，不能只靠自然语言模糊描述。"
+        if title:
+            return f"系统学到：{title} 已被提升为内部控制规则，用于约束后续任务闭环。"
+        return "系统学到一条新的内部控制规则，用于约束后续任务闭环。"
 
     def _normalize_reflection(self, item: Dict[str, Any]) -> Dict[str, Any]:
         ts = int(item.get("created_at") or item.get("updated_at") or 0)
@@ -666,9 +956,12 @@ class DataCollector:
     def _fetch_learning_data(self) -> Dict[str, Any]:
         try:
             payload = _legacy_dashboard().get_learning_center_payload(limit=20)
-            items = [self._normalize_learning(item) for item in (payload.get("learnings") or [])]
+            raw_items = [self._normalize_learning(item) for item in (payload.get("learnings") or [])]
             reflections = [self._normalize_reflection(item) for item in (payload.get("reflections") or [])]
-            promoted = [item for item in items if item.get("status") == "promoted"]
+            visible_items = [item for item in raw_items if not item.get("internal_control")]
+            internal_items = [item for item in raw_items if item.get("internal_control")]
+            promoted = [item for item in visible_items if item.get("status") == "promoted"]
+            internal_promoted = [item for item in internal_items if item.get("status") == "promoted"]
             latest_ts = max(
                 [
                     value
@@ -689,9 +982,15 @@ class DataCollector:
                 "summary": payload.get("summary") or {},
                 "source_mode": payload.get("source_mode") or "legacy_store",
                 "suggestions": payload.get("suggestions") or [],
-                "items": items,
+                "items": visible_items,
                 "reflections": reflections,
                 "promoted": promoted,
+                "internal_items": internal_items,
+                "internal_promoted": internal_promoted,
+                "internal_summary": {
+                    "learning_count": len(internal_items),
+                    "promoted_count": len(internal_promoted),
+                },
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as exc:
@@ -704,6 +1003,9 @@ class DataCollector:
                 "items": [],
                 "reflections": [],
                 "promoted": [],
+                "internal_items": [],
+                "internal_promoted": [],
+                "internal_summary": {"learning_count": 0, "promoted_count": 0},
                 "error": str(exc),
                 "timestamp": datetime.now().isoformat(),
             }
@@ -750,18 +1052,22 @@ class DataCollector:
             "timestamp": datetime.now().isoformat(),
         }
 
-    def get_snapshots(self, force_refresh: bool = False) -> Dict[str, Any]:
+    def get_snapshots(self, *, limit: int = 20, offset: int = 0, force_refresh: bool = False) -> Dict[str, Any]:
         return self._get_cached_or_fetch(
-            "snapshots",
-            self._fetch_snapshot_data,
+            f"snapshots:{limit}:{offset}",
+            lambda: self._fetch_snapshot_data(limit=limit, offset=offset),
             force_refresh,
         )
 
-    def _fetch_snapshot_data(self) -> Dict[str, Any]:
-        snapshots = _legacy_dashboard().list_snapshots(limit=20)
+    def _fetch_snapshot_data(self, *, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+        snapshots = _legacy_dashboard().list_snapshots(limit=max(limit + offset, 20))
+        page = snapshots[offset:offset + limit]
         return {
             "count": len(snapshots),
-            "snapshots": snapshots,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + limit < len(snapshots),
+            "snapshots": page,
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -787,6 +1093,13 @@ class DataCollector:
         }
 
     def switch_environment(self, env_id: str) -> Dict[str, Any]:
+        if env_id != "primary":
+            return {
+                "success": False,
+                "message": "单环境模式，仅支持 primary",
+                "environment": env_id,
+                "timestamp": datetime.now().isoformat(),
+            }
         legacy = _legacy_dashboard()
         success, message = legacy.switch_openclaw_environment(env_id)
         self.invalidate_cache()
@@ -797,17 +1110,16 @@ class DataCollector:
             "timestamp": datetime.now().isoformat(),
         }
 
-    def promote_environment(self) -> Dict[str, Any]:
-        # 单环境模式，不支持晋升
-        return {"status": "skipped", "message": "单环境模式，不支持版本晋升"}
-
-    def set_official_auto_update(self, enabled: bool) -> Dict[str, Any]:
-        # 单环境模式，不支持 official 自动更新
+    def restart_environment(self) -> Dict[str, Any]:
+        legacy = _legacy_dashboard()
+        success, message, old_pid, new_pid, env_id = legacy.restart_active_openclaw_environment()
+        self.invalidate_cache()
         return {
-            "success": False,
-            "message": "单环境模式，不支持 official 自动更新",
-            "enabled": enabled,
-            "environment": {},
+            "success": success,
+            "message": message,
+            "environment": env_id,
+            "old_pid": old_pid,
+            "new_pid": new_pid,
             "timestamp": datetime.now().isoformat(),
         }
 

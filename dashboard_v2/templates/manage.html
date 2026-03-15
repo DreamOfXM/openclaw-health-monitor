@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenClaw Health Monitor - 管理</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/manage.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css', v=asset_version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/manage.css', v=asset_version) }}">
 </head>
 <body>
     <header class="header">
@@ -18,7 +18,7 @@
                 <a href="/" class="nav-item">总览</a>
                 <a href="/explore" class="nav-item">详情</a>
                 <a href="/manage" class="nav-item active">管理</a>
-                <a href="/heartbeat" class="nav-item">心跳监控</a>
+                <a href="/heartbeat" class="nav-item">任务监督</a>
             </nav>
             <div class="header-actions">
                 <span id="active-env" class="env-badge">--</span>
@@ -28,59 +28,6 @@
 
     <main class="main">
         <div class="manage-grid">
-            <!-- 版本晋升 -->
-            <section class="manage-section">
-                <div class="section-header">
-                    <h2 class="section-title">
-                        <span class="section-icon">🚀</span>
-                        版本晋升
-                    </h2>
-                    <span class="badge badge-warning">高危操作</span>
-                </div>
-                
-                <div class="promotion-card">
-                    <div class="promotion-status">
-                        <div class="status-item">
-                            <span class="status-label">当前状态</span>
-                            <span id="promotion-status" class="status-value">检查中...</span>
-                        </div>
-                        <div class="status-item">
-                            <span class="status-label">晋升就绪</span>
-                            <span id="promotion-ready" class="status-value">--</span>
-                        </div>
-                    </div>
-
-                    <div class="promotion-checklist">
-                        <h4>晋升检查清单</h4>
-                        <ul id="promotion-checks">
-                            <li class="check-item pending">
-                                <span class="check-icon">⏳</span>
-                                <span class="check-text">Official环境运行正常</span>
-                            </li>
-                            <li class="check-item pending">
-                                <span class="check-icon">⏳</span>
-                                <span class="check-text">运行时间 > 24小时</span>
-                            </li>
-                            <li class="check-item pending">
-                                <span class="check-icon">⏳</span>
-                                <span class="check-text">健康评分 > 80</span>
-                            </li>
-                            <li class="check-item pending">
-                                <span class="check-icon">⏳</span>
-                                <span class="check-text">无阻塞任务</span>
-                            </li>
-                        </ul>
-                    </div>
-
-                    <div class="promotion-actions">
-                        <button id="btn-promote" class="btn btn-danger btn-large" disabled>
-                            ⚠️ 执行版本晋升
-                        </button>
-                        <p class="action-hint">晋升将把Official版本提升为Primary，需要二次确认</p>
-                    </div>
-                </div>
-            </section>
-
             <!-- 快照管理 -->
             <section class="manage-section">
                 <div class="section-header">
@@ -115,7 +62,7 @@
                 <div class="section-header">
                     <h2 class="section-title">
                         <span class="section-icon">🔄</span>
-                        环境切换
+                        运行控制
                     </h2>
                     <span class="badge badge-warning">高危操作</span>
                 </div>
@@ -130,40 +77,24 @@
                     </div>
 
                     <div class="env-switch-actions">
-                        <button id="btn-switch-official" class="btn btn-secondary btn-switch">
-                            切换到 Official
+                        <button id="btn-restart-primary" class="btn btn-secondary btn-switch">
+                            重启运行环境
                         </button>
-                        <button id="btn-switch-primary" class="btn btn-secondary btn-switch">
-                            切换到 Primary
-                        </button>
-                    </div>
-
-                    <div class="env-current">
-                        <h4>Official 自动更新</h4>
-                        <div class="env-info">
-                            <span id="official-auto-update-status" class="env-name-large">--</span>
-                            <span id="official-auto-update-detail" class="env-status-text">--</span>
-                        </div>
-                        <div class="env-switch-actions">
-                            <button id="btn-enable-official-auto-update" class="btn btn-secondary btn-switch">启用自动更新</button>
-                            <button id="btn-disable-official-auto-update" class="btn btn-secondary btn-switch">关闭自动更新</button>
-                        </div>
                     </div>
 
                     <div class="console-access">
                         <h4>OpenClaw 控制台</h4>
-                        <p class="console-hint">访问当前激活环境的Dashboard</p>
+                        <p class="console-hint">访问当前唯一运行环境的 Dashboard</p>
                         <a id="console-dashboard-link" href="#" class="btn btn-info" target="_blank" rel="noopener noreferrer">
                             <span>🚀</span> 打开控制台
                         </a>
                         <p id="console-inactive-msg" class="console-inactive" style="display: none;">
-                            当前环境未激活，无法访问控制台
+                            当前环境未运行，无法访问控制台
                         </p>
                     </div>
 
                     <div class="switch-warning">
-                        <p>⚠️ 切换环境将停止当前环境的Gateway并启动另一个</p>
-                        <p>请确保在维护窗口期执行此操作</p>
+                        <p>此操作会重启当前 OpenClaw。重启期间消息通道插件与控制台会短暂不可用，健康守护助手会负责拉起并恢复。</p>
                     </div>
                 </div>
             </section>
@@ -283,7 +214,7 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/base.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/manage.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/base.js', v=asset_version) }}"></script>
+    <script src="{{ url_for('static', filename='js/manage.js', v=asset_version) }}"></script>
 </body>
 </html>

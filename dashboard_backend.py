@@ -16,6 +16,7 @@ import threading
 import resource
 import html
 import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request, redirect
@@ -48,6 +49,7 @@ STORE = MonitorStateStore(BASE_DIR)
 SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
 GUARDIAN_PID_FILE = BASE_DIR / "logs" / "guardian.pid"
 DESKTOP_RUNTIME = BASE_DIR / "desktop_runtime.sh"
+CHANNEL_READINESS_TTL_SECONDS = 120
 
 
 def raise_nofile_limit(target: int = 65536) -> None:
@@ -261,6 +263,7 @@ def get_task_registry_payload(limit: int = 8) -> dict:
         latest_receipt = task.get("latest_receipt") or {}
         timeline = STORE.list_task_events(task["task_id"], limit=6)
         control = STORE.derive_task_control_state(task["task_id"])
+        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
         control_actions = STORE.list_task_control_actions(
             task_id=task["task_id"],
             statuses=["pending", "sent", "blocked"],
@@ -286,6 +289,20 @@ def get_task_registry_payload(limit: int = 8) -> dict:
                 "evidence": latest_receipt.get("evidence", "-"),
             },
             "control": control,
+            "core_truth": {
+                "workflow_state": core.get("workflow_state") or "",
+                "finalization_state": core.get("finalization_state") or "",
+                "final_status": core.get("final_status") or "",
+                "delivery_state": core.get("delivery_state") or "",
+                "delivery_confirmation_level": core.get("delivery_confirmation_level") or "",
+                "needs_followup": bool(core.get("needs_followup")),
+                "truth_level": "core_projection" if core.get("has_core_projection") else "derived",
+            },
+            "root_task": core.get("root_task"),
+            "current_workflow_run": core.get("current_workflow_run"),
+            "current_finalizer": core.get("current_finalizer"),
+            "current_delivery_attempt": core.get("current_delivery_attempt"),
+            "current_followups": core.get("current_followups") or [],
             "control_actions": control_actions,
             "timeline": [
                 {
@@ -314,13 +331,48 @@ def get_task_registry_payload(limit: int = 8) -> dict:
             datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S") if ts else "-"
         )
         task["control"] = STORE.derive_task_control_state(task["task_id"])
+        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
+        task["core_truth"] = {
+            "workflow_state": core.get("workflow_state") or "",
+            "finalization_state": core.get("finalization_state") or "",
+            "final_status": core.get("final_status") or "",
+            "delivery_state": core.get("delivery_state") or "",
+            "delivery_confirmation_level": core.get("delivery_confirmation_level") or "",
+            "needs_followup": bool(core.get("needs_followup")),
+            "truth_level": "core_projection" if core.get("has_core_projection") else "derived",
+        }
+        task["root_task"] = core.get("root_task")
+        task["current_workflow_run"] = core.get("current_workflow_run")
+        task["current_finalizer"] = core.get("current_finalizer")
+        task["current_delivery_attempt"] = core.get("current_delivery_attempt")
+        task["current_followups"] = core.get("current_followups") or []
         task["control_actions"] = STORE.list_task_control_actions(
             task_id=task["task_id"],
             statuses=["pending", "sent", "blocked"],
             limit=5,
         )
-    active = [task for task in tasks if task.get("status") in {"running", "blocked", "background"}]
+    def _task_is_core_active(task: dict[str, Any]) -> bool:
+        workflow_state = str((task.get("core_truth") or {}).get("workflow_state") or "")
+        if not workflow_state:
+            return False
+        if workflow_state in {"delivered", "failed", "dlq", "cancelled"}:
+            return False
+        if workflow_state == "completed" and str(task.get("status") or "") == "completed":
+            return False
+        return True
+
+    active = [task for task in tasks if _task_is_core_active(task) or task.get("status") in {"running", "blocked", "background"}]
+    foreground_root_id = str((STORE.get_latest_foreground_binding() or {}).get("foreground_root_task_id") or "")
     current = summarize_task(STORE.get_current_task(env_id=env_id)) if enabled else None
+    if foreground_root_id:
+        current = next(
+            (
+                summarize_task(task)
+                for task in tasks
+                if str(((task.get("root_task") or {}).get("root_task_id") or "")) == foreground_root_id
+            ),
+            current,
+        )
     summary = STORE.summarize_tasks(env_id=env_id) if enabled else {"total": 0}
     control_queue = (
         STORE.list_task_control_actions(env_id=env_id, statuses=["pending", "sent", "blocked"], limit=12)
@@ -682,29 +734,34 @@ def load_config() -> dict:
 
 def active_binding(config: Optional[dict] = None) -> dict[str, Any]:
     cfg = config or load_config()
-    binding = read_active_binding(BASE_DIR, cfg)
     runtime_binding = STORE.load_runtime_value("active_openclaw_env", {})
-    if not isinstance(runtime_binding, dict):
-        return binding
-    runtime_env = str(runtime_binding.get("env_id") or "").strip()
     specs = get_env_specs(cfg)
+    default_env = "primary" if "primary" in specs else next(iter(specs), "primary")
+    if not isinstance(runtime_binding, dict):
+        return {
+            "active_env": default_env,
+            "switch_state": "committed",
+            "binding_version": 1,
+            "updated_at": int(time.time()),
+            "expected": dict(specs.get(default_env) or {}),
+        }
+    runtime_env = str(runtime_binding.get("env_id") or "").strip()
     if runtime_env not in specs:
-        return binding
+        runtime_env = default_env
     expected = dict(specs[runtime_env])
     if isinstance(runtime_binding.get("expected"), dict):
         expected.update(runtime_binding.get("expected") or {})
     return {
         "active_env": runtime_env,
-        "switch_state": str(runtime_binding.get("switch_state") or binding.get("switch_state") or "committed"),
-        "binding_version": int(runtime_binding.get("binding_version") or binding.get("binding_version") or 1),
-        "updated_at": int(runtime_binding.get("updated_at") or binding.get("updated_at") or int(time.time())),
+        "switch_state": str(runtime_binding.get("switch_state") or "committed"),
+        "binding_version": int(runtime_binding.get("binding_version") or 1),
+        "updated_at": int(runtime_binding.get("updated_at") or int(time.time())),
         "expected": expected,
     }
 
 
 def active_env_id(config: Optional[dict] = None) -> str:
-    # 只支持 primary 环境
-    return "primary"
+    return str(active_binding(config).get("active_env") or "primary")
 
 
 def get_env_specs(config: Optional[dict] = None) -> dict[str, dict]:
@@ -1212,27 +1269,14 @@ def build_main_closure_supervision_snapshot(config: Optional[dict] = None) -> di
             events_payload = {}
 
     if not runtime_status:
-        runtime_status = STORE.load_runtime_value(
-            f"main_closure_summary:{env_id}",
-            {
-                "env_id": env_id,
-                "main_closure_artifact_status": "missing",
-                "foreground_root_task_id": "",
-                "active_root_count": 0,
-                "background_root_count": 0,
-                "adoption_pending_count": 0,
-                "finalization_pending_count": 0,
-                "delivery_failed_count": 0,
-                "late_result_count": 0,
-                "binding_source_counts": {},
-                "roots": [],
-            },
-        )
+        runtime_status = {
+            "env_id": env_id,
+            "main_closure_artifact_status": "derived",
+            **STORE.summarize_main_closure(limit_roots=20, limit_events=50),
+        }
     if not events_payload:
-        events_payload = STORE.load_runtime_value(
-            f"main_closure_events:{env_id}",
-            {"env_id": env_id, "events": []},
-        )
+        closure_summary = STORE.summarize_main_closure(limit_roots=20, limit_events=50)
+        events_payload = {"env_id": env_id, "events": closure_summary.get("events") or []}
 
     if runtime_status_path.exists() and events_path.exists() and runtime_status_valid and events_valid:
         artifact_status = "ready"
@@ -1259,7 +1303,35 @@ def build_main_closure_supervision_snapshot(config: Optional[dict] = None) -> di
         "binding_source_counts": runtime_status.get("binding_source_counts") or {},
         "recent_event_types": [str(item.get("event_type") or "unknown") for item in recent_events[:5]],
         "roots": list(runtime_status.get("roots") or [])[:10],
+        "finalizers": list(runtime_status.get("finalizers") or [])[:10],
+        "delivery_attempts": list(runtime_status.get("delivery_attempts") or [])[:10],
+        "followups": list(runtime_status.get("followups") or [])[:20],
+        "purity_metrics": runtime_status.get("purity_metrics") or {},
+        "purity_gate_ok": bool((runtime_status.get("purity_metrics") or {}).get("purity_gate_ok", True)),
+        "purity_gate_reasons": list((runtime_status.get("purity_metrics") or {}).get("purity_gate_reasons") or []),
         "events": recent_events,
+    }
+
+
+def load_main_closure_purity_gate(env_id: str) -> dict[str, Any]:
+    payload = STORE.load_runtime_value(
+        f"main_closure_purity_gate:{env_id}",
+        {
+            "generated_at": int(time.time()),
+            "env_id": env_id,
+            "ok": True,
+            "reasons": [],
+            "metrics": {},
+        },
+    )
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "generated_at": int(payload.get("generated_at") or 0),
+        "env_id": str(payload.get("env_id") or env_id),
+        "ok": bool(payload.get("ok", True)),
+        "reasons": list(payload.get("reasons") or []),
+        "metrics": dict(payload.get("metrics") or {}),
     }
 
 
@@ -1278,15 +1350,14 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
     learning_supervision = build_learning_supervision_snapshot(cfg)
     self_check_supervision = build_self_check_supervision_snapshot(cfg)
     main_closure_supervision = build_main_closure_supervision_snapshot(cfg)
-    watcher_summary = STORE.load_runtime_value(
-        f"watcher_summary:{selected_env['id']}",
-        {
+    watcher_summary = STORE.load_runtime_value(f"watcher_summary:{selected_env['id']}", None)
+    if not isinstance(watcher_summary, dict):
+        watcher_summary = {
             "env_id": selected_env["id"],
             "monitor_dir": str(selected_home / "shared-context" / "monitor-tasks"),
             "imported": 0,
             "summary": STORE.summarize_watcher_tasks(env_id=selected_env["id"]),
-        },
-    )
+        }
     restart_events = STORE.load_runtime_value(f"restart_events:{selected_env['id']}", [])
     if not isinstance(restart_events, list):
         restart_events = []
@@ -1304,6 +1375,7 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
         "current_task_facts": {
             "summary": task_registry.get("summary") or {},
             "current": task_registry.get("current"),
+            "current_root_task": task_registry.get("current_root_task"),
             "session_resolution": task_registry.get("session_resolution") or {},
         },
         "task_registry_snapshot": task_registry,
@@ -1351,6 +1423,13 @@ def build_shared_state_snapshot(config: Optional[dict] = None) -> dict:
             "events": self_check_supervision.get("events") or [],
         },
         "main_closure_runtime_status": main_closure_supervision,
+        "main_closure_purity_gate": {
+            "generated_at": main_closure_supervision.get("generated_at"),
+            "env_id": main_closure_supervision.get("env_id"),
+            "ok": bool(main_closure_supervision.get("purity_gate_ok", True)),
+            "reasons": list(main_closure_supervision.get("purity_gate_reasons") or []),
+            "metrics": dict(main_closure_supervision.get("purity_metrics") or {}),
+        },
         "main_closure_events": {
             "generated_at": main_closure_supervision.get("generated_at"),
             "env_id": main_closure_supervision.get("env_id"),
@@ -1419,25 +1498,10 @@ def read_git_target_head(repo: Path, ref: str) -> str:
 
 
 def check_gateway_health_for_env(spec: dict) -> bool:
-    if spec.get("id") == "primary":
-        return check_gateway_health()
     try:
-        result = subprocess.run(
-            [
-                "/usr/bin/curl",
-                "--noproxy",
-                "*",
-                "-fsS",
-                f"http://127.0.0.1:{spec['port']}/health",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env={**os.environ, "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"},
-        )
-        if result.returncode != 0:
-            return False
-        payload = json.loads(result.stdout or "{}")
+        req = urllib.request.Request(f"http://127.0.0.1:{int(spec['port'])}/health")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
         return bool(payload.get("ok"))
     except Exception:
         return False
@@ -1448,6 +1512,26 @@ def get_gateway_process_for_env(spec: dict) -> Optional[dict]:
     if pid is None:
         return None
     return get_process_info_by_pid(pid)
+
+
+def _channel_status_from_detail(detail: str) -> str:
+    lowered = (detail or "").lower()
+    if "works" in lowered or "configured" in lowered or "enabled" in lowered:
+        return "ready"
+    return "warning"
+
+
+def _parse_channel_readiness_summary(text: str) -> dict[str, dict[str, str]]:
+    channels: dict[str, dict[str, str]] = {}
+    for match in re.finditer(r"^\s*-\s+([A-Za-z][A-Za-z0-9_-]*)\s+default:\s+(.+)$", text or "", re.MULTILINE):
+        channel = match.group(1).strip()
+        detail = match.group(2).strip()
+        channels[channel.lower()] = {
+            "name": channel,
+            "status": _channel_status_from_detail(detail),
+            "detail": detail,
+        }
+    return channels
 
 
 def probe_channel_readiness_for_env(spec: dict) -> dict[str, Any]:
@@ -1465,24 +1549,29 @@ def probe_channel_readiness_for_env(spec: dict) -> dict[str, Any]:
     except Exception as exc:
         code, stdout, stderr = -1, "", str(exc)
     text = (stdout or stderr or "").strip()
+    channels = _parse_channel_readiness_summary(text)
+    overall_status = "ready" if code == 0 else "warning"
+    if any(item.get("status") != "ready" for item in channels.values()):
+        overall_status = "warning"
     readiness = {
-        "status": "ready" if code == 0 else "warning",
+        "status": overall_status,
         "summary": text,
         "config_path": str(Path(spec["home"]) / "openclaw.json"),
         "gateway_port": int(spec["port"]),
+        "checked_at": int(time.time()),
+        "channels": channels,
         "feishu": {"status": "unknown", "detail": "未检测到 Feishu 通道结果"},
     }
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- Feishu default:"):
-            detail = stripped.split(":", 1)[1].strip()
-            readiness["feishu"] = {
-                "status": "ready" if "works" in detail else "warning",
-                "detail": detail,
-            }
-            if "works" not in detail:
-                readiness["status"] = "warning"
-            break
+    if "feishu" in channels:
+        readiness["feishu"] = {
+            "status": channels["feishu"]["status"],
+            "detail": channels["feishu"]["detail"],
+        }
+    if "dingtalk" in channels:
+        readiness["dingtalk"] = {
+            "status": channels["dingtalk"]["status"],
+            "detail": channels["dingtalk"]["detail"],
+        }
     return readiness
 
 
@@ -1502,12 +1591,17 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
         channel_readiness = STORE.load_runtime_value(f"channel_readiness:{item['id']}", {})
         readiness_stale = not isinstance(channel_readiness, dict) or not channel_readiness
         if isinstance(channel_readiness, dict) and channel_readiness:
-            readiness_stale = str(channel_readiness.get("config_path") or "") != str(Path(item["home"]) / "openclaw.json")
+            checked_at = int(channel_readiness.get("checked_at") or 0)
+            readiness_stale = (
+                str(channel_readiness.get("config_path") or "") != str(Path(item["home"]) / "openclaw.json")
+                or checked_at <= 0
+                or (int(time.time()) - checked_at) > CHANNEL_READINESS_TTL_SECONDS
+            )
         if readiness_stale and active and running:
             channel_readiness = probe_channel_readiness_for_env(item)
             STORE.save_runtime_value(
                 f"channel_readiness:{item['id']}",
-                {"env_id": item["id"], "checked_at": int(time.time()), **channel_readiness},
+                {"env_id": item["id"], **channel_readiness},
             )
         environments.append(
             {
@@ -1535,14 +1629,12 @@ def list_openclaw_environments(config: Optional[dict] = None) -> list[dict]:
     return environments
 
 
-def build_environment_promotion_summary(environments: list[dict], task_registry: dict) -> dict:
-    # 只支持 primary 环境，不再需要 promotion 逻辑
+def build_runtime_mode_summary(environments: list[dict], task_registry: dict) -> dict:
     return {
-        "candidate_env": None,
-        "safe_to_promote": False,
-        "headline": "单环境模式，无需切换",
+        "mode": "single_primary",
+        "headline": "单环境模式",
         "reasons": [],
-        "recommended_action": "当前只维护一套环境。",
+        "recommended_action": "当前只维护 primary 一套运行环境。",
     }
 
 
@@ -1831,6 +1923,7 @@ def get_health_acceptance_payload(task_limit: int = 200, learning_limit: int = 1
             status = "warning"
         headline = "OpenClaw 内部 self-check 尚未接入，当前仍缺少自检事实"
     closure_artifact_status = str(main_closure_supervision.get("main_closure_artifact_status") or "missing")
+    purity_metrics = dict(main_closure_supervision.get("purity_metrics") or {})
     if closure_artifact_status == "missing":
         if status == "healthy":
             status = "warning"
@@ -1838,6 +1931,10 @@ def get_health_acceptance_payload(task_limit: int = 200, learning_limit: int = 1
     elif closure_artifact_status == "invalid":
         status = "critical"
         headline = "OpenClaw 主闭环事实文件存在但格式异常"
+    if not bool(purity_metrics.get("purity_gate_ok", True)):
+        status = "critical"
+        reasons = ", ".join(str(item) for item in (purity_metrics.get("purity_gate_reasons") or [])[:3])
+        headline = f"主闭环纯净度失真：{reasons or 'shadow-state gate failed'}"
     if int(main_closure_supervision.get("delivery_failed_count") or 0) > 0:
         status = "critical"
         headline = "存在已收口但未成功送达的主任务"
@@ -2050,18 +2147,7 @@ def get_top_processes(limit: int = 15) -> list:
 
 def check_gateway_health() -> bool:
     """检查 Gateway 健康"""
-    try:
-        result = subprocess.run(
-            "openclaw gateway health",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        output = f"{result.stdout}\n{result.stderr}".lower()
-        return result.returncode == 0 and "gateway target" not in output
-    except Exception:
-        return False
+    return check_gateway_health_for_env(env_spec(active_env_id(load_config()), load_config()))
 
 
 def get_system_metrics() -> dict:
@@ -2509,6 +2595,18 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
     cfg = load_config()
     target_env = active_env_id(cfg)
     spec = env_spec(target_env, cfg)
+    purity_gate = build_main_closure_supervision_snapshot(cfg)
+    if not bool(purity_gate.get("purity_gate_ok", True)):
+        reasons = list(purity_gate.get("purity_gate_reasons") or [])
+        reason_text = ", ".join(str(item) for item in reasons[:3]) or "main_closure_purity_gate_failed"
+        record_restart_event(
+            source="dashboard",
+            target=target_env,
+            stage="completed",
+            status="failed",
+            details={"error": reason_text, "message": "主闭环纯净度门禁失败，拒绝重启 Gateway"},
+        )
+        return False, f"主闭环纯净度门禁失败，拒绝重启 Gateway: {reason_text}", None, None, target_env
     old_pid = get_listener_pid(int(spec["port"]))
     old_pid_str = str(old_pid) if old_pid is not None else None
     record_restart_event(
@@ -2598,24 +2696,6 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         details={"old_pid": old_pid_str, "error": "Gateway 启动失败"},
     )
     return False, "Gateway 启动失败", old_pid_str, None, target_env
-
-
-def execute_official_promotion() -> dict:
-    # 只支持 primary 环境，不再需要 promotion 逻辑
-    return {
-        "status": "skipped",
-        "message": "单环境模式，无需晋升",
-    }
-
-
-def manage_official_environment(action: str) -> tuple[bool, str]:
-    # 只支持 primary 环境
-    return False, "单环境模式，不支持 official 环境操作"
-
-
-def set_official_auto_update_enabled(enabled: bool) -> tuple[bool, str, dict[str, Any]]:
-    # 只支持 primary 环境
-    return False, "单环境模式，不支持 official 自动更新", {}
 
 
 # ========== API 端点 ==========
@@ -3354,7 +3434,7 @@ def index():
             <div class="header-copy">
                 <div class="eyebrow">Health Guardian Control Plane</div>
                 <h1>OpenClaw 健康守护者</h1>
-                <div class="refresh-info">把双环境守护、活跃代理、版本晋升和异常定位收束到一条清晰的控制视线里。</div>
+                <div class="refresh-info">把单环境运行、活跃代理和异常定位收束到一条清晰的控制视线里。</div>
             </div>
             <div class="actions">
                 <button class="btn" onclick="location.reload()">🔄 刷新</button>
@@ -3624,12 +3704,12 @@ def index():
                 <div id="tab-release" class="tab-content" data-module="governance">
                     <div class="page-stack">
                         <div class="section">
-                            <h2>版本晋升</h2>
+                            <h2>运行模式</h2>
                             <div class="section-lead"></div>
                             <div class="release-page">
                                 <div class="dashboard-stack">
-                                    <div id="promotion-summary" class="memory-box"></div>
-                                    <div id="promotion-status-board" class="promotion-board"></div>
+                                    <div id="runtime-mode-summary" class="memory-box"></div>
+                                    <div id="runtime-mode-board" class="promotion-board"></div>
                                 </div>
                                 <div class="dashboard-stack">
                                     <div id="release-summary-list" class="summary-list"></div>
@@ -3778,7 +3858,7 @@ def index():
 
     <script>
         let currentData = null;
-        let promotionActionInFlight = false;
+        let runtimeModeActionInFlight = false;
         let selectedAgentId = null;
 
         function makeExpandableList(items, renderItem, emptyHtml, options = {}) {
@@ -3890,20 +3970,16 @@ def index():
             `;
         }
 
-        function renderPromotionRun(promotionSummary, run) {
-            const boardEl = document.getElementById('promotion-status-board');
+        function renderRuntimeModeSummary(runtimeModeSummary) {
+            const boardEl = document.getElementById('runtime-mode-board');
             if (!boardEl) return;
             boardEl.innerHTML = `
                 <div class="memory-box">
-                    <div class="memory-box-title">版本晋升</div>
-                    <div class="memory-box-main">单环境模式</div>
-                    <div class="memory-box-sub">当前只维护一套环境，不需要版本晋升流程。</div>
+                    <div class="memory-box-title">运行模式</div>
+                    <div class="memory-box-main">${runtimeModeSummary.headline || '单环境模式'}</div>
+                    <div class="memory-box-sub">${runtimeModeSummary.recommended_action || '当前只维护一套环境。'}</div>
                 </div>
             `;
-        }
-
-        async function promoteOfficialToPrimary() {
-            alert('单环境模式，不支持晋升操作');
         }
 
         async function loadData() {
@@ -3958,13 +4034,12 @@ def index():
                 // 版本环境
                 const envSummaryEl = document.getElementById('environment-summary');
                 const envWorkflowEl = document.getElementById('environment-workflow');
-                const promotionSummaryEl = document.getElementById('promotion-summary');
+                const runtimeModeSummaryEl = document.getElementById('runtime-mode-summary');
                 const envCardsEl = document.getElementById('environment-cards');
                 const envs = data.environments || [];
                 const activeEnv = envs.find(item => item.active) || null;
                 const primaryEnv = envs.find(item => item.id === 'primary') || null;
-                const promotionSummary = data.promotion_summary || {};
-                const promotionLastRun = data.promotion_last_run || {};
+                const runtimeModeSummary = data.runtime_mode_summary || {};
                 const environmentIntegrity = data.environment_integrity || [];
                 const modelFailureSummary = data.model_failure_summary || {};
                 const contextReadiness = data.context_readiness || {};
@@ -4005,13 +4080,13 @@ def index():
                         </div>
                     </div>
                 `;
-                promotionSummaryEl.innerHTML = `
-                    <div class="memory-box-title">版本晋升摘要</div>
-                    <div class="memory-box-main">${promotionSummary.headline || '暂无版本晋升判断'}</div>
-                    <div class="memory-box-sub">${promotionSummary.recommended_action || '-'}</div>
-                    <div class="memory-box-sub" style="margin-top:6px;">${(promotionSummary.reasons || []).length ? (promotionSummary.reasons || []).join(' | ') : '当前没有额外阻断条件。'}</div>
+                runtimeModeSummaryEl.innerHTML = `
+                    <div class="memory-box-title">运行模式摘要</div>
+                    <div class="memory-box-main">${runtimeModeSummary.headline || '单环境模式'}</div>
+                    <div class="memory-box-sub">${runtimeModeSummary.recommended_action || '-'}</div>
+                    <div class="memory-box-sub" style="margin-top:6px;">${(runtimeModeSummary.reasons || []).length ? (runtimeModeSummary.reasons || []).join(' | ') : '当前没有额外阻断条件。'}</div>
                 `;
-                renderPromotionRun(promotionSummary, promotionLastRun);
+                renderRuntimeModeSummary(runtimeModeSummary);
                 const incident = data.incident_summary || {};
                 renderSimpleList('overview-environment-quick', activeEnv ? [
                     {title: `${activeEnv.name}`, body: `env=${activeEnv.id} · port=${activeEnv.port} · ${activeEnv.healthy ? '健康' : (activeEnv.running ? '异常' : '未运行')}`},
@@ -4019,10 +4094,10 @@ def index():
                 ] : [], '当前没有识别到活动环境');
                 renderSimpleList('overview-next-action', [
                     {title: incident.action || '继续观察', body: incident.focus || '无明显异常。'},
-                    {title: promotionSummary.recommended_action || '暂无发布动作', body: promotionSummary.headline || '暂无新的版本晋升任务。'}
+                    {title: runtimeModeSummary.recommended_action || '继续观察', body: runtimeModeSummary.headline || '当前为单环境模式。'}
                 ], '暂无动作');
                 renderSimpleList('overview-release-quick', [
-                    {title: promotionSummary.headline || '暂无版本晋升判断', body: promotionSummary.recommended_action || '继续观察。'},
+                    {title: runtimeModeSummary.headline || '单环境模式', body: runtimeModeSummary.recommended_action || '继续观察。'},
                     {title: '当前使用主用版', body: '单环境模式'}
                 ], '暂无发布摘要');
                 const envAlerts = environmentIntegrity.length ? environmentIntegrity.map(item => ({title: item.title, body: item.detail})) : [];
@@ -4805,8 +4880,7 @@ def api_status():
     active_agents = get_active_agent_activity(selected_env, config)
     learning_center = get_learning_center_payload(limit=10)
     health_acceptance = get_health_acceptance_payload()
-    promotion_summary = build_environment_promotion_summary(environments, task_registry)
-    promotion_last_run = STORE.load_runtime_value("promotion_last_run", {})
+    runtime_mode_summary = build_runtime_mode_summary(environments, task_registry)
     control_plane = get_control_plane_overview(selected_env["id"])
     environment_integrity = detect_environment_inconsistencies(environments, selected_env["id"])
     for issue in environment_integrity:
@@ -4850,6 +4924,7 @@ def api_status():
     if not isinstance(restart_events, list):
         restart_events = []
     recent_restart_events = restart_events[-20:]
+    main_closure_purity_gate = load_main_closure_purity_gate(selected_env["id"])
 
     data = {
         "active_environment": selected_env["id"],
@@ -4874,8 +4949,7 @@ def api_status():
         "learning_center": learning_center,
         "health_acceptance": health_acceptance,
         "control_plane": control_plane,
-        "promotion_summary": promotion_summary,
-        "promotion_last_run": promotion_last_run,
+        "runtime_mode_summary": runtime_mode_summary,
         "context_readiness": context_readiness,
         "bootstrap_status": bootstrap_status,
         "config_drift": {
@@ -4884,6 +4958,7 @@ def api_status():
             "preserved": (bootstrap_status.get("config_merge") or {}).get("preserved") or [],
             "status": (context_readiness or {}).get("status") or "unknown",
         },
+        "main_closure_purity_gate": main_closure_purity_gate,
         "watcher_summary": watcher_summary,
         "restart_runtime_status": {
             "generated_at": int(time.time()),
@@ -4969,10 +5044,8 @@ def api_manage_environment():
 
 @app.route("/api/environments/promote", methods=["POST"])
 def api_promote_environment():
-    """Promote environment (single environment mode)."""
-    return jsonify({"success": False, "message": "单环境模式，不支持版本晋升"})
-    except Exception as exc:
-        return jsonify({"success": False, "message": str(exc)})
+    """Legacy compatibility route for removed promotion flow."""
+    return jsonify({"success": False, "message": "单环境模式，无需版本晋升"})
 
 
 @app.route("/open-dashboard/<env_id>")

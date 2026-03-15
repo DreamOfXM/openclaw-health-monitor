@@ -11,6 +11,8 @@
 - reuse-evidence-summary.json: promoted knowledge 复用证据摘要
 - self-check-runtime-status.json: OpenClaw 内部 self-check 最近运行与恢复摘要
 - self-check-events.json: OpenClaw 内部 self-check 最近事件
+- main-closure-runtime-status.json: OpenClaw 主闭环 root/adoption/finalization/delivery 摘要
+- main-closure-events.json: OpenClaw 主闭环最近事件时间线
 - control-plane-summary.json: 控制面统计与解释
 - learning-promotion-policy.json: learning promote 规则与阈值
 - context-lifecycle-baseline.json: 推荐长期运行基线模板

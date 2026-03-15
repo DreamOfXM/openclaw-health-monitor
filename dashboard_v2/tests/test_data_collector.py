@@ -5,6 +5,7 @@ import unittest
 import time
 import sys
 import os
+import types
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -78,6 +79,39 @@ class TestDataCollector(unittest.TestCase):
         self.assertEqual(metrics1['timestamp'], metrics2['timestamp'])
         # 强制刷新后可能不同
         self.assertIsNotNone(metrics3)
+
+    @mock.patch('services.data_collector._legacy_dashboard')
+    def test_get_metrics_falls_back_when_runtime_health_is_zero(
+        self,
+        mock_legacy_dashboard,
+    ):
+        fake_legacy = mock.Mock()
+        fake_legacy.get_system_metrics.return_value = {"cpu": 0, "mem_used": 0, "mem_total": 0}
+        fake_legacy.get_gateway_process_for_env.return_value = {}
+        fake_legacy.get_guardian_process_info.return_value = {}
+        fake_legacy.check_gateway_health_for_env.return_value = True
+        mock_legacy_dashboard.return_value = fake_legacy
+        fake_psutil = types.SimpleNamespace(
+            cpu_percent=lambda interval=None: 12.5,
+            virtual_memory=lambda: types.SimpleNamespace(
+                percent=48.0,
+                used=8 * 1024 ** 3,
+                total=16 * 1024 ** 3,
+            ),
+        )
+        with mock.patch.object(self.collector, "_shared_state_fresh", return_value={
+            "generated_at": int(time.time()),
+            "gateway_healthy": True,
+            "metrics": {"cpu": 0.0, "mem_used": 0, "mem_total": 32},
+        }), mock.patch.object(self.collector, "_load_runtime_context", return_value={
+            "legacy": fake_legacy,
+            "selected_env": {"id": "primary"},
+        }), mock.patch.object(self.collector, "_shared_state", return_value={"summary": {}}), \
+            mock.patch.dict(sys.modules, {"psutil": fake_psutil}):
+            metrics = self.collector._fetch_metrics_data()
+
+        self.assertEqual(metrics["cpu_percent"], 12.5)
+        self.assertEqual(metrics["memory_percent"], 48.0)
     
     def test_get_environment(self):
         """测试获取环境数据"""
@@ -91,7 +125,7 @@ class TestDataCollector(unittest.TestCase):
     def test_runtime_context_prefers_active_binding(self):
         """测试运行时上下文优先读取 committed binding，而不是旧配置里的 ACTIVE_OPENCLAW_ENV。"""
         fake_legacy = mock.Mock()
-        fake_legacy.load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "official"}
+        fake_legacy.load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "primary"}
         fake_legacy.STORE.load_runtime_value.side_effect = lambda key, default=None: {
             "env_id": "primary",
             "switch_state": "committed",
@@ -110,7 +144,7 @@ class TestDataCollector(unittest.TestCase):
     def test_environment_binding_audit_uses_runtime_binding(self):
         """测试环境绑定展示优先使用 DB/runtime binding，不读取 active-binding.json 作为当前真相。"""
         fake_legacy = mock.Mock()
-        fake_legacy.load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "official"}
+        fake_legacy.load_config.return_value = {"ACTIVE_OPENCLAW_ENV": "primary"}
         fake_legacy.STORE.load_runtime_value.side_effect = lambda key, default=None: {
             "active_openclaw_env": {
                 "env_id": "primary",
@@ -118,45 +152,110 @@ class TestDataCollector(unittest.TestCase):
                 "updated_at": 123,
             },
             "binding_audit_events": [{"source": "db"}],
+            "channel_readiness:primary": {"status": "ready", "summary": "ok"},
         }.get(key, default)
         fake_legacy.env_spec.side_effect = lambda env_id, _cfg=None: {"id": env_id}
         fake_legacy.get_task_registry_payload.return_value = {}
-        fake_legacy.list_openclaw_environments.return_value = [
-            {"id": "primary", "running": True, "healthy": True},
-            {"id": "official", "running": False, "healthy": False},
-        ]
-        fake_legacy.build_bootstrap_status.return_value = {}
-        fake_legacy.build_context_lifecycle_readiness.return_value = {"status": "ready"}
+        fake_legacy.get_gateway_process_for_env.return_value = {"pid": 1234}
+        fake_legacy.env_has_control_ui_assets.return_value = True
+        fake_legacy.env_dashboard_url.return_value = "http://127.0.0.1:18791/"
+        fake_legacy.env_open_link.return_value = "http://127.0.0.1:18791/"
         fake_legacy.check_gateway_health_for_env.return_value = True
-        fake_legacy.build_environment_promotion_summary.return_value = {}
 
-        with mock.patch("services.data_collector._legacy_dashboard", return_value=fake_legacy):
+        with mock.patch("services.data_collector._legacy_dashboard", return_value=fake_legacy), \
+            mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": True, "gateway_healthy": True}), \
+            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}, {}, {}]):
             env = self.collector.get_environment(force_refresh=True)
 
         self.assertEqual(env["active_environment"], "primary")
         self.assertEqual(env["binding_audit"]["active_env"], "primary")
         self.assertEqual(env["binding_audit"]["source"], "runtime_db")
         self.assertEqual(env["binding_audit"]["recent_events"], [{"source": "db"}])
+        self.assertEqual([item["id"] for item in env["environments"]], ["primary"])
+        fake_legacy.list_openclaw_environments.assert_not_called()
 
     def test_get_environment_exposes_binding_audit(self):
         fake_legacy = mock.Mock()
-        fake_legacy.list_openclaw_environments.return_value = []
-        fake_legacy.check_gateway_health_for_env.return_value = True
-        fake_legacy.build_bootstrap_status.return_value = {}
-        fake_legacy.build_context_lifecycle_readiness.return_value = {"status": "ready"}
-        fake_legacy.build_environment_promotion_summary.return_value = {}
+        fake_legacy.get_gateway_process_for_env.return_value = {}
+        fake_legacy.env_has_control_ui_assets.return_value = False
+        fake_legacy.env_dashboard_url.return_value = ""
+        fake_legacy.env_open_link.return_value = ""
         context = {
             "legacy": fake_legacy,
             "config": {},
             "active_env": "primary",
             "binding": {"active_env": "primary", "switch_state": "committed", "updated_at": 1},
-            "selected_env": {"id": "primary"},
+            "selected_env": {"id": "primary", "code": "/tmp/code", "home": "/tmp/home", "port": 18789},
             "task_registry": {},
         }
         with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
-            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}, {}, []]):
+            mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": False, "gateway_healthy": False}), \
+            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}, {}, {}]):
             env = self.collector._fetch_environment_data()
         self.assertEqual(env["binding_audit"]["active_env"], "primary")
+
+    def test_get_environment_uses_lightweight_sources_without_environment_probe(self):
+        fake_legacy = mock.Mock()
+        fake_legacy.get_gateway_process_for_env.return_value = {"pid": 4321}
+        fake_legacy.env_has_control_ui_assets.return_value = True
+        fake_legacy.env_dashboard_url.return_value = "http://127.0.0.1:18791/"
+        fake_legacy.env_open_link.return_value = "http://127.0.0.1:18791/"
+        context = {
+            "legacy": fake_legacy,
+            "config": {},
+            "active_env": "primary",
+            "binding": {"active_env": "primary", "switch_state": "committed", "updated_at": 1},
+            "selected_env": {"id": "primary", "name": "OpenClaw", "description": "当前唯一运行环境", "code": "/tmp/code", "home": "/tmp/home", "port": 18789},
+        }
+        with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
+            mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": True, "gateway_healthy": True}), \
+            mock.patch.object(self.collector, "_shared_state", side_effect=[
+                {"env_id": "primary", "context_readiness": {"status": "ready"}, "config_merge": {"applied": []}},
+                {},
+                {},
+                {},
+            ]):
+            env = self.collector._fetch_environment_data()
+
+        self.assertTrue(env["gateway_healthy"])
+        self.assertEqual(env["active"]["pid"], 4321)
+        fake_legacy.list_openclaw_environments.assert_not_called()
+
+    def test_get_environment_probes_live_health_when_runtime_snapshot_is_stale_false(self):
+        fake_legacy = mock.Mock()
+        fake_legacy.get_gateway_process_for_env.return_value = {"pid": 4321}
+        fake_legacy.env_has_control_ui_assets.return_value = True
+        fake_legacy.env_dashboard_url.return_value = "http://127.0.0.1:18791/"
+        fake_legacy.env_open_link.return_value = "http://127.0.0.1:18791/"
+        fake_legacy.check_gateway_health_for_env.return_value = True
+        context = {
+            "legacy": fake_legacy,
+            "config": {},
+            "active_env": "primary",
+            "binding": {"active_env": "primary", "switch_state": "committed", "updated_at": 1},
+            "selected_env": {"id": "primary", "name": "OpenClaw", "description": "当前唯一运行环境", "code": "/tmp/code", "home": "/tmp/home", "port": 18789},
+        }
+        with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
+            mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": True, "gateway_healthy": False}), \
+            mock.patch.object(self.collector, "_shared_state", side_effect=[
+                {"env_id": "primary", "context_readiness": {"status": "ready"}, "config_merge": {"applied": []}},
+                {},
+                {},
+                {},
+            ]):
+            env = self.collector._fetch_environment_data()
+
+        self.assertTrue(env["gateway_healthy"])
+        self.assertTrue(env["active"]["healthy"])
+        fake_legacy.check_gateway_health_for_env.assert_called_once()
+
+    def test_restart_environment_delegates_to_legacy_restart(self):
+        fake_legacy = mock.Mock()
+        fake_legacy.restart_active_openclaw_environment.return_value = (True, "重启成功", "123", "456", "primary")
+        with mock.patch("services.data_collector._legacy_dashboard", return_value=fake_legacy):
+            result = self.collector.restart_environment()
+        self.assertTrue(result["success"])
+        self.assertEqual(result["environment"], "primary")
 
     def test_get_tasks_prefers_shared_state_snapshot(self):
         payload = {
@@ -266,6 +365,46 @@ class TestDataCollector(unittest.TestCase):
         self.assertIn('reflections', learnings)
         self.assertIn('timestamp', learnings)
 
+    @mock.patch('services.data_collector._legacy_dashboard')
+    def test_get_learnings_hides_internal_control_promotions_from_user_view(self, mock_legacy_dashboard):
+        fake_legacy = mock.Mock()
+        fake_legacy.get_learning_center_payload.return_value = {
+            "summary": {"pending": 0, "reviewed": 0, "promoted": 2, "total": 2},
+            "source_mode": "legacy_store",
+            "suggestions": [],
+            "learnings": [
+                {
+                    "id": 1,
+                    "category": "control_plane",
+                    "title": "任务因缺少结构化回执而阻塞",
+                    "detail": "task=abc control=received_only action=blocked blocked_reason=missing_pipeline_receipt",
+                    "status": "promoted",
+                    "occurrences": 10,
+                    "updated_at": int(time.time()),
+                    "promoted_target": "contract",
+                },
+                {
+                    "id": 2,
+                    "category": "workflow",
+                    "title": "测试完成后主脑必须统一收口",
+                    "detail": "系统学会在测试完成后由主脑统一给出最终结论。",
+                    "status": "promoted",
+                    "occurrences": 3,
+                    "updated_at": int(time.time()),
+                    "promoted_target": "rule",
+                },
+            ],
+            "reflections": [],
+        }
+        mock_legacy_dashboard.return_value = fake_legacy
+
+        data = self.collector._fetch_learning_data()
+
+        self.assertEqual(len(data["promoted"]), 1)
+        self.assertEqual(data["promoted"][0]["title"], "测试完成后主脑必须统一收口")
+        self.assertEqual(data["internal_summary"]["promoted_count"], 1)
+        self.assertEqual(len(data["internal_promoted"]), 1)
+
     def test_get_snapshots(self):
         """测试获取快照数据"""
         snapshots = self.collector.get_snapshots(force_refresh=True)
@@ -285,6 +424,23 @@ class TestDataCollector(unittest.TestCase):
         self.assertIn('tasks', data)
         self.assertIn('learning', data)
         self.assertIn('errors', data)
+
+    def test_get_health_score_data_flags_main_closure_purity_gate(self):
+        with mock.patch.object(self.collector, "_fetch_environment_data", return_value={"gateway_healthy": True}), \
+            mock.patch.object(
+                self.collector,
+                "_shared_state",
+                side_effect=[
+                    {"summary": {"blocked": 0}},
+                    {"reflection_freshness": 0},
+                    {"actions": {}, "tasks": {}},
+                    {"ok": False, "reasons": ["shadow_state_detected"]},
+                ],
+            ), \
+            mock.patch.object(self.collector, "get_metrics", return_value={"cpu_percent": 1.0}):
+            data = self.collector._fetch_health_score_data()
+
+        self.assertIn("main_closure_purity_gate_failed", data["errors"]["categories"])
     
     def test_invalidate_cache(self):
         """测试使缓存失效"""
@@ -297,6 +453,97 @@ class TestDataCollector(unittest.TestCase):
         
         # 使所有缓存失效
         self.collector.invalidate_cache()
+
+    def test_get_tasks_normalizes_current_task_facts_shape(self):
+        current_facts = {
+            "current_task": {
+                "task_id": "task-1",
+                "question": "集成主链路",
+                "status": "running",
+                "current_stage": "implementation:started",
+                "latest_receipt": {"agent": "dev", "phase": "implementation", "action": "started"},
+                "approved_summary": "开发阶段已启动，存在结构化执行证据。",
+                "control_state": "dev_running",
+                "next_action": "await_dev_receipt",
+                "next_actor": "dev",
+                "claim_level": "phase_verified",
+                "evidence_level": "strong",
+                "missing_receipts": ["dev:completed", "test:started", "test:completed"],
+            },
+            "current_root_task": {
+                "root_task_id": "legacy-root:task-1",
+                "user_goal_summary": "集成主链路",
+                "workflow_state": "delivery_pending",
+                "foreground": True,
+                "finalization_state": "finalized",
+                "final_status": "completed",
+                "delivery_state": "delivery_confirmed",
+                "delivery_confirmation_level": "delivery_confirmed",
+                "open_followup_count": 1,
+                "followup_types": ["delivery_retry"],
+            },
+            "current_workflow_run": {
+                "workflow_run_id": "legacy-run:task-1",
+                "current_state": "delivery_pending",
+                "state_reason": "finalizer_finalized",
+            },
+            "current_finalizer": {
+                "finalization_id": "legacy-finalizer:task-1",
+                "decision_state": "finalized",
+                "final_status": "completed",
+                "delivery_state": "delivery_confirmed",
+                "user_visible_summary": "已完成并回传给主人",
+            },
+            "current_delivery_attempt": {
+                "delivery_attempt_id": "legacy-delivery:task-1:1",
+                "current_state": "delivery_confirmed",
+                "confirmation_level": "delivery_confirmed",
+                "channel": "feishu_dm",
+                "target": "agent:main:feishu:direct:user-1",
+            },
+            "current_followups": [
+                {
+                    "followup_id": "fu-1",
+                    "followup_type": "delivery_retry",
+                    "trigger_reason": "delivery_failed",
+                    "current_state": "open",
+                    "suggested_action": "retry_delivery",
+                }
+            ],
+        }
+        with mock.patch.object(self.collector, "_shared_state", return_value={"summary": {}}), \
+            mock.patch("services.data_collector._read_json_file", return_value=current_facts), \
+            mock.patch.object(self.collector, "_load_runtime_context", return_value={"legacy": mock.Mock(), "selected_env": {"id": "primary"}}):
+            payload = self.collector._fetch_task_data()
+
+        self.assertEqual(payload["current"]["task_id"], "task-1")
+        self.assertEqual(payload["current"]["latest_receipt"]["agent"], "dev")
+        self.assertEqual(payload["current"]["control"]["control_state"], "dev_running")
+        self.assertEqual(payload["current"]["control"]["next_actor"], "dev")
+        self.assertEqual(payload["current"]["root_task"]["root_task_id"], "legacy-root:task-1")
+        self.assertEqual(payload["current"]["root_task"]["workflow_state"], "delivery_pending")
+        self.assertEqual(payload["current"]["root_task"]["delivery_state"], "delivery_confirmed")
+        self.assertEqual(payload["current"]["current_workflow_run"]["workflow_run_id"], "legacy-run:task-1")
+        self.assertEqual(payload["current"]["current_finalizer"]["decision_state"], "finalized")
+        self.assertEqual(payload["current"]["current_delivery_attempt"]["current_state"], "delivery_confirmed")
+        self.assertEqual(payload["current"]["followup_count"], 1)
+        self.assertEqual(payload["current"]["current_followups"][0]["followup_type"], "delivery_retry")
+        self.assertEqual(payload["current"]["truth_level"], "core_projection")
+
+    def test_normalize_task_prefers_core_workflow_terminal_truth(self):
+        task = {
+            "task_id": "task-delivered",
+            "status": "running",
+            "question": "交付完成的任务",
+            "current_workflow_run": {"workflow_run_id": "wr-delivered", "current_state": "delivered"},
+            "current_root_task": {"root_task_id": "rt-delivered", "workflow_state": "delivered"},
+        }
+
+        normalized = self.collector._normalize_task(task)
+
+        self.assertEqual(normalized["status"], "completed")
+        self.assertEqual(normalized["current_stage"], "delivered")
+        self.assertEqual(normalized["truth_level"], "core_projection")
 
 
 class TestGlobalCollector(unittest.TestCase):
@@ -320,6 +567,9 @@ class TestRefreshIntervals(unittest.TestCase):
         self.assertIn('events', collector.REFRESH_INTERVALS)
         self.assertIn('environment', collector.REFRESH_INTERVALS)
         self.assertEqual(collector.REFRESH_INTERVALS['metrics'], 5)
+        self.assertEqual(collector.REFRESH_INTERVALS['health_score'], 5)
+        self.assertEqual(collector.REFRESH_INTERVALS['events'], 5)
+        self.assertEqual(collector.REFRESH_INTERVALS['environment'], 10)
 
 
 if __name__ == '__main__':

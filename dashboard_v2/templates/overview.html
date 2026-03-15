@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenClaw Health Monitor - 总览</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/overview.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css', v=asset_version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/overview.css', v=asset_version) }}">
 </head>
 <body>
     <!-- Header -->
@@ -19,7 +19,7 @@
                 <a href="/" class="nav-item active">总览</a>
                 <a href="/explore" class="nav-item">详情</a>
                 <a href="/manage" class="nav-item">管理</a>
-                <a href="/heartbeat" class="nav-item">心跳监控</a>
+                <a href="/heartbeat" class="nav-item">任务监督</a>
             </nav>
             <div class="header-actions">
                 <span id="active-env" class="env-badge">Loading...</span>
@@ -55,7 +55,7 @@
                     <!-- Environment Card -->
                     <div class="env-card compact">
                         <div class="env-header">
-                            <span class="env-label">当前环境</span>
+                            <span class="env-label">当前运行实例</span>
                             <span id="env-healthy" class="env-status">检测中...</span>
                         </div>
                         <div class="env-body">
@@ -66,7 +66,7 @@
                     <!-- Next Action Card -->
                     <div id="next-action-card" class="action-card compact">
                         <div class="action-header">
-                            <span class="action-label">下一步行动</span>
+                            <span class="action-label">系统建议</span>
                             <span id="action-priority" class="action-priority">--</span>
                         </div>
                         <div class="action-body">
@@ -211,7 +211,7 @@
     </div>
 
     <!-- JavaScript -->
-    <script src="{{ url_for('static', filename='js/base.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/overview.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/base.js', v=asset_version) }}"></script>
+    <script src="{{ url_for('static', filename='js/overview.js', v=asset_version) }}"></script>
 </body>
 </html>

@@ -38,7 +38,9 @@ const API = {
         
         const fullUrl = queryString ? `${url}?${queryString}` : url;
         
-        const response = await fetch(fullUrl);
+        const response = await fetch(fullUrl, {
+            cache: 'no-store'
+        });
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -113,28 +115,17 @@ const API = {
     },
     
     /**
-     * 切换环境
+     * 重启当前运行时
      */
-    async switchEnvironment(env) {
-        return await this.post('/api/v2/environments/switch', { environment: env });
-    },
-    
-    /**
-     * 执行版本晋升
-     */
-    async promoteEnvironment(confirmation) {
-        return await this.post('/api/v2/environments/promote', { confirmation });
-    },
-
-    async setOfficialAutoUpdate(enabled) {
-        return await this.post('/api/v2/environments/official-auto-update', { enabled });
+    async restartEnvironment() {
+        return await this.post('/api/v2/environments/restart', {});
     },
 
     /**
      * 获取快照列表
      */
-    async getSnapshots(refresh = false) {
-        return await this.get('/api/v2/environments/snapshots', { refresh });
+    async getSnapshots(refresh = false, limit = 20, offset = 0) {
+        return await this.get('/api/v2/environments/snapshots', { refresh, limit, offset });
     },
 
     /**

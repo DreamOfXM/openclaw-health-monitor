@@ -33,11 +33,11 @@
 
 ### 2.1 已基本完成
 
-- 双环境基础模型已经成立：`primary / official`
+- 单环境基础模型已经成立：仅维护 `primary`
 - Dashboard 能展示环境、任务、控制面、学习中心等核心区域
 - Guardian 能做异常检测、控制跟进以及学习是否发生的外层观测
 - State Store 已形成任务、合同、控制动作、learning、reflection 的统一存储
-- Promotion Controller 已能支持 `official -> primary` 的晋升链路
+- 版本更新以单环境拉取和快照回退为主，不再维护 `official -> primary` 晋升链路
 - 全量测试目前通过，说明系统已经不是概念验证
 
 ### 2.2 已做但未完全收口

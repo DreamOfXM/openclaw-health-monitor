@@ -132,10 +132,11 @@ async function loadEnvironments(forceRefresh = false) {
 
 function updateEnvironmentDetails(data) {
     const primaryEnv = data.environments?.find(e => e.id === 'primary') || {};
-    const officialEnv = data.environments?.find(e => e.id === 'official') || {};
     updateSingleEnvironment('primary', primaryEnv);
-    updateSingleEnvironment('official', officialEnv);
-    updateEnvironmentComparison(primaryEnv, officialEnv);
+    const activeBadge = document.getElementById('active-env');
+    if (activeBadge) {
+        activeBadge.textContent = 'OPENCLAW';
+    }
 }
 
 function updateSingleEnvironment(prefix, env) {
@@ -159,8 +160,26 @@ function updateSingleEnvironment(prefix, env) {
     const statePathEl = document.getElementById(`${prefix}-state-path`);
     const readiness = env.channel_readiness || {};
     if (statePathEl && readiness && Object.keys(readiness).length) {
-        const feishu = readiness.feishu || {};
-        statePathEl.textContent = `${env.state_path || '--'} | 通道=${readiness.status || 'unknown'}${feishu.detail ? ` | Feishu=${feishu.detail}` : ''}`;
+        const channelDetails = [];
+        const structuredChannels = readiness.channels || {};
+        for (const channel of Object.values(structuredChannels)) {
+            if (channel && channel.name && channel.detail) {
+                channelDetails.push(`${channel.name}=${channel.detail}`);
+            }
+        }
+        if (!channelDetails.length) {
+            const summary = String(readiness.summary || '');
+            const pattern = /-\s+([A-Za-z]+)\s+default:\s+([^\n]+)/g;
+            let match;
+            while ((match = pattern.exec(summary)) !== null) {
+                const channel = match[1];
+                const detail = (match[2] || '').trim();
+                if (channel && detail) {
+                    channelDetails.push(`${channel}=${detail}`);
+                }
+            }
+        }
+        statePathEl.textContent = `${env.state_path || '--'} | 通道=${readiness.status || 'unknown'}${channelDetails.length ? ` | ${channelDetails.join('；')}` : ''}`;
     }
 }
 
@@ -181,25 +200,6 @@ function getEnvironmentStatus(env) {
         return { label: '激活未运行', className: 'warning' };
     }
     return { label: '待机', className: 'inactive' };
-}
-
-function updateEnvironmentComparison(primaryEnv, officialEnv) {
-    document.getElementById('compare-primary-version').textContent = shortHead(primaryEnv.git_head);
-    document.getElementById('compare-official-version').textContent = shortHead(officialEnv.git_head);
-    document.getElementById('compare-version-diff').textContent =
-        primaryEnv.git_head && officialEnv.git_head && primaryEnv.git_head !== officialEnv.git_head
-            ? '不同'
-            : '一致';
-
-    document.getElementById('compare-primary-uptime').textContent = runtimeLabel(primaryEnv);
-    document.getElementById('compare-official-uptime').textContent = runtimeLabel(officialEnv);
-    document.getElementById('compare-uptime-diff').textContent =
-        primaryEnv.running !== officialEnv.running ? '运行状态不同' : '同态';
-
-    document.getElementById('compare-primary-health').textContent = healthLabel(primaryEnv);
-    document.getElementById('compare-official-health').textContent = healthLabel(officialEnv);
-    document.getElementById('compare-health-diff').textContent =
-        healthLabel(primaryEnv) === healthLabel(officialEnv) ? '一致' : '不同';
 }
 
 function shortHead(value) {
@@ -435,7 +435,7 @@ function renderSelectedAgentDetail(data) {
         <div class="agent-detail-summary">
             <div><strong>状态：</strong>${agent.state_label || '活动中'}</div>
             <div><strong>任务提示：</strong>${agent.task_hint || '暂无'}</div>
-            <div><strong>最近信号：</strong>${agent.activity_excerpt || agent.detail || '暂无'}</div>
+            <div class="signal-text" title="${agent.activity_excerpt || agent.detail || ''}"><strong>最近信号：</strong>${agent.activity_excerpt || agent.detail || '暂无'}</div>
             <div><strong>历史会话：</strong>${agent.sessions || 0}</div>
         </div>
     `;
@@ -577,6 +577,16 @@ function renderLearningDetails(data) {
     titleEl.textContent = selected.title;
 
     if (selected.items.length === 0) {
+        const internalPromoted = data.internal_summary?.promoted_count || 0;
+        const internalLearnings = data.internal_summary?.learning_count || 0;
+        if (currentLearningView === 'promoted' && internalPromoted > 0) {
+            container.innerHTML = `<div class="empty">当前没有适合对外展示的能力升级。现有已晋升内容主要是 ${internalPromoted} 条内部控制规则，已作为系统约束生效，不直接展示给用户。</div>`;
+            return;
+        }
+        if (currentLearningView === 'items' && internalLearnings > 0) {
+            container.innerHTML = `<div class="empty">当前学习项主要是内部控制证据，共 ${internalLearnings} 条，已从用户视角隐藏；这里只展示用户能理解的能力变化。</div>`;
+            return;
+        }
         container.innerHTML = '<div class="empty">暂无明细</div>';
         return;
     }
@@ -599,10 +609,10 @@ function renderLearningItem(item) {
     return `
         <div class="learning-item">
             <div class="learning-header">
-                <span class="learning-title">${item.title || '未命名'}</span>
+                <span class="learning-title">${item.capability_title || item.title || '未命名'}</span>
                 <span class="learning-date">${UI.formatDateTime(item.timestamp)}</span>
             </div>
-            <p class="learning-desc">${item.description || ''}</p>
+            <p class="learning-desc">${item.capability_summary || item.description || ''}</p>
             <div class="learning-meta">${meta.join('')}</div>
         </div>
     `;

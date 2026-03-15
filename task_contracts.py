@@ -12,6 +12,45 @@ from typing import Any
 ALLOWED_PIPELINE_ACTIONS = {"started", "completed", "blocked"}
 RECEIPT_REQUIRED_FIELDS = ("agent", "phase", "action", "evidence")
 
+DEFAULT_DURATION_PROFILES = {
+    "short": {
+        "first_ack_sla": 30,
+        "heartbeat_interval": 45,
+        "hard_timeout": 180,
+        "soft_followup": 30,
+        "hard_followup": 75,
+        "auto_blocked_unverified": 180,
+        "blocked_user_visible": True,
+    },
+    "medium": {
+        "first_ack_sla": 60,
+        "heartbeat_interval": 120,
+        "hard_timeout": 900,
+        "soft_followup": 60,
+        "hard_followup": 180,
+        "auto_blocked_unverified": 900,
+        "blocked_user_visible": True,
+    },
+    "long": {
+        "first_ack_sla": 120,
+        "heartbeat_interval": 300,
+        "hard_timeout": 2700,
+        "soft_followup": 120,
+        "hard_followup": 420,
+        "auto_blocked_unverified": 2700,
+        "blocked_user_visible": True,
+    },
+}
+
+DEFAULT_PHASE_POLICIES = {
+    "planning": "short",
+    "implementation": "long",
+    "testing": "medium",
+    "calculation": "short",
+    "verification": "short",
+    "risk_assessment": "short",
+}
+
 DEFAULT_TASK_CONTRACTS = {
     "default_contract": "single_agent",
     "contracts": [
@@ -43,6 +82,8 @@ DEFAULT_TASK_CONTRACTS = {
                 "test:completed",
             ],
             "terminal_receipts": ["test:completed", "dev:blocked", "test:blocked"],
+            "duration_profiles": DEFAULT_DURATION_PROFILES,
+            "phase_policies": DEFAULT_PHASE_POLICIES,
             "user_progress_rules": {
                 "planning_only": "A股闭环方案已完成，但开发尚未启动。",
                 "dev_running": "A股闭环实现已启动，当前存在真实开发回执。",
@@ -82,6 +123,8 @@ DEFAULT_TASK_CONTRACTS = {
                 "verifier:completed",
             ],
             "terminal_receipts": ["verifier:completed", "calculator:blocked", "verifier:blocked", "risk:blocked"],
+            "duration_profiles": DEFAULT_DURATION_PROFILES,
+            "phase_policies": DEFAULT_PHASE_POLICIES,
         },
         {
             "id": "delivery_pipeline",
@@ -115,6 +158,8 @@ DEFAULT_TASK_CONTRACTS = {
                 "test:completed",
             ],
             "terminal_receipts": ["test:completed", "dev:blocked", "test:blocked"],
+            "duration_profiles": DEFAULT_DURATION_PROFILES,
+            "phase_policies": DEFAULT_PHASE_POLICIES,
         },
         {
             "id": "single_agent",

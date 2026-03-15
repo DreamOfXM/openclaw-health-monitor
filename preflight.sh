@@ -7,6 +7,7 @@ LOCAL_CONFIG="$BASE_DIR/config.local.conf"
 TRACKED_CONFIG="$BASE_DIR/config.conf"
 
 failures=0
+db_path="$BASE_DIR/data/monitor.db"
 
 ok() {
     echo "[OK] $1"
@@ -29,6 +30,40 @@ check_cmd() {
     else
         fail "$label"
     fi
+}
+
+active_openclaw_env() {
+    local value env_id
+    if command -v sqlite3 >/dev/null 2>&1 && [ -f "$db_path" ]; then
+        value="$(sqlite3 "$db_path" "SELECT value_json FROM kv_state WHERE namespace='runtime' AND key='active_openclaw_env' LIMIT 1;" 2>/dev/null || true)"
+        env_id="$(printf '%s' "$value" | sed -n 's/.*"env_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+        if [ -n "$env_id" ]; then
+            printf '%s\n' "$env_id"
+            return 0
+        fi
+    fi
+    printf 'primary\n'
+}
+
+purity_gate_status() {
+    local env_id value ok reasons
+    env_id="$(active_openclaw_env)"
+    if ! command -v sqlite3 >/dev/null 2>&1 || [ ! -f "$db_path" ]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    value="$(sqlite3 "$db_path" "SELECT value_json FROM kv_state WHERE namespace='runtime' AND key='main_closure_purity_gate:${env_id}' LIMIT 1;" 2>/dev/null || true)"
+    if [ -z "$value" ]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    ok="$(printf '%s' "$value" | sed -n 's/.*"ok"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')"
+    if [ "$ok" = "true" ]; then
+        printf 'ok\n'
+        return 0
+    fi
+    reasons="$(printf '%s' "$value" | sed -n 's/.*"reasons"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr -d '"' | tr ',' ' ' | xargs 2>/dev/null || true)"
+    printf 'failed:%s\n' "${reasons:-main_closure_purity_gate_failed}"
 }
 
 check_file() {
@@ -104,6 +139,24 @@ if openclaw gateway health >/tmp/openclaw-health-monitor-preflight.out 2>/tmp/op
 else
     warn "openclaw gateway health failed; inspect /tmp/openclaw-health-monitor-preflight.err"
 fi
+
+echo
+echo "==> Main closure purity gate"
+purity_status="$(purity_gate_status)"
+case "$purity_status" in
+    ok)
+        ok "main closure purity gate passed"
+        ;;
+    unknown)
+        warn "main closure purity gate status unavailable"
+        ;;
+    failed:*)
+        fail "main closure purity gate failed (${purity_status#failed:})"
+        ;;
+    *)
+        warn "main closure purity gate status unknown: $purity_status"
+        ;;
+esac
 
 echo
 echo "==> Process snapshot"

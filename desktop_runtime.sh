@@ -215,8 +215,39 @@ gateway_workdir() {
 }
 
 active_openclaw_env() {
-    # 只支持 primary 环境
+    local db_path value env_id
+    db_path="$BASE_DIR/data/monitor.db"
+    if command -v sqlite3 >/dev/null 2>&1 && [ -f "$db_path" ]; then
+        value="$(sqlite3 "$db_path" "SELECT value_json FROM kv_state WHERE namespace='runtime' AND key='active_openclaw_env' LIMIT 1;" 2>/dev/null || true)"
+        env_id="$(printf '%s' "$value" | sed -n 's/.*"env_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+        if [ -n "$env_id" ]; then
+            printf '%s\n' "$env_id"
+            return 0
+        fi
+    fi
     printf 'primary\n'
+}
+
+purity_gate_status() {
+    local env_id db_path value ok reasons
+    env_id="$(active_openclaw_env)"
+    db_path="$BASE_DIR/data/monitor.db"
+    if ! command -v sqlite3 >/dev/null 2>&1 || [ ! -f "$db_path" ]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    value="$(sqlite3 "$db_path" "SELECT value_json FROM kv_state WHERE namespace='runtime' AND key='main_closure_purity_gate:${env_id}' LIMIT 1;" 2>/dev/null || true)"
+    if [ -z "$value" ]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    ok="$(printf '%s' "$value" | sed -n 's/.*"ok"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')"
+    if [ "$ok" = "true" ]; then
+        printf 'ok\n'
+        return 0
+    fi
+    reasons="$(printf '%s' "$value" | sed -n 's/.*"reasons"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr -d '"' | tr ',' ' ' | xargs 2>/dev/null || true)"
+    printf 'failed:%s\n' "${reasons:-main_closure_purity_gate_failed}"
 }
 
 listener_pid() {
@@ -361,6 +392,14 @@ start_gateway() {
     if [ -n "$pid" ]; then
         echo "$pid"
         return 0
+    fi
+    if [ "${ALLOW_PURITY_GATE_BYPASS:-0}" != "1" ]; then
+        local purity_status
+        purity_status="$(purity_gate_status)"
+        if [ "${purity_status#failed:}" != "$purity_status" ]; then
+            echo "Refusing to start Gateway: main closure purity gate failed (${purity_status#failed:})" >&2
+            return 1
+        fi
     fi
     local workdir
     workdir="$(gateway_workdir)"

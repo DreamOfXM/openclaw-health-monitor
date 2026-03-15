@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 import guardian
+from heartbeat_guardrail import GuardrailEngine, TaskState
 from state_store import MonitorStateStore
 
 
@@ -87,6 +88,38 @@ class GuardianRuntimeAnomalyTests(unittest.TestCase):
             seen = store.load_runtime_value("runtime_anomaly_seen", {})
             self.assertEqual(len(seen), 2)
 
+    def test_scan_runtime_anomalies_flags_main_closure_purity_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            runtime_log = base / "runtime.log"
+            runtime_log.write_text("", encoding="utf-8")
+
+            recorded_changes = []
+            notifications = []
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "CONFIG", {"SLOW_RESPONSE_THRESHOLD": 30, "STALLED_RESPONSE_THRESHOLD": 90}), \
+                mock.patch.object(guardian, "resolve_runtime_gateway_log", return_value=runtime_log), \
+                mock.patch.object(
+                    guardian,
+                    "build_main_closure_supervision_summary",
+                    return_value={
+                        "generated_at": 123,
+                        "env_id": "primary",
+                        "purity_gate_ok": False,
+                        "purity_gate_reasons": ["shadow_state_detected"],
+                    },
+                ), \
+                mock.patch.object(guardian, "record_change_log", side_effect=lambda ctype, msg, details=None: recorded_changes.append((ctype, msg, details))), \
+                mock.patch.object(guardian, "should_alert", return_value=True), \
+                mock.patch.object(guardian, "notify", side_effect=lambda title, message, level="info": notifications.append((title, message, level))):
+                anomalies = guardian.scan_runtime_anomalies()
+
+            self.assertEqual([item["type"] for item in anomalies], ["main_closure_purity_gate_failed"])
+            self.assertEqual(recorded_changes[0][1], "主闭环纯净度门禁失败")
+            self.assertIn("shadow_state_detected", notifications[0][1])
+
 
 class GuardianProgressPushTests(unittest.TestCase):
     def test_format_duration_label(self):
@@ -128,36 +161,7 @@ class GuardianProgressPushTests(unittest.TestCase):
             "model_unavailable",
         )
 
-    def test_restart_gateway_official_stops_primary_and_official_before_start(self):
-        calls = []
-
-        def fake_run_args(args, timeout=None):
-            calls.append((list(args), timeout))
-            if args[0] == str(guardian.OFFICIAL_MANAGER) and args[1] == "start":
-                return (0, "started", "")
-            return (0, "", "")
-
-        with mock.patch.object(guardian, "current_env_spec", return_value={"id": "official"}), \
-            mock.patch.object(guardian, "run_args", side_effect=fake_run_args), \
-            mock.patch.object(guardian, "check_gateway_health", return_value=True), \
-            mock.patch.object(guardian, "commit_active_binding") as commit_binding, \
-            mock.patch.object(guardian, "log"), \
-            mock.patch.object(guardian, "STORE") as store:
-            ok = guardian.restart_gateway()
-
-        self.assertTrue(ok)
-        commit_binding.assert_called_once_with("official")
-        self.assertEqual(store.append_runtime_event.call_count, 2)
-        self.assertEqual(
-            [call[0] for call in calls[:3]],
-            [
-                [str(guardian.DESKTOP_RUNTIME), "stop", "gateway"],
-                [str(guardian.OFFICIAL_MANAGER), "stop"],
-                [str(guardian.OFFICIAL_MANAGER), "start"],
-            ],
-        )
-
-    def test_restart_gateway_primary_stops_official_before_starting_active_gateway(self):
+    def test_restart_gateway_restarts_primary_gateway(self):
         calls = []
 
         def fake_run_args(args, timeout=None):
@@ -167,6 +171,11 @@ class GuardianProgressPushTests(unittest.TestCase):
             return (0, "", "")
 
         with mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+            mock.patch.object(
+                guardian,
+                "build_main_closure_supervision_summary",
+                return_value={"purity_gate_ok": True, "purity_gate_reasons": []},
+            ), \
             mock.patch.object(guardian, "run_args", side_effect=fake_run_args), \
             mock.patch.object(guardian, "check_gateway_health", return_value=True), \
             mock.patch.object(guardian, "commit_active_binding") as commit_binding, \
@@ -181,14 +190,53 @@ class GuardianProgressPushTests(unittest.TestCase):
         self.assertEqual(
             [call[0] for call in calls[:3]],
             [
-                [str(guardian.OFFICIAL_MANAGER), "stop"],
                 [str(guardian.DESKTOP_RUNTIME), "stop", "gateway"],
                 [str(guardian.DESKTOP_RUNTIME), "start", "gateway"],
             ],
         )
 
+    def test_restart_gateway_blocks_on_purity_gate_failure(self):
+        with mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+            mock.patch.object(
+                guardian,
+                "build_main_closure_supervision_summary",
+                return_value={"purity_gate_ok": False, "purity_gate_reasons": ["shadow_state_detected"]},
+            ), \
+            mock.patch.object(guardian, "run_args") as run_args, \
+            mock.patch.object(guardian, "record_change_log") as change_log, \
+            mock.patch.object(guardian, "log"), \
+            mock.patch.object(guardian, "STORE") as store:
+            ok = guardian.restart_gateway()
+
+        self.assertFalse(ok)
+        run_args.assert_not_called()
+        change_log.assert_called_once()
+        self.assertEqual(store.append_runtime_event.call_count, 1)
+
 
 class GuardianLearningDelegationTests(unittest.TestCase):
+    def test_guardrail_engine_treats_background_task_as_running_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-background",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "background",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+
+            result = GuardrailEngine(store).execute_transition("task-background", "retry", {"attempts": 0})
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["from_state"], TaskState.RUNNING.value)
+        self.assertEqual(result["error"], "invalid_transition")
+
     def test_capture_control_plane_learnings_skips_when_openclaw_artifacts_ready(self):
         with mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_EVOLUTION_PLANE": True}), \
             mock.patch.object(guardian, "should_delegate_learning_ownership_to_openclaw", return_value=True):
@@ -273,6 +321,36 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             feishu_push.assert_not_called()
             events = store.list_task_events("task-progress", limit=10)
             self.assertTrue(any(item["event_type"] == "guardian_progress_push" for item in events))
+
+    def test_emit_taskwatcher_heartbeats_records_active_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-heartbeat",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "dev:started",
+                    "question": "继续开发",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            original_watcher = guardian.TASK_WATCHER
+            guardian.TASK_WATCHER = None
+            try:
+                with mock.patch.object(guardian, "STORE", store):
+                    recorded = guardian.emit_taskwatcher_heartbeats()
+                    report = guardian.get_task_watcher().get_observability_report()
+            finally:
+                guardian.TASK_WATCHER = original_watcher
+
+            self.assertEqual(recorded, 1)
+            self.assertEqual(len(report["heartbeats"]["recent"]), 1)
+            self.assertEqual(report["heartbeats"]["recent"][0]["task_id"], "task-heartbeat")
 
     def test_deliver_guardian_progress_update_retries_then_falls_back(self):
         dispatch = {
@@ -1045,6 +1123,227 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertEqual(task["status"], "blocked")
             self.assertEqual(task["blocked_reason"], "missing_pipeline_receipt")
 
+    def test_enforce_task_registry_control_plane_soft_followup_for_received_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-received-only",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "继续修复回执门禁",
+                    "last_user_message": "继续修复回执门禁",
+                    "started_at": 1,
+                    "last_progress_at": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                }
+            )
+            store.record_task_event("task-received-only", "dispatch_started", {"question": "继续修复回执门禁"})
+            store.record_task_event("task-received-only", "dispatch_complete", {"status": "completed"})
+            store.upsert_task_contract(
+                "task-received-only",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"],
+                },
+            )
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "ENABLE_TASK_REGISTRY": True,
+                        "ENABLE_INTRUSIVE_TASK_CONTROL": True,
+                        "TASK_REGISTRY_RETENTION": 20,
+                        "TASK_CONTROL_FOLLOWUP_COOLDOWN": 0,
+                        "TASK_CONTROL_MAX_ATTEMPTS": 2,
+                    },
+                ), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+                mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "send_guardian_followup", return_value=(True, None)) as followup, \
+                mock.patch.object(guardian, "record_change_log"), \
+                mock.patch.object(guardian, "write_task_registry_snapshot"), \
+                mock.patch.object(guardian, "capture_control_plane_learnings"):
+                with mock.patch.object(guardian.time, "time", return_value=100):
+                    outcomes = guardian.enforce_task_registry_control_plane()
+            action = store.get_open_control_action("task-received-only")
+            self.assertEqual(outcomes[0]["action"], "followup_sent")
+            self.assertEqual(action["attempts"], 1)
+            self.assertEqual(action["details"]["followup_stage"], "soft")
+            self.assertIn("正在追证", action["details"]["status_template"])
+            self.assertEqual(followup.call_count, 1)
+
+    def test_enforce_task_registry_control_plane_hard_followup_for_missing_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-heartbeat-stale",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "implementation:started",
+                    "question": "继续修复回执门禁",
+                    "last_user_message": "继续修复回执门禁",
+                    "started_at": 1,
+                    "last_progress_at": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                }
+            )
+            store.record_task_event("task-heartbeat-stale", "dispatch_started", {"question": "继续修复回执门禁"})
+            store.record_task_event(
+                "task-heartbeat-stale",
+                "pipeline_receipt",
+                {"receipt": {"agent": "dev", "phase": "implementation", "action": "started", "evidence": "files=guardian.py"}},
+            )
+            store.upsert_task_contract(
+                "task-heartbeat-stale",
+                {
+                    "id": "delivery_pipeline",
+                    "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"],
+                },
+            )
+            action = store.reconcile_task_control_action(store.get_task("task-heartbeat-stale"), store.derive_task_control_state("task-heartbeat-stale"))
+            store.update_control_action(int(action["id"]), attempts=1, last_followup_at=0)
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "ENABLE_TASK_REGISTRY": True,
+                        "ENABLE_INTRUSIVE_TASK_CONTROL": True,
+                        "TASK_REGISTRY_RETENTION": 20,
+                        "TASK_CONTROL_FOLLOWUP_COOLDOWN": 0,
+                        "TASK_CONTROL_MAX_ATTEMPTS": 3,
+                    },
+                ), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+                mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "send_guardian_followup", return_value=(True, None)) as followup, \
+                mock.patch.object(guardian, "record_change_log"), \
+                mock.patch.object(guardian, "write_task_registry_snapshot"), \
+                mock.patch.object(guardian, "capture_control_plane_learnings"):
+                with mock.patch.object(guardian.time, "time", return_value=500):
+                    outcomes = guardian.enforce_task_registry_control_plane()
+            action = store.get_open_control_action("task-heartbeat-stale")
+            self.assertEqual(outcomes[0]["action"], "followup_sent")
+            self.assertEqual(action["attempts"], 2)
+            self.assertEqual(action["details"]["followup_stage"], "hard")
+            self.assertIn("hard追证窗口", action["details"]["status_template"])
+            self.assertEqual(followup.call_count, 1)
+
+    def test_enforce_task_registry_control_plane_native_root_does_not_create_legacy_control_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-native",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "testing:completed",
+                    "question": "继续推进主闭环",
+                    "last_user_message": "继续推进主闭环",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_root_task(
+                {
+                    "root_task_id": "rt-native",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "origin_request_id": "task-native",
+                    "origin_message_id": "msg-native",
+                    "user_goal_summary": "继续推进主闭环",
+                    "intent_type": "delivery",
+                    "contract_type": "delivery_pipeline",
+                    "status": "open",
+                    "current_workflow_run_id": "wr-native",
+                    "active": True,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_workflow_run(
+                {
+                    "workflow_run_id": "wr-native",
+                    "root_task_id": "rt-native",
+                    "idempotency_key": "wr-native",
+                    "workflow_type": "delivery_pipeline",
+                    "intent_type": "delivery",
+                    "contract_type": "delivery_pipeline",
+                    "current_state": "delivery_failed",
+                    "state_reason": "delivery.failed",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_followup(
+                {
+                    "followup_id": "fu-native",
+                    "root_task_id": "rt-native",
+                    "workflow_run_id": "wr-native",
+                    "followup_type": "delivery_retry",
+                    "trigger_reason": "delivery.failed",
+                    "current_state": "open",
+                    "suggested_action": "delivery_retry",
+                    "created_by": "main",
+                    "created_at": 3,
+                    "updated_at": 4,
+                    "metadata": {"summary": "送达失败，需要重试。"},
+                }
+            )
+            store.record_core_event(
+                {
+                    "event_id": "ev-native-followup",
+                    "root_task_id": "rt-native",
+                    "workflow_run_id": "wr-native",
+                    "followup_id": "fu-native",
+                    "event_type": "followup_requested",
+                    "event_ts": 4,
+                    "event_seq": 1,
+                    "payload": {"reason": "delivery.failed", "followup_id": "fu-native"},
+                }
+            )
+            store.rebuild_workflow_projection("wr-native")
+
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "ENABLE_TASK_REGISTRY": True,
+                        "ENABLE_INTRUSIVE_TASK_CONTROL": False,
+                        "TASK_REGISTRY_RETENTION": 20,
+                        "TASK_CONTROL_FOLLOWUP_COOLDOWN": 0,
+                        "TASK_CONTROL_MAX_ATTEMPTS": 2,
+                    },
+                ), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}), \
+                mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "record_change_log"), \
+                mock.patch.object(guardian, "capture_control_plane_learnings"):
+                with mock.patch.object(guardian.time, "time", return_value=100):
+                    outcomes = guardian.enforce_task_registry_control_plane()
+
+            self.assertEqual(outcomes[0]["action"], "ops_attention_needed")
+            self.assertIsNone(store.get_open_control_action("task-native"))
+            control = store.derive_task_control_state("task-native")
+            self.assertEqual(control["control_action"]["source"], "core_followup")
+
     def test_build_control_plane_followup_targets_dev_start(self):
         task = {
             "task_id": "task-dev",
@@ -1172,7 +1471,7 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 mock.patch.object(guardian, "STORE", store), \
                 mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_BOOTSTRAP_INIT": True, "BOOTSTRAP_WRITE_MISSING": False}), \
                 mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary", "home": home}), \
-                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}, "official": {"id": "official", "port": 19021}}), \
+                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}}), \
                 mock.patch.object(guardian, "get_system_metrics", return_value={"cpu": 1.0, "mem_used": 1.0, "mem_total": 8.0}), \
                 mock.patch.object(guardian, "check_process_running", return_value=True), \
                 mock.patch.object(guardian, "check_gateway_health", return_value=True):
@@ -1234,7 +1533,7 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 mock.patch.object(guardian, "STORE", store), \
                 mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_BOOTSTRAP_INIT": True, "BOOTSTRAP_WRITE_MISSING": False}), \
                 mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary", "home": home}), \
-                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}, "official": {"id": "official", "port": 19021}}), \
+                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}}), \
                 mock.patch.object(guardian, "get_system_metrics", return_value={"cpu": 1.0, "mem_used": 1.0, "mem_total": 8.0}), \
                 mock.patch.object(guardian, "check_process_running", return_value=True), \
                 mock.patch.object(guardian, "check_gateway_health", return_value=True):
@@ -1278,6 +1577,14 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                         "delivery_failed_count": 1,
                         "late_result_count": 1,
                         "binding_source_counts": {"reply_to": 1},
+                        "purity_metrics": {
+                            "workflow_total": 2,
+                            "purity_gate_ok": False,
+                            "purity_gate_reasons": ["shadow_state_detected"],
+                        },
+                        "finalizers": [{"finalization_id": "fin-1"}],
+                        "delivery_attempts": [{"delivery_attempt_id": "da-1"}],
+                        "followups": [{"followup_id": "fu-1"}],
                     },
                     ensure_ascii=False,
                 ),
@@ -1296,6 +1603,11 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertEqual(payload["foreground_root_task_id"], "rt-1")
             self.assertEqual(payload["delivery_failed_count"], 1)
             self.assertEqual(payload["recent_event_types"][0], "final_delivery_failed")
+            self.assertFalse(payload["purity_gate_ok"])
+            self.assertEqual(payload["purity_gate_reasons"], ["shadow_state_detected"])
+            self.assertEqual(payload["finalizers"][0]["finalization_id"], "fin-1")
+            self.assertEqual(payload["delivery_attempts"][0]["delivery_attempt_id"], "da-1")
+            self.assertEqual(payload["followups"][0]["followup_id"], "fu-1")
 
     def test_commit_active_binding_updates_runtime_binding_and_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1304,22 +1616,19 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 **guardian.DEFAULT_CONFIG,
                 "OPENCLAW_HOME": str(base / ".openclaw"),
                 "OPENCLAW_CODE": str(base / "code-primary"),
-                "OPENCLAW_OFFICIAL_STATE": str(base / ".openclaw-official"),
-                "OPENCLAW_OFFICIAL_CODE": str(base / "code-official"),
                 "GATEWAY_PORT": 18789,
-                "OPENCLAW_OFFICIAL_PORT": 19021,
             }
             store = MonitorStateStore(base)
             with mock.patch.object(guardian, "BASE_DIR", base), \
                 mock.patch.object(guardian, "CONFIG", cfg), \
                 mock.patch.object(guardian, "STORE", store):
-                guardian.commit_active_binding("official")
+                guardian.commit_active_binding("primary")
             binding = store.load_runtime_value("active_openclaw_env", {})
             audit = store.load_runtime_value("binding_audit_events", [])
-            self.assertEqual(binding.get("env_id"), "official")
+            self.assertEqual(binding.get("env_id"), "primary")
             self.assertEqual(binding.get("switch_state"), "committed")
             self.assertTrue(audit)
-            self.assertEqual(audit[-1]["env_id"], "official")
+            self.assertEqual(audit[-1]["env_id"], "primary")
 
     @mock.patch("guardian.run_args")
     @mock.patch("guardian.get_listener_pid")
@@ -1330,22 +1639,42 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 **guardian.DEFAULT_CONFIG,
                 "OPENCLAW_HOME": str(base / ".openclaw"),
                 "OPENCLAW_CODE": str(base / "code-primary"),
-                "OPENCLAW_OFFICIAL_STATE": str(base / ".openclaw-official"),
-                "OPENCLAW_OFFICIAL_CODE": str(base / "code-official"),
                 "GATEWAY_PORT": 18789,
-                "OPENCLAW_OFFICIAL_PORT": 19021,
             }
             store = MonitorStateStore(base)
-            get_listener_pid.side_effect = [1111, 2222, None]
+            get_listener_pid.side_effect = [1111]
             with mock.patch.object(guardian, "BASE_DIR", base), \
                 mock.patch.object(guardian, "CONFIG", cfg), \
                 mock.patch.object(guardian, "STORE", store), \
-                mock.patch.object(guardian, "active_env_id", return_value="primary"):
+                mock.patch.object(guardian, "active_env_id", return_value="primary"), \
+                mock.patch.object(guardian, "build_main_closure_supervision_summary", return_value={"purity_gate_ok": True, "purity_gate_reasons": [], "env_id": "primary"}):
                 issues = guardian.patrol_active_binding_runtime()
-            self.assertTrue(issues)
-            self.assertEqual(issues[0]["code"], "unbound_listener_official")
+            self.assertEqual(issues, [])
             audit = store.load_runtime_value("binding_audit_events", [])
-            self.assertTrue(audit)
+            self.assertEqual(audit, [])
+
+    def test_patrol_active_binding_runtime_flags_purity_gate_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg = {
+                **guardian.DEFAULT_CONFIG,
+                "OPENCLAW_HOME": str(base / ".openclaw"),
+                "OPENCLAW_CODE": str(base / "code-primary"),
+                "GATEWAY_PORT": 18789,
+            }
+            store = MonitorStateStore(base)
+            recorded = []
+            with mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "CONFIG", cfg), \
+                mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "active_env_id", return_value="primary"), \
+                mock.patch.object(guardian, "build_main_closure_supervision_summary", return_value={"purity_gate_ok": False, "purity_gate_reasons": ["shadow_state_detected"], "env_id": "primary"}), \
+                mock.patch.object(guardian, "record_change_log", side_effect=lambda ctype, msg, details=None: recorded.append((ctype, msg, details))), \
+                mock.patch.object(guardian, "notify"), \
+                mock.patch.object(guardian, "get_listener_pid", return_value=None):
+                issues = guardian.patrol_active_binding_runtime()
+            self.assertEqual(issues[0]["code"], "main_closure_purity_gate_failed")
+            self.assertEqual(recorded[0][1], "主闭环纯净度门禁失败")
 
     def test_sync_shared_context_watcher_tasks_imports_completed_and_dlq(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1684,15 +2013,13 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             store = MonitorStateStore(base)
             with mock.patch.object(guardian, "STORE", store), \
                 mock.patch.object(guardian, "active_env_id", return_value="primary"), \
-                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}, "official": {"id": "official", "port": 19021}}), \
-                mock.patch.object(guardian, "get_listener_pid", side_effect=[1111, 2222]), \
-                mock.patch.object(guardian, "run_args") as run_args, \
+                mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}}), \
+                mock.patch.object(guardian, "get_listener_pid", return_value=1111), \
                 mock.patch.object(guardian, "record_change_log") as record_change_log, \
                 mock.patch.object(guardian, "notify"):
                 issues = guardian.enforce_single_active_runtime_guard()
-            self.assertEqual(issues[0]["code"], "dual_listener")
-            record_change_log.assert_called_once()
-            self.assertEqual(run_args.call_args.args[0], [str(guardian.OFFICIAL_MANAGER), "stop"])
+            self.assertEqual(issues, [])
+            record_change_log.assert_not_called()
 
     def test_enforce_task_registry_control_plane_marks_pipeline_recovery_as_ops_attention_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:

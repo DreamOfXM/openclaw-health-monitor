@@ -115,7 +115,7 @@ shared-context/
   "summary": "Final reply often missing after implementation completion",
   "detail": "Implementation completed twice without visible delivery in Feishu thread",
   "positive_evidence": [
-    "logs/openclaw-official.log: PIPELINE_RECEIPT dev completed",
+    "logs/openclaw-primary.log: PIPELINE_RECEIPT dev completed",
     "watcher task marked completed but not delivered"
   ],
   "negative_evidence": [

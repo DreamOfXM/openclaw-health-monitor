@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenClaw Health Monitor - 心跳监控</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+    <title>OpenClaw Health Monitor - 任务监督</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css', v=asset_version) }}">
     <style>
         .heartbeat-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
             gap: 20px;
             padding: 20px;
         }
@@ -18,6 +18,7 @@
             border-radius: 12px;
             padding: 20px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
         }
         
         .card-header {
@@ -120,13 +121,18 @@
         .phase-table {
             width: 100%;
             border-collapse: collapse;
+            table-layout: fixed;
+            overflow: hidden;
+            max-width: 100%;
         }
         
         .phase-table th,
         .phase-table td {
-            padding: 12px;
+            padding: 10px 8px;
             text-align: left;
             border-bottom: 1px solid var(--border-color, #374151);
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         
         .phase-table th {
@@ -137,6 +143,68 @@
         
         .phase-table td {
             color: var(--text-primary, #fff);
+            font-size: 13px;
+            vertical-align: top;
+        }
+        
+        .phase-table .col-attempts {
+            text-align: center;
+            min-width: 60px;
+            width: 60px;
+        }
+        
+        .phase-table .col-message {
+            white-space: normal;
+            word-break: break-word;
+            line-height: 1.5;
+        }
+        
+        .phase-table .col-interval,
+        .phase-table .col-timeout {
+            text-align: center;
+        }
+        
+        .action-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        
+        .action-badge.action-retry { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+        .action-badge.action-escalate { background: rgba(249, 115, 22, 0.2); color: #fb923c; }
+        .action-badge.action-abort { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+        .action-badge.action-notify { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+        .action-badge.action-downgrade { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+        
+        .error-state {
+            text-align: center;
+            padding: 20px;
+            color: var(--color-danger, #ef4444);
+            font-size: 13px;
+        }
+
+        .status-ready { background: #10b981; color: #fff; }
+        .status-warning { background: #f59e0b; color: #fff; }
+        .status-disabled { background: #64748b; color: #fff; }
+
+        .heartbeat-note {
+            margin-top: 12px;
+            color: var(--text-secondary, #94a3b8);
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        
+        .guardrail-table {
+            table-layout: fixed;
+        }
+        
+        .guardrail-table th:nth-child(3),
+        .guardrail-table td:nth-child(3) {
+            min-width: 80px;
+            width: 80px;
+            text-align: center;
         }
         
         .btn-recover {
@@ -186,7 +254,7 @@
                 <a href="/" class="nav-item">总览</a>
                 <a href="/explore" class="nav-item">详情</a>
                 <a href="/manage" class="nav-item">管理</a>
-                <a href="/heartbeat" class="nav-item active">心跳监控</a>
+                <a href="/heartbeat" class="nav-item active">任务监督</a>
             </nav>
             <div class="header-actions">
                 <button id="refresh-btn" class="refresh-btn">🔄 刷新</button>
@@ -200,7 +268,7 @@
             <!-- 状态概览 -->
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">📊 监控状态</span>
+                    <span class="card-title">📊 任务监督状态</span>
                     <span id="health-status-badge" class="status-badge status-healthy">健康</span>
                 </div>
                 <div class="stat-grid">
@@ -223,17 +291,48 @@
                 </div>
             </div>
 
-            <!-- 心跳阶段配置 -->
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">⏱️ 心跳阶段配置</span>
+                    <span class="card-title">🫀 OpenClaw 自身 Heartbeat</span>
+                    <span id="openclaw-heartbeat-badge" class="status-badge status-disabled">检测中</span>
+                </div>
+                <div class="stat-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">Heartbeat 间隔</div>
+                        <div id="openclaw-heartbeat-every" class="stat-value">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">最近一次启动</div>
+                        <div id="openclaw-heartbeat-last" class="stat-value" style="font-size:16px;">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">有效指令工作区</div>
+                        <div id="openclaw-heartbeat-prompts" class="stat-value">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">模型</div>
+                        <div id="openclaw-heartbeat-model" class="stat-value" style="font-size:16px;">--</div>
+                    </div>
+                </div>
+                <div id="openclaw-heartbeat-message" class="heartbeat-note">加载中...</div>
+            </div>
+
+            <!-- 任务监督阶段配置 -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">⏱️ 任务监督阶段配置</span>
                 </div>
                 <table class="phase-table">
+                    <colgroup>
+                        <col style="width: 35%">
+                        <col style="width: 32%">
+                        <col style="width: 33%">
+                    </colgroup>
                     <thead>
                         <tr>
-                            <th>阶段</th>
-                            <th>心跳间隔</th>
-                            <th>超时阈值</th>
+                            <th class="col-phase">阶段</th>
+                            <th class="col-interval">心跳间隔</th>
+                            <th class="col-timeout">超时阈值</th>
                         </tr>
                     </thead>
                     <tbody id="phase-table-body">
@@ -253,13 +352,13 @@
                 </div>
             </div>
 
-            <!-- 最近心跳 -->
+            <!-- 最近任务监督心跳 -->
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">💓 最近心跳</span>
+                    <span class="card-title">💓 最近任务监督心跳</span>
                 </div>
                 <div id="heartbeat-list" class="task-list">
-                    <div class="empty-state">暂无心跳记录</div>
+                    <div class="empty-state">暂无任务监督心跳记录。这里展示的是健康守护助手 TaskWatcher 的任务心跳，不是 OpenClaw 自身的运行时 heartbeat。</div>
                 </div>
             </div>
 
@@ -267,17 +366,25 @@
             <div class="card">
                 <div class="card-header">
                     <span class="card-title">🛡️ Guardrail 规则</span>
+                    <span id="guardrail-count" class="status-badge status-healthy">0</span>
                 </div>
-                <table class="phase-table">
+                <table class="phase-table guardrail-table">
+                    <colgroup>
+                        <col style="width: 22%">
+                        <col style="width: 16%">
+                        <col style="width: 15%; min-width: 80px">
+                        <col style="width: 47%">
+                    </colgroup>
                     <thead>
                         <tr>
                             <th>规则名称</th>
                             <th>动作</th>
-                            <th>最大重试</th>
+                            <th style="min-width: 80px">重试</th>
+                            <th>描述</th>
                         </tr>
                     </thead>
                     <tbody id="guardrail-rules-body">
-                        <tr><td colspan="3" class="empty-state">加载中...</td></tr>
+                        <tr><td colspan="4" class="empty-state">加载中...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -286,13 +393,19 @@
             <div class="card">
                 <div class="card-header">
                     <span class="card-title">🔄 状态转换规则</span>
+                    <span id="transitions-count" class="status-badge status-healthy">0</span>
                 </div>
                 <table class="phase-table">
+                    <colgroup>
+                        <col style="width: 25%">
+                        <col style="width: 40%">
+                        <col style="width: 35%">
+                    </colgroup>
                     <thead>
                         <tr>
-                            <th>从状态</th>
-                            <th>触发器</th>
-                            <th>到状态</th>
+                            <th class="col-from">从状态</th>
+                            <th class="col-trigger">触发器</th>
+                            <th class="col-to">到状态</th>
                         </tr>
                     </thead>
                     <tbody id="transitions-body">
@@ -332,28 +445,38 @@
             }
         }
         
-        // 加载心跳阶段配置
+        // 加载任务监督阶段配置
         async function loadPhases() {
+            const tbody = document.getElementById('phase-table-body');
+            
             try {
                 const response = await fetch('/api/v2/heartbeat/phases');
                 const data = await response.json();
                 
                 if (data.success) {
-                    const tbody = document.getElementById('phase-table-body');
-                    tbody.innerHTML = data.data.phases.map(p => `
-                        <tr>
-                            <td>${p.phase}</td>
-                            <td>${p.interval_seconds}秒</td>
-                            <td>${p.timeout_seconds}秒</td>
-                        </tr>
-                    `).join('');
+                    const phases = data.data.phases || [];
+                    
+                    if (phases.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">暂无配置</td></tr>';
+                    } else {
+                        tbody.innerHTML = phases.map(p => `
+                            <tr>
+                                <td class="col-phase" title="${p.phase}">${p.phase}</td>
+                                <td class="col-interval">${p.interval_seconds}秒</td>
+                                <td class="col-timeout">${p.timeout_seconds}秒</td>
+                            </tr>
+                        `).join('');
+                    }
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="3" class="error-state">加载失败: ${data.error || '未知错误'}</td></tr>`;
                 }
             } catch (error) {
                 console.error('加载阶段配置失败:', error);
+                tbody.innerHTML = `<tr><td colspan="3" class="error-state">加载失败: ${error.message}</td></tr>`;
             }
         }
         
-        // 加载最近心跳
+        // 加载最近任务监督心跳
         async function loadHeartbeats() {
             try {
                 const response = await fetch('/api/v2/heartbeat/heartbeats?limit=10');
@@ -364,7 +487,7 @@
                     const heartbeats = data.data.heartbeats || [];
                     
                     if (heartbeats.length === 0) {
-                        container.innerHTML = '<div class="empty-state">暂无心跳记录</div>';
+                        container.innerHTML = '<div class="empty-state">暂无任务监督心跳记录。这里展示的是健康守护助手 TaskWatcher 的任务心跳，不是 OpenClaw 自身的运行时 heartbeat。</div>';
                     } else {
                         container.innerHTML = heartbeats.map(h => `
                             <div class="task-item">
@@ -386,46 +509,113 @@
                 console.error('加载心跳记录失败:', error);
             }
         }
+
+        async function loadOpenClawHeartbeat() {
+            try {
+                const response = await fetch('/api/v2/heartbeat/openclaw');
+                const data = await response.json();
+                if (!data.success) return;
+                const payload = data.data || {};
+                const badge = document.getElementById('openclaw-heartbeat-badge');
+                const status = payload.status || 'disabled';
+                if (badge) {
+                    badge.textContent = status === 'ready' ? '已启用' : status === 'warning' ? '待完善' : '未启用';
+                    badge.className = `status-badge status-${status}`;
+                }
+                document.getElementById('openclaw-heartbeat-every').textContent = payload.every || '--';
+                document.getElementById('openclaw-heartbeat-last').textContent = payload.last_started_at || '--';
+                document.getElementById('openclaw-heartbeat-prompts').textContent = String(payload.effective_prompt_count || 0);
+                document.getElementById('openclaw-heartbeat-model').textContent = payload.model || '--';
+                document.getElementById('openclaw-heartbeat-message').textContent = payload.message || '--';
+            } catch (error) {
+                console.error('加载 OpenClaw heartbeat 状态失败:', error);
+            }
+        }
         
         // 加载 Guardrail 规则
         async function loadGuardrailRules() {
+            const tbody = document.getElementById('guardrail-rules-body');
+            const countBadge = document.getElementById('guardrail-count');
+            
             try {
                 const response = await fetch('/api/v2/heartbeat/guardrail/rules');
                 const data = await response.json();
                 
                 if (data.success) {
-                    const tbody = document.getElementById('guardrail-rules-body');
-                    tbody.innerHTML = data.data.rules.map(r => `
-                        <tr>
-                            <td>${r.name}</td>
-                            <td>${r.action}</td>
-                            <td>${r.max_attempts}</td>
-                        </tr>
-                    `).join('');
+                    const rules = data.data.rules || [];
+                    
+                    if (countBadge) {
+                        countBadge.textContent = rules.length;
+                    }
+                    
+                    if (rules.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="4" class="empty-state">暂无规则</td></tr>';
+                    } else {
+                        tbody.innerHTML = rules.map(r => {
+                            const actionClass = getActionClass(r.action);
+                            return `
+                                <tr>
+                                    <td title="${r.name}">${r.name}</td>
+                                    <td><span class="action-badge ${actionClass}">${r.action}</span></td>
+                                    <td style="min-width: 80px; text-align: center">${r.max_attempts}</td>
+                                    <td>${r.message || '--'}</td>
+                                </tr>
+                            `;
+                        }).join('');
+                    }
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="4" class="error-state">加载失败: ${data.error || '未知错误'}</td></tr>`;
                 }
             } catch (error) {
                 console.error('加载 Guardrail 规则失败:', error);
+                tbody.innerHTML = `<tr><td colspan="4" class="error-state">加载失败: ${error.message}</td></tr>`;
             }
+        }
+        
+        function getActionClass(action) {
+            const map = {
+                'retry': 'action-retry',
+                'escalate': 'action-escalate',
+                'abort': 'action-abort',
+                'notify': 'action-notify',
+                'downgrade': 'action-downgrade',
+            };
+            return map[action] || 'action-retry';
         }
         
         // 加载状态转换
         async function loadTransitions() {
+            const tbody = document.getElementById('transitions-body');
+            const countBadge = document.getElementById('transitions-count');
+            
             try {
                 const response = await fetch('/api/v2/heartbeat/guardrail/transitions');
                 const data = await response.json();
                 
                 if (data.success) {
-                    const tbody = document.getElementById('transitions-body');
-                    tbody.innerHTML = data.data.transitions.map(t => `
-                        <tr>
-                            <td>${t.from_state}</td>
-                            <td>${t.trigger}</td>
-                            <td>${t.to_state}</td>
-                        </tr>
-                    `).join('');
+                    const transitions = data.data.transitions || [];
+                    
+                    if (countBadge) {
+                        countBadge.textContent = transitions.length;
+                    }
+                    
+                    if (transitions.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">暂无转换规则</td></tr>';
+                    } else {
+                        tbody.innerHTML = transitions.map(t => `
+                            <tr>
+                                <td class="col-from" title="${t.from_state}">${t.from_state}</td>
+                                <td class="col-trigger" title="${t.trigger}">${t.trigger}</td>
+                                <td class="col-to" title="${t.to_state}">${t.to_state}</td>
+                            </tr>
+                        `).join('');
+                    }
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="3" class="error-state">加载失败: ${data.error || '未知错误'}</td></tr>`;
                 }
             } catch (error) {
                 console.error('加载状态转换失败:', error);
+                tbody.innerHTML = `<tr><td colspan="3" class="error-state">加载失败: ${error.message}</td></tr>`;
             }
         }
         
@@ -473,6 +663,7 @@
         async function refreshAll() {
             await Promise.all([
                 loadStatus(),
+                loadOpenClawHeartbeat(),
                 loadPhases(),
                 loadHeartbeats(),
                 loadGuardrailRules(),

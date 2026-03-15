@@ -3,6 +3,9 @@
 """
 from flask import Blueprint, jsonify, request
 import sys
+import json
+import re
+from datetime import datetime
 from pathlib import Path
 
 # 添加父目录到路径
@@ -10,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from heartbeat_guardrail import TaskWatcher, HeartbeatPhase
 from state_store import MonitorStateStore
+import dashboard_backend as dashboard
 
 bp = Blueprint('heartbeat', __name__, url_prefix='/api/v2/heartbeat')
 
@@ -25,6 +29,104 @@ def get_watcher():
     if _watcher is None:
         _watcher = TaskWatcher(_store)
     return _watcher
+
+
+def _heartbeat_file_effectively_empty(path: Path) -> bool:
+    if not path.exists():
+        return True
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return True
+    lines = [line.strip() for line in text.splitlines()]
+    content = "\n".join(line for line in lines if line and not line.startswith("#")).strip()
+    return not content
+
+
+def _load_openclaw_heartbeat_status() -> dict:
+    config = dashboard.load_config()
+    active_env = dashboard.active_env_id(config)
+    spec = dashboard.env_spec(active_env, config)
+    openclaw_config_path = Path(spec["home"]) / "openclaw.json"
+    payload = {}
+    if openclaw_config_path.exists():
+        try:
+            payload = json.loads(openclaw_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+    heartbeat_cfg = ((payload.get("agents") or {}).get("defaults") or {}).get("heartbeat") or {}
+    every = str(heartbeat_cfg.get("every") or "")
+    model = str(heartbeat_cfg.get("model") or "")
+    target = str(heartbeat_cfg.get("target") or "none")
+    agents = ((payload.get("agents") or {}).get("list") or [])
+    workspaces = []
+    for entry in agents:
+        workspace = str((entry or {}).get("workspace") or "").strip()
+        if workspace:
+            workspaces.append(Path(workspace))
+    if not workspaces:
+        default_workspace = Path(spec["home"]) / "workspace"
+        workspaces.append(default_workspace)
+
+    workspace_items = []
+    non_empty_count = 0
+    for workspace in workspaces:
+        heartbeat_file = workspace / "HEARTBEAT.md"
+        empty = _heartbeat_file_effectively_empty(heartbeat_file)
+        if not empty:
+            non_empty_count += 1
+        workspace_items.append(
+            {
+                "workspace": str(workspace),
+                "heartbeat_file": str(heartbeat_file),
+                "effective_empty": empty,
+            }
+        )
+
+    log_path = Path(spec["home"]) / "logs" / "gateway.log"
+    last_started_at = ""
+    heartbeat_runs = 0
+    if log_path.exists():
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            lines = []
+        for line in reversed(lines):
+            if "[heartbeat] started" in line:
+                heartbeat_runs += 1
+                if not last_started_at:
+                    match = re.match(r"^(\S+)", line.strip())
+                    if match:
+                        last_started_at = match.group(1)
+            elif "[heartbeat]" in line:
+                heartbeat_runs += 1
+
+    enabled = bool(every)
+    if enabled and non_empty_count > 0:
+        status = "ready"
+        message = "OpenClaw heartbeat 已启用，并且存在有效的 HEARTBEAT.md 指令。"
+    elif enabled:
+        status = "warning"
+        message = "OpenClaw heartbeat 已配置，但当前所有 HEARTBEAT.md 都是空模板，运行时会跳过实际 heartbeat 调用。"
+    else:
+        status = "disabled"
+        message = "OpenClaw heartbeat 当前未配置 cadence。"
+
+    return {
+        "env_id": active_env,
+        "status": status,
+        "enabled": enabled,
+        "every": every or "disabled",
+        "model": model or "--",
+        "target": target,
+        "last_started_at": last_started_at,
+        "heartbeat_runs": heartbeat_runs,
+        "workspaces_total": len(workspace_items),
+        "effective_prompt_count": non_empty_count,
+        "workspaces": workspace_items,
+        "message": message,
+        "checked_at": datetime.now().isoformat(),
+    }
 
 
 @bp.route('/status', methods=['GET'])
@@ -77,6 +179,21 @@ def get_heartbeats():
                 'count': len(heartbeats),
                 'heartbeats': heartbeats
             }
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/openclaw', methods=['GET'])
+def get_openclaw_heartbeat():
+    """获取 OpenClaw 自身 heartbeat 状态"""
+    try:
+        return jsonify({
+            'success': True,
+            'data': _load_openclaw_heartbeat_status(),
         })
     except Exception as e:
         return jsonify({
