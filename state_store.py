@@ -573,6 +573,8 @@ class MonitorStateStore:
             dedupe_map: dict[tuple[str, str, str], int] = {}
             duplicate_ids: list[int] = []
             pending_updates: list[tuple[str, int]] = []
+            if rows:
+                needs_rebuild = True
             for row in rows:
                 event_key = hashlib.sha1(
                     f"{row['event_type']}|{row['payload_json'] or '{}'}".encode("utf-8", errors="ignore")
@@ -752,6 +754,39 @@ class MonitorStateStore:
                     mem_total,
                 ),
             )
+
+    def prune_retention(self, config: dict[str, Any]) -> dict[str, Any]:
+        now = int(time.time())
+        if not bool(config.get("DB_RETENTION_ENABLED", True)):
+            return {"enabled": False, "deleted": {}}
+
+        table_specs = [
+            ("heartbeats", "timestamp_ms", now - int(config.get("DB_RETENTION_HEARTBEATS_DAYS", 1)) * 86400, True),
+            ("health_samples", "recorded_at", now - int(config.get("DB_RETENTION_HEALTH_SAMPLES_DAYS", 3)) * 86400, False),
+            ("change_events", "event_date", time.strftime("%Y-%m-%d", time.localtime(now - int(config.get("DB_RETENTION_CHANGE_EVENTS_DAYS", 7)) * 86400)), False),
+            ("task_events", "created_at", now - int(config.get("DB_RETENTION_TASK_EVENTS_DAYS", 7)) * 86400, False),
+            ("watcher_tasks", "updated_at", now - int(config.get("DB_RETENTION_WATCHER_TASKS_DAYS", 7)) * 86400, False),
+            ("task_control_actions", "updated_at", now - int(config.get("DB_RETENTION_TASK_CONTROL_ACTIONS_DAYS", 7)) * 86400, False),
+            ("followups", "updated_at", now - int(config.get("DB_RETENTION_FOLLOWUPS_DAYS", 7)) * 86400, False),
+            ("core_events", "event_ts", now - int(config.get("DB_RETENTION_CORE_EVENTS_DAYS", 14)) * 86400, False),
+            ("managed_tasks", "updated_at", now - int(config.get("DB_RETENTION_MANAGED_TASKS_DAYS", 14)) * 86400, False),
+            ("root_tasks", "updated_at", now - int(config.get("DB_RETENTION_ROOT_TASKS_DAYS", 14)) * 86400, False),
+            ("workflow_runs", "updated_at", now - int(config.get("DB_RETENTION_WORKFLOW_RUNS_DAYS", 14)) * 86400, False),
+            ("step_runs", "updated_at", now - int(config.get("DB_RETENTION_STEP_RUNS_DAYS", 14)) * 86400, False),
+            ("reflection_runs", "created_at", now - int(config.get("DB_RETENTION_REFLECTION_RUNS_DAYS", 30)) * 86400, False),
+        ]
+
+        deleted: dict[str, int] = {}
+        with self._connection() as conn:
+            for table, column, cutoff, is_millis in table_specs:
+                value = int(cutoff * 1000) if is_millis else cutoff
+                cursor = conn.execute(f"DELETE FROM {table} WHERE {column} < ?", (value,))
+                deleted[table] = max(int(cursor.rowcount or 0), 0)
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.OperationalError:
+                pass
+        return {"enabled": True, "deleted": deleted, "ran_at": now}
 
     @staticmethod
     def _normalize_reason_code(reason: Any, *, fallback: str = UNKNOWN_REASON_CODE) -> str:

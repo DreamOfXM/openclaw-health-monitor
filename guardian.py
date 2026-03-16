@@ -31,6 +31,7 @@ from monitor_config import (
 )
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
+from version_tracker import build_recovery_profile, collect_version_record, load_versions_file, update_versions_file
 from task_contracts import infer_task_contract, load_task_contract_catalog, normalize_pipeline_receipt
 from bootstrap_evolution import (
     CONTEXT_LIFECYCLE_BASELINE,
@@ -45,6 +46,7 @@ from heartbeat_guardrail import (
     resolve_timing_window,
     build_user_visible_status_template,
 )
+from recovery_watchdog import RecoveryWatchdog
 
 # ========== 配置 ==========
 BASE_DIR = Path(__file__).parent
@@ -196,6 +198,23 @@ def snapshot_targets() -> list[tuple[str, SnapshotManager]]:
 
 def current_gateway_log() -> Path:
     return current_env_spec()["home"] / "logs" / "gateway.log"
+
+
+def record_version_state(spec: dict[str, Any], *, reason: str, status: str = "observed", mark_known_good: bool = False) -> dict[str, Any]:
+    code_root = Path(str(spec.get("code") or CONFIG.get("OPENCLAW_CODE") or OPENCLAW_CODE))
+    payload = update_versions_file(
+        VERSIONS_FILE,
+        collect_version_record(
+            code_root=code_root,
+            env_id=str(spec.get("id") or "primary"),
+            reason=reason,
+            status=status,
+        ),
+        mark_known_good=mark_known_good,
+    )
+    STORE.save_runtime_value(f"openclaw_version:{spec['id']}", payload.get("current") or {})
+    STORE.save_runtime_value(f"openclaw_recovery_profile:{spec['id']}", build_recovery_profile(payload))
+    return payload
 
 
 def ensure_openclaw_bootstrap(spec: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1418,6 +1437,8 @@ def write_task_registry_snapshot() -> None:
         "last_success": next((item for item in reversed(recent_restart_events) if item.get("status") == "succeeded"), None),
         "last_failure": next((item for item in reversed(recent_restart_events) if item.get("status") == "failed"), None),
     }
+    watchdog_recovery_status = STORE.load_runtime_value(f"watchdog_recovery_status:{env_id}", {})
+    watchdog_recovery_hints = STORE.load_runtime_value(f"watchdog_recovery_hints:{env_id}", [])
     current = STORE.get_current_task(env_id=env_id)
     tasks = STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100)))
     filtered = [task for task in tasks if task.get("env_id") == env_id]
@@ -1506,6 +1527,12 @@ def write_task_registry_snapshot() -> None:
         },
         "session_resolution": session_resolution,
     }
+    if facts_current:
+        facts_payload["current_root_task"] = (facts_current.get("root_task") or None)
+        facts_payload["current_workflow_run"] = (facts_current.get("current_workflow_run") or None)
+        facts_payload["current_finalizer"] = (facts_current.get("current_finalizer") or None)
+        facts_payload["current_delivery_attempt"] = (facts_current.get("current_delivery_attempt") or None)
+        facts_payload["current_followups"] = list((facts_current.get("current_followups") or []))
     main_closure_supervision = {
         "generated_at": payload["generated_at"],
         "env_id": env_id,
@@ -1588,6 +1615,8 @@ def write_task_registry_snapshot() -> None:
         "gateway_running": gateway_running,
         "gateway_healthy": gateway_healthy,
     }
+    version_payload = record_version_state(current_spec, reason="guardian_snapshot", status="observed")
+    recovery_profile = build_recovery_profile(version_payload)
     learning_backlog = {
         "generated_at": int(time.time()),
         "summary": STORE.summarize_learnings(),
@@ -1770,6 +1799,22 @@ def write_task_registry_snapshot() -> None:
         ),
         encoding="utf-8",
     )
+    (shared_dir / "watchdog-recovery-status.json").write_text(
+        json.dumps(watchdog_recovery_status, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "watchdog-recovery-hints.json").write_text(
+        json.dumps(watchdog_recovery_hints, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "openclaw-version.json").write_text(
+        json.dumps(version_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (shared_dir / "openclaw-recovery-profile.json").write_text(
+        json.dumps(recovery_profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (shared_dir / "README.md").write_text(
         "# Shared State Model\n\n"
         "- task-registry-snapshot.json: 当前任务注册表快照\n"
@@ -1791,7 +1836,11 @@ def write_task_registry_snapshot() -> None:
         "- bootstrap-status.json: 初始化结构与配置补齐状态\n"
         "- watcher-summary.json: 任务监督器摘要与 completed/delivered 区分\n"
         "- restart-runtime-status.json: 最近重启链路摘要与最后成功/失败结果\n"
-        "- restart-events.json: 最近重启事件时间线\n",
+        "- restart-events.json: 最近重启事件时间线\n"
+        "- watchdog-recovery-status.json: watchdog 异常识别、分型、调度统计\n"
+        "- watchdog-recovery-hints.json: watchdog 最近生成/派发的结构化提示\n"
+        "- openclaw-version.json: 当前运行代码版本、commit、分支与 upstream 偏移\n"
+        "- openclaw-recovery-profile.json: 当前版本 / known good / 回退提示\n",
         encoding="utf-8",
     )
     env_home = Path(str(current_spec.get("home") or BASE_DIR))
@@ -1945,6 +1994,7 @@ def promote_learning_to_memory(learning: dict[str, Any]) -> None:
 
 # ========== 心跳检测 + Guardrail ==========
 TASK_WATCHER: TaskWatcher | None = None
+RECOVERY_WATCHDOG: RecoveryWatchdog | None = None
 
 def get_task_watcher() -> TaskWatcher:
     """获取任务监控器（单例）"""
@@ -1952,6 +2002,33 @@ def get_task_watcher() -> TaskWatcher:
     if TASK_WATCHER is None:
         TASK_WATCHER = TaskWatcher(STORE)
     return TASK_WATCHER
+
+
+def get_recovery_watchdog() -> RecoveryWatchdog:
+    global RECOVERY_WATCHDOG
+    if RECOVERY_WATCHDOG is None:
+        RECOVERY_WATCHDOG = RecoveryWatchdog(base_dir=BASE_DIR, store=STORE, config=CONFIG)
+    else:
+        RECOVERY_WATCHDOG.config = CONFIG
+    return RECOVERY_WATCHDOG
+
+
+def run_recovery_watchdog(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    current_spec = spec or current_env_spec()
+    watchdog = get_recovery_watchdog()
+    result = watchdog.run(current_spec)
+    if int(result.get("dispatched_count") or 0) > 0:
+        log(f"Recovery watchdog dispatched {result.get('dispatched_count')} hint(s)")
+    return result
+
+
+def run_monitor_db_retention() -> dict[str, Any]:
+    result = STORE.prune_retention(CONFIG)
+    deleted = {k: v for k, v in (result.get("deleted") or {}).items() if int(v or 0) > 0}
+    if deleted:
+        summary = ", ".join(f"{k}={v}" for k, v in deleted.items())
+        log(f"DB retention pruned: {summary}")
+    return result
 
 
 def check_heartbeat_and_guardrail() -> dict[str, Any]:
@@ -4691,6 +4768,7 @@ def main():
     
     gateway_was_healthy = False
     last_check_time = 0
+    last_retention_time = 0
     
     while True:
         try:
@@ -4808,11 +4886,17 @@ def main():
 
             # 心跳检测 + Guardrail 检查
             check_heartbeat_and_guardrail()
+            run_recovery_watchdog(current_env_spec())
             
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:
                 last_check_time = now
                 do_auto_update()
+
+            retention_interval = int(CONFIG.get("DB_RETENTION_INTERVAL_SECONDS", 21600) or 21600)
+            if retention_interval > 0 and (now - last_retention_time > retention_interval):
+                last_retention_time = now
+                run_monitor_db_retention()
             
             # 保存告警状态
             save_alerts()
