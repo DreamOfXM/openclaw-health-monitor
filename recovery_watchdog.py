@@ -468,6 +468,8 @@ class RecoveryWatchdog:
             "agent",
             "--session-id",
             str(lookup.get("session_id") or ""),
+            "--channel",
+            "feishu",
             "--message",
             message,
             "--timeout",
