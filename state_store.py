@@ -3162,44 +3162,6 @@ class MonitorStateStore:
         return approved_summary
 
     @staticmethod
-    def _summarize_claim_level(
-        control_state: str,
-        evidence_level: str,
-        missing_receipts: list[str],
-    ) -> str:
-        if control_state in {"completed_verified"}:
-            return "completed_verified"
-        if control_state in {"blocked_unverified", "blocked_control_followup_failed", "dev_blocked", "test_blocked", "analysis_blocked"}:
-            return "blocked"
-        if evidence_level == "strong" and not missing_receipts:
-            return "execution_verified"
-        if evidence_level == "strong":
-            return "phase_verified"
-        if evidence_level == "moderate":
-            return "progress_only"
-        return "received_only"
-
-    @staticmethod
-    def _summarize_public_control_state(
-        control_state: str,
-        *,
-        next_action: str,
-        followup_stage: str | None,
-        heartbeat_ok: bool,
-    ) -> str:
-        if control_state == "completed_verified" and next_action == "none":
-            return "delivered"
-        if control_state in {"blocked_unverified", "blocked_control_followup_failed", "dev_blocked", "test_blocked", "analysis_blocked"}:
-            return "blocked"
-        if control_state in {"received_only", "planning_only", "progress_only", "dev_running", "awaiting_test", "test_running", "calculator_running", "awaiting_verifier", "delivery_pending"}:
-            if followup_stage in {"soft", "hard", "blocked"}:
-                return "followup_pending"
-            return "healthy" if heartbeat_ok or control_state in {"received_only", "planning_only", "delivery_pending"} else "followup_pending"
-        if next_action in {"await_delivery_confirmation", "await_receipt_after_recovery", "manual_or_session_recovery", "require_receipt_or_block"}:
-            return "followup_pending"
-        return "healthy"
-
-    @staticmethod
     def _infer_pipeline_recovery(
         contract_id: str,
         flags: dict[str, bool],
@@ -3294,7 +3256,7 @@ class MonitorStateStore:
             "protocol_version": ((control.get("contract") or {}).get("protocol_version") or "hm.v1"),
             "next_action": next_action,
             "next_actor": control.get("next_actor") or "",
-            "claim_level": control.get("claim_level") or "received_only",
+            # Phase 4 简化：删除 claim_level
             "phase_statuses": control.get("phase_statuses") or [],
             "reason": control.get("action_reason") or control.get("approved_summary") or "",
             "ack_id": ((control.get("protocol") or {}).get("ack_id") or ""),
@@ -3599,7 +3561,6 @@ class MonitorStateStore:
                 "approved_summary": "任务不存在",
                 "next_action": "none",
                 "next_actor": "",
-                "claim_level": "received_only",
                 "contract": {"id": "single_agent", "required_receipts": []},
                 "missing_receipts": [],
                 "control_action": None,
@@ -3682,7 +3643,7 @@ class MonitorStateStore:
                 next_actor = "main"
             elif core_supervision.get("is_blocked") and not next_action:
                 next_action = "manual_or_session_recovery"
-            claim_level = "proven" if workflow_state == "delivered" or delivery_confirmed else "strong"
+            # Phase 4 简化：删除 claim_level
             protocol_status = {
                 "request": "seen",
                 "confirmed": "seen",
@@ -3705,34 +3666,24 @@ class MonitorStateStore:
                 "approved_summary": approved_summary,
                 "next_action": next_action,
                 "next_actor": next_actor,
-                "claim_level": claim_level,
                 "missing_receipts": [],
                 "contract_id": str(contract_view.get("id") or "single_agent"),
                 "v2_state": workflow_state or "unknown",
             }
-            public_control_state = self._summarize_public_control_state(
-                control_state,
-                next_action=next_action,
-                followup_stage=followup_stage,
-                heartbeat_ok=heartbeat_ok,
-            )
+            # Phase 4 简化：删除 claim_level 和 public_control_state
             evidence_summary = (
                 f"workflow_state={workflow_state or 'unknown'}; finalization_state={core_snapshot.get('finalization_state') or '-'}; "
                 f"delivery_state={core_snapshot.get('delivery_state') or '-'}; delivery_confirmation={core_snapshot.get('delivery_confirmation_level') or '-'}; "
                 f"next_actor={next_actor or '-'}; action={next_action or '-'}; phase={active_phase or '-'}; "
-                f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage}; public_control_state={public_control_state}"
+                f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage}"
             )
             return {
-                "truth_level": "core_projection",
                 "evidence_level": "strong",
                 "evidence_summary": evidence_summary,
                 "control_state": control_state,
                 "approved_summary": approved_summary,
                 "next_action": next_action,
                 "next_actor": next_actor,
-                "action_reason": approved_summary,
-                "claim_level": claim_level,
-                "public_control_state": public_control_state,
                 "user_visible_progress": approved_summary,
                 "protocol": protocol_status,
                 "contract": contract_view,
@@ -4066,7 +4017,6 @@ class MonitorStateStore:
                 or "guardian"
             )
         phase_statuses = self._build_contract_phase_statuses(contract_id, flags, seen_receipts)
-        claim_level = self._summarize_claim_level(control_state, evidence_level, missing_receipts)
         control_action = self.get_open_control_action(task_id)
         active_phase = self._infer_active_phase(task, latest_receipt, control_state)
         timing = self._resolve_timing_metadata(contract_view, active_phase)
@@ -4108,7 +4058,6 @@ class MonitorStateStore:
             "approved_summary": approved_summary,
             "next_action": next_action,
             "next_actor": next_actor,
-            "claim_level": claim_level,
             "missing_receipts": missing_receipts,
             "contract_id": str(contract_view.get("id") or "single_agent"),
             "v2_state": v2_truth.get("state") or "unknown",
@@ -4147,14 +4096,8 @@ class MonitorStateStore:
         if action_template and action_status in {"sent", "blocked", "resolved"}:
             user_visible_progress = action_template
 
-        public_control_state = self._summarize_public_control_state(
-            control_state,
-            next_action=next_action,
-            followup_stage=followup_stage,
-            heartbeat_ok=heartbeat_ok,
-        )
-        truth_level = "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived"
-        if truth_level == "core_projection":
+        # Phase 4 简化：删除 truth_level 和 public_control_state 的计算
+        if core_supervision.get("truth_level") == "core_projection":
             workflow_state = str(core_supervision.get("workflow_state") or "")
             if task_blocked_reason == "control_followup_failed":
                 control_state = "blocked_control_followup_failed"
@@ -4189,12 +4132,6 @@ class MonitorStateStore:
             next_action = "manual_or_session_recovery"
             next_actor = next_actor or "guardian"
             approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
-        public_control_state = self._summarize_public_control_state(
-            control_state,
-            next_action=next_action,
-            followup_stage=followup_stage,
-            heartbeat_ok=heartbeat_ok,
-        )
         return {
             "evidence_level": evidence_level,
             "evidence_summary": evidence_summary,
@@ -4326,21 +4263,21 @@ class MonitorStateStore:
             control = self.derive_task_control_state(task["task_id"])
             core = self.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
             core_supervision = self.derive_core_task_supervision(task["task_id"])
-            claim = str(control.get("claim_level") or "received_only")
-            if claim in claim_counts:
-                claim_counts[claim] += 1
+            # Phase 4 简化：删除 claim_level，直接使用 control_state
+            control_state = str(control.get("control_state") or "")
+            if control_state in claim_counts:
+                claim_counts[control_state] += 1
             next_actor = str(core_supervision.get("next_actor") or control.get("next_actor") or "")
             if next_actor:
                 next_actor_counts[next_actor] = next_actor_counts.get(next_actor, 0) + 1
             workflow_state = str(core.get("workflow_state") or "")
-            control_state = str(control.get("control_state") or "")
             if workflow_state in {"blocked", "delivery_failed", "dlq", "failed", "cancelled"}:
                 blocked += 1
             elif core_supervision.get("needs_followup"):
                 recoverable += 1
             elif str(control.get("next_action") or "") not in {"none", "manual_or_session_recovery"}:
                 recoverable += 1
-            if workflow_state in {"completed", "delivery_pending", "delivered"} or claim in {"execution_verified", "completed_verified"}:
+            if workflow_state in {"completed", "delivery_pending", "delivered"} or control_state == "completed_verified":
                 verified += 1
 
         sent = status_counts["sent"] + status_counts["resolved"]
