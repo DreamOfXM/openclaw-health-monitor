@@ -4113,12 +4113,10 @@ class MonitorStateStore:
             "contract_id": str(contract_view.get("id") or "single_agent"),
             "v2_state": v2_truth.get("state") or "unknown",
         }
+        # Phase 2 简化：压缩 evidence_summary，去掉冗余的 claim 字段
         evidence_summary = (
-            f"evidence={evidence_level}; claim={claim_level}; missing_receipts={','.join(missing_receipts) if missing_receipts else 'none'}; "
-            f"next_actor={next_actor or '-'}; action={next_action}; phase={active_phase}; profile={timing.get('profile')}; "
-            f"first_ack_sla={timing.get('first_ack_sla')}; heartbeat_interval={timing.get('heartbeat_interval')}; "
-            f"soft_followup={timing.get('soft_followup')}; hard_followup={timing.get('hard_followup')}; hard_timeout={timing.get('hard_timeout')}; "
-            f"auto_blocked_unverified={timing.get('auto_blocked_unverified')}; blocked_user_visible={str(timing.get('blocked_user_visible')).lower()}; "
+            f"evidence={evidence_level}; control_state={control_state}; "
+            f"next_action={next_action}; next_actor={next_actor or '-'}; "
             f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage or 'healthy'}"
         )
         action_reason = approved_summary
