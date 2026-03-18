@@ -2082,6 +2082,33 @@ def run_monitor_db_retention() -> dict[str, Any]:
     return result
 
 
+def run_self_evolution_cycle(*, dry_run: bool = False) -> dict[str, Any]:
+    """运行自我进化周期
+    
+    功能：
+    1. 检查所有重复问题
+    2. 尝试自动解决
+    3. 更新 LEARNINGS.md
+    4. 生成每日报告
+    
+    这是自我进化的核心：不只是记录问题，而是主动解决。
+    """
+    from self_evolution import run_self_evolution_cycle as _run_cycle
+    
+    result = _run_cycle(BASE_DIR, STORE, recurrence_threshold=10, dry_run=dry_run)
+    
+    # 记录结果
+    resolution = result.get("resolution") or {}
+    checked = resolution.get("checked_count") or 0
+    resolved = resolution.get("resolved_count") or 0
+    unresolvable = resolution.get("unresolvable_count") or 0
+    
+    if checked > 0:
+        log(f"自我进化周期完成: 检查 {checked} 个问题, 解决 {resolved} 个, {unresolvable} 个需要人工介入")
+    
+    return result
+
+
 def check_heartbeat_and_guardrail() -> dict[str, Any]:
     """心跳检测 + Guardrail 检查
     
