@@ -132,6 +132,47 @@ CORE_EVENT_TYPES = {
     "correction_applied",
 }
 
+SELF_EVOLUTION_STATES = {
+    "recorded",
+    "candidate_rule",
+    "adopted",
+    "verified",
+    "closed",
+    "reopened",
+}
+
+SELF_EVOLUTION_EVENT_TYPES = {
+    "recorded",
+    "candidate_rule",
+    "adopted",
+    "verified",
+    "closed",
+    "reopened",
+    "recurrence",
+}
+
+SELF_EVOLUTION_PROBLEM_CODES = {
+    "missing_pipeline_receipt",
+    "wrong_task_binding",
+    "no_reply_after_commit",
+    "delivery_failed_without_notice",
+    "late_result_not_adopted",
+    "followup_misbound",
+    "followup_pending_without_main_recovery",
+    "received_only_requires_main_followup",
+    "heartbeat_missing_soft",
+    "heartbeat_missing_hard",
+    "heartbeat_missing_blocked",
+    "task_blocked_user_visible",
+    "task_closure_missing",
+}
+
+SELF_EVOLUTION_PROBLEM_CODE_ALIASES = {
+    "watchdog_signal": "task_closure_missing",
+    "binding_mismatch": "wrong_task_binding",
+    "heartbeat_missing": "heartbeat_missing_soft",
+}
+
 DEFAULT_DURATION_PROFILES = {
     "short": {
         "first_ack_sla": 30,
@@ -358,6 +399,48 @@ class MonitorStateStore:
                     summary_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS self_evolution_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    learning_key TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    problem_code TEXT NOT NULL,
+                    root_task_id TEXT NOT NULL DEFAULT '',
+                    workflow_run_id TEXT NOT NULL DEFAULT '',
+                    actor TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_self_evolution_events_learning_created
+                ON self_evolution_events(learning_key, created_at ASC, id ASC);
+
+                CREATE INDEX IF NOT EXISTS idx_self_evolution_events_problem_created
+                ON self_evolution_events(problem_code, created_at DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS self_evolution_projection (
+                    learning_key TEXT PRIMARY KEY,
+                    problem_code TEXT NOT NULL,
+                    current_state TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    candidate_rule_json TEXT NOT NULL DEFAULT '{}',
+                    adopted_rule_target TEXT NOT NULL DEFAULT '',
+                    verified_at INTEGER NOT NULL DEFAULT 0,
+                    verified_in TEXT NOT NULL DEFAULT '',
+                    recurrence_count INTEGER NOT NULL DEFAULT 0,
+                    last_root_task_id TEXT NOT NULL DEFAULT '',
+                    last_workflow_run_id TEXT NOT NULL DEFAULT '',
+                    last_evidence_json TEXT NOT NULL DEFAULT '{}',
+                    last_actor TEXT NOT NULL DEFAULT '',
+                    last_event_type TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    closed_at INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_self_evolution_projection_state_updated
+                ON self_evolution_projection(current_state, updated_at DESC);
 
                 CREATE TABLE IF NOT EXISTS watcher_tasks (
                     watcher_task_id TEXT PRIMARY KEY,
@@ -1992,15 +2075,21 @@ class MonitorStateStore:
         workflow_state = str((workflow or {}).get("current_state") or "")
         delivery_state = str(
             (current_delivery_attempt or {}).get("current_state")
+            or (current_delivery_attempt or {}).get("delivery_state")
             or (current_finalizer or {}).get("delivery_state")
             or ""
         )
-        delivery_confirmation_level = str((current_delivery_attempt or {}).get("confirmation_level") or "")
+        visible_completion_seen = self.has_task_event(task_id, "visible_completion")
+        delivery_confirmation_level = str(
+            (current_delivery_attempt or {}).get("confirmation_level")
+            or ""
+        )
         finalization_state = str((current_finalizer or {}).get("decision_state") or "")
         final_status = str((current_finalizer or {}).get("final_status") or "")
-        is_terminal = workflow_state in {"delivered", "failed", "cancelled", "dlq"}
+        delivery_confirmed = delivery_state in {"delivery_confirmed", "confirmed", "delivered"}
+        is_terminal = workflow_state in {"delivered", "failed", "cancelled", "dlq"} or delivery_confirmed
         is_blocked = workflow_state in {"blocked", "delivery_failed", "failed", "dlq"}
-        is_delivery_pending = workflow_state == "delivery_pending"
+        is_delivery_pending = workflow_state == "delivery_pending" and not delivery_confirmed
         return {
             "root_task_id": root_task_id,
             "root_task": root,
@@ -2017,7 +2106,9 @@ class MonitorStateStore:
             "is_terminal": is_terminal,
             "is_blocked": is_blocked,
             "is_delivery_pending": is_delivery_pending,
-            "needs_followup": bool(followups),
+            "needs_followup": bool(followups) and not delivery_confirmed,
+            "visible_completion_seen": visible_completion_seen,
+            "delivery_confirmed": delivery_confirmed,
             "legacy_projection_used": legacy_projection_used,
         }
 
@@ -2146,19 +2237,31 @@ class MonitorStateStore:
             or str((snapshot.get("current_workflow_run") or {}).get("state_reason") or "").strip()
             or str((lead_followup or {}).get("trigger_reason") or "").strip()
         )
-        recovery_candidate = bool(lead_followup) and (
+        delivery_confirmed = bool(snapshot.get("delivery_confirmed"))
+        if delivery_confirmed:
+            next_action = ""
+            next_actor = ""
+            followup_summary = ""
+        recovery_candidate = (not delivery_confirmed) and bool(lead_followup) and (
             followup_type in {"pipeline_recovery", "delivery_retry", "manual_followup", "control_followup"}
             or next_action in {"manual_or_session_recovery", "delivery_retry", "manual_followup", "await_delivery_confirmation"}
             or "recovery" in next_action
             or "retry" in next_action
         )
         control_state = ""
-        if workflow_state == "delivered":
+        if workflow_state == "delivered" or delivery_confirmed:
             control_state = "completed_verified"
         elif workflow_state == "delivery_pending":
-            control_state = "completed_verified"
+            if delivery_confirmed:
+                control_state = "completed_verified"
+            else:
+                control_state = "delivery_pending"
         elif workflow_state in {"blocked", "delivery_failed", "failed", "dlq", "cancelled"}:
-            control_state = "blocked_unverified"
+            control_state = (
+                "blocked_control_followup_failed"
+                if blocked_reason in {"control_followup_failed", "followup.control_followup_failed"}
+                else "blocked_unverified"
+            )
         elif followups:
             control_state = "progress_only"
         return {
@@ -2172,6 +2275,8 @@ class MonitorStateStore:
             "is_blocked": bool(snapshot.get("is_blocked")),
             "is_delivery_pending": bool(snapshot.get("is_delivery_pending")),
             "needs_followup": bool(snapshot.get("needs_followup")),
+            "delivery_confirmed": delivery_confirmed,
+            "visible_completion_seen": bool(snapshot.get("visible_completion_seen")),
             "recovery_candidate": recovery_candidate,
             "next_action": next_action,
             "next_actor": next_actor,
@@ -2624,80 +2729,9 @@ class MonitorStateStore:
                     "payload": {"reason": f"pipeline_receipt:{action}", "receipt": receipt},
                 }
             elif event_type == "visible_completion":
-                finalization_id = self._legacy_finalization_id(task_id)
-                delivery_attempt_id = self._legacy_delivery_attempt_id(task_id)
-                self.upsert_finalizer_record(
-                    {
-                        "finalization_id": finalization_id,
-                        "root_task_id": root_task_id,
-                        "workflow_run_id": workflow_run_id,
-                        "decision_state": "finalized",
-                        "final_status": "completed",
-                        "trigger_reason": "visible_completion",
-                        "delivery_state": "delivery_confirmed",
-                        "delivery_attempt_no": 1,
-                        "delivery_channel": str(task.get("channel") or ""),
-                        "user_visible_summary": str(payload.get("message") or ""),
-                        "finalized_by": "legacy_projection",
-                        "finalized_at": created_at,
-                        "created_at": created_at,
-                        "updated_at": created_at,
-                        "metadata": {"source": "legacy_task_registry"},
-                    }
-                )
-                self.upsert_delivery_attempt(
-                    {
-                        "delivery_attempt_id": delivery_attempt_id,
-                        "root_task_id": root_task_id,
-                        "workflow_run_id": workflow_run_id,
-                        "finalization_id": finalization_id,
-                        "attempt_no": 1,
-                        "channel": str(task.get("channel") or ""),
-                        "target": str(task.get("session_key") or ""),
-                        "confirmation_level": "delivery_confirmed",
-                        "current_state": "delivery_confirmed",
-                        "state_reason": "visible_completion",
-                        "idempotency_key": delivery_attempt_id,
-                        "created_at": created_at,
-                        "updated_at": created_at,
-                        "terminal_at": created_at,
-                        "metadata": {
-                            "source": "legacy_task_registry",
-                            "message": str(payload.get("message") or ""),
-                        },
-                    }
-                )
-                core_event = {
-                    "event_id": f"legacy:{task_id}:visible_completion:{event_key}",
-                    "root_task_id": root_task_id,
-                    "workflow_run_id": workflow_run_id,
-                    "event_type": "finalizer_finalized",
-                    "event_ts": created_at,
-                    "event_seq": 1,
-                    "idempotency_key": f"legacy:{task_id}:finalizer_finalized:{event_key}",
-                    "payload": {
-                        "reason": "visible_completion",
-                        "finalization_id": self._legacy_finalization_id(task_id),
-                        **payload,
-                    },
-                }
-                self.record_core_event(
-                    {
-                        "event_id": f"legacy:{task_id}:delivery_confirmed:{event_key}",
-                        "root_task_id": root_task_id,
-                        "workflow_run_id": workflow_run_id,
-                        "event_type": "delivery_confirmed",
-                        "event_ts": created_at,
-                        "event_seq": 2,
-                        "idempotency_key": f"legacy:{task_id}:delivery_confirmed:{event_key}",
-                        "payload": {
-                            "reason": "visible_completion",
-                            "delivery_attempt_id": delivery_attempt_id,
-                            "delivery_channel": str(task.get("channel") or ""),
-                            **payload,
-                        },
-                    }
-                )
+                # 减法重构：legacy visible_completion 不再自动投影为 finalizer/delivery_confirmed。
+                # 文本可见性仅保留为审计线索，真正送达必须来自结构化 delivery 记录。
+                core_event = None
             elif event_type == "protocol_violation":
                 followup_id = self._legacy_followup_id(task_id, "protocol", event_key)
                 self.upsert_followup(
@@ -3146,6 +3180,26 @@ class MonitorStateStore:
         return "received_only"
 
     @staticmethod
+    def _summarize_public_control_state(
+        control_state: str,
+        *,
+        next_action: str,
+        followup_stage: str | None,
+        heartbeat_ok: bool,
+    ) -> str:
+        if control_state == "completed_verified" and next_action == "none":
+            return "delivered"
+        if control_state in {"blocked_unverified", "blocked_control_followup_failed", "dev_blocked", "test_blocked", "analysis_blocked"}:
+            return "blocked"
+        if control_state in {"received_only", "planning_only", "progress_only", "dev_running", "awaiting_test", "test_running", "calculator_running", "awaiting_verifier", "delivery_pending"}:
+            if followup_stage in {"soft", "hard", "blocked"}:
+                return "followup_pending"
+            return "healthy" if heartbeat_ok or control_state in {"received_only", "planning_only", "delivery_pending"} else "followup_pending"
+        if next_action in {"await_delivery_confirmation", "await_receipt_after_recovery", "manual_or_session_recovery", "require_receipt_or_block"}:
+            return "followup_pending"
+        return "healthy"
+
+    @staticmethod
     def _infer_pipeline_recovery(
         contract_id: str,
         flags: dict[str, bool],
@@ -3590,18 +3644,27 @@ class MonitorStateStore:
                     control_state = "received_only"
                 elif workflow_state in {"queued", "started"}:
                     control_state = "progress_only"
-                elif workflow_state in {"completed", "delivery_pending", "delivered"}:
+                elif workflow_state == "delivered":
                     control_state = "completed_verified"
+                elif workflow_state == "delivery_pending":
+                    control_state = "delivery_pending"
+                elif workflow_state == "completed":
+                    control_state = "progress_only"
                 elif workflow_state in {"blocked", "delivery_failed", "failed", "dlq", "cancelled"}:
-                    control_state = "blocked_unverified"
+                    control_state = (
+                        "blocked_control_followup_failed"
+                        if str(core_supervision.get("blocked_reason") or "") in {"control_followup_failed", "followup.control_followup_failed"}
+                        else "blocked_unverified"
+                    )
                 else:
                     control_state = "received_only"
+            delivery_confirmed = bool(core_supervision.get("delivery_confirmed"))
             approved_summary = (
                 str(core_supervision.get("followup_summary") or "").strip()
                 or str(finalizer.get("user_visible_summary") or "").strip()
                 or (
                     "主闭环已完成并确认送达。"
-                    if workflow_state == "delivered"
+                    if workflow_state == "delivered" or delivery_confirmed
                     else "主闭环最终结论已形成，当前等待送达确认。"
                     if workflow_state == "delivery_pending"
                     else "主闭环当前处于阻塞状态。"
@@ -3611,15 +3674,15 @@ class MonitorStateStore:
             )
             next_action = str(core_supervision.get("next_action") or "")
             next_actor = str(core_supervision.get("next_actor") or "")
-            if workflow_state == "delivered":
+            if workflow_state == "delivered" or delivery_confirmed:
                 next_action = "none"
                 next_actor = ""
-            elif workflow_state == "delivery_pending" and not next_action:
+            elif workflow_state in {"completed", "delivery_pending"} and not next_action:
                 next_action = "await_delivery_confirmation"
                 next_actor = "main"
             elif core_supervision.get("is_blocked") and not next_action:
                 next_action = "manual_or_session_recovery"
-            claim_level = "proven" if workflow_state == "delivered" else "strong"
+            claim_level = "proven" if workflow_state == "delivered" or delivery_confirmed else "strong"
             protocol_status = {
                 "request": "seen",
                 "confirmed": "seen",
@@ -3647,11 +3710,17 @@ class MonitorStateStore:
                 "contract_id": str(contract_view.get("id") or "single_agent"),
                 "v2_state": workflow_state or "unknown",
             }
+            public_control_state = self._summarize_public_control_state(
+                control_state,
+                next_action=next_action,
+                followup_stage=followup_stage,
+                heartbeat_ok=heartbeat_ok,
+            )
             evidence_summary = (
                 f"workflow_state={workflow_state or 'unknown'}; finalization_state={core_snapshot.get('finalization_state') or '-'}; "
                 f"delivery_state={core_snapshot.get('delivery_state') or '-'}; delivery_confirmation={core_snapshot.get('delivery_confirmation_level') or '-'}; "
                 f"next_actor={next_actor or '-'}; action={next_action or '-'}; phase={active_phase or '-'}; "
-                f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage}"
+                f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage}; public_control_state={public_control_state}"
             )
             return {
                 "truth_level": "core_projection",
@@ -3663,6 +3732,7 @@ class MonitorStateStore:
                 "next_actor": next_actor,
                 "action_reason": approved_summary,
                 "claim_level": claim_level,
+                "public_control_state": public_control_state,
                 "user_visible_progress": approved_summary,
                 "protocol": protocol_status,
                 "contract": contract_view,
@@ -3687,7 +3757,7 @@ class MonitorStateStore:
                 "followup_stage": followup_stage,
                 "heartbeat_age_seconds": heartbeat_age,
                 "heartbeat_ok": heartbeat_ok,
-                "terminal_state_seen": bool(core_supervision.get("is_terminal") or core_supervision.get("is_blocked")),
+                "terminal_state_seen": bool(core_supervision.get("is_terminal") or core_supervision.get("is_blocked") or delivery_confirmed),
             }
         flags = {
             "dispatch_started": False,
@@ -3801,7 +3871,8 @@ class MonitorStateStore:
             elif event_type == "dispatch_complete":
                 flags["dispatch_completed"] = True
             elif event_type == "visible_completion":
-                flags["visible_completion"] = True
+                # 减法重构：visible_completion 只保留为审计信号，不再进入终态裁决。
+                pass
             elif event_type == "stage_progress":
                 flags["pipeline_progress"] = True
             elif event_type == "pipeline_receipt":
@@ -3824,6 +3895,7 @@ class MonitorStateStore:
         next_actor = ""
 
         blocked_reason = str(task.get("blocked_reason") or "")
+        task_blocked_reason = blocked_reason
         blocked_state_locked = False
         if blocked_reason == "missing_pipeline_receipt":
             control_state = "blocked_unverified"
@@ -3961,8 +4033,8 @@ class MonitorStateStore:
             next_action = "require_receipt_or_block"
             next_actor = "guardian"
 
-        if task.get("status") == "completed" and flags["visible_completion"] and evidence_level == "weak":
-            approved_summary = "任务已给出可见完成回复，但没有流水线级结构化证据。"
+        if task.get("status") == "completed" and evidence_level == "weak":
+            approved_summary = "任务状态显示已完成，但缺少可验证结构化证据。"
             next_action = "require_receipt_or_block"
             next_actor = "guardian"
 
@@ -4005,7 +4077,7 @@ class MonitorStateStore:
         protocol_status = {
             "request": "seen" if (flags["dispatch_started"] or flags["dispatch_completed"] or bool(task.get("question"))) else "missing",
             "confirmed": "seen" if (flags["pipeline_progress"] or flags["pipeline_receipt"] or bool(latest_receipt)) else "missing",
-            "final": "seen" if control_state == "completed_verified" or flags["visible_completion"] else "missing",
+            "final": "seen" if control_state == "completed_verified" else "missing",
             "blocked": "seen" if control_state.startswith("blocked") or control_state.endswith("_blocked") else "missing",
             "ack_id": str((latest_receipt or {}).get("ack_id") or task.get("task_id") or ""),
         }
@@ -4020,7 +4092,7 @@ class MonitorStateStore:
             "stage": str(task.get("current_stage") or ""),
         }
         heuristic_state = {
-            "visible_completion_seen": flags["visible_completion"],
+            "visible_completion_seen": False,
             "question_candidate": self.get_task_question_candidate(task_id) or "",
             "latest_protocol_violation": latest_protocol_violation,
         }
@@ -4077,10 +4149,21 @@ class MonitorStateStore:
         if action_template and action_status in {"sent", "blocked", "resolved"}:
             user_visible_progress = action_template
 
+        public_control_state = self._summarize_public_control_state(
+            control_state,
+            next_action=next_action,
+            followup_stage=followup_stage,
+            heartbeat_ok=heartbeat_ok,
+        )
         truth_level = "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived"
         if truth_level == "core_projection":
             workflow_state = str(core_supervision.get("workflow_state") or "")
-            if core_supervision.get("is_terminal"):
+            if task_blocked_reason == "control_followup_failed":
+                control_state = "blocked_control_followup_failed"
+                next_action = "manual_or_session_recovery"
+                next_actor = next_actor or "guardian"
+                approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
+            elif core_supervision.get("is_terminal"):
                 if workflow_state == "delivered":
                     control_state = "completed_verified"
                     approved_summary = "主闭环已完成并确认送达。"
@@ -4103,6 +4186,17 @@ class MonitorStateStore:
             if core_supervision.get("is_blocked") and core_supervision.get("blocked_reason"):
                 blocked_reason = str(core_supervision.get("blocked_reason") or blocked_reason)
 
+        if task_blocked_reason == "control_followup_failed":
+            control_state = "blocked_control_followup_failed"
+            next_action = "manual_or_session_recovery"
+            next_actor = next_actor or "guardian"
+            approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
+        public_control_state = self._summarize_public_control_state(
+            control_state,
+            next_action=next_action,
+            followup_stage=followup_stage,
+            heartbeat_ok=heartbeat_ok,
+        )
         return {
             "truth_level": truth_level,
             "evidence_level": evidence_level,
@@ -4113,6 +4207,7 @@ class MonitorStateStore:
             "next_actor": next_actor,
             "action_reason": action_reason,
             "claim_level": claim_level,
+            "public_control_state": public_control_state,
             "user_visible_progress": user_visible_progress,
             "protocol": protocol_status,
             "contract": contract_view,
@@ -4570,6 +4665,321 @@ class MonitorStateStore:
             }
             for row in rows
         ]
+
+    def _normalize_problem_code(self, problem_code: str | None) -> str:
+        value = str(problem_code or "").strip()
+        if not value:
+            raise ValueError("missing self_evolution problem_code")
+        value = SELF_EVOLUTION_PROBLEM_CODE_ALIASES.get(value, value)
+        if value in SELF_EVOLUTION_PROBLEM_CODES:
+            return value
+        raise ValueError(f"unsupported self_evolution problem_code: {problem_code}")
+
+    def record_self_evolution_event(
+        self,
+        *,
+        learning_key: str,
+        event_type: str,
+        problem_code: str,
+        details: dict[str, Any] | None = None,
+        root_task_id: str = "",
+        workflow_run_id: str = "",
+        actor: str = "guardian",
+        created_at: int | None = None,
+    ) -> None:
+        normalized_event = str(event_type or "").strip()
+        if normalized_event not in SELF_EVOLUTION_EVENT_TYPES:
+            raise ValueError(f"unsupported self_evolution event_type: {event_type}")
+        ts = int(created_at or time.time())
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO self_evolution_events(
+                    learning_key, event_type, problem_code, root_task_id,
+                    workflow_run_id, actor, details_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    learning_key,
+                    normalized_event,
+                    self._normalize_problem_code(problem_code),
+                    root_task_id,
+                    workflow_run_id,
+                    actor,
+                    json.dumps(details or {}, ensure_ascii=False),
+                    ts,
+                ),
+            )
+        self.rebuild_self_evolution_projection(learning_key=learning_key)
+
+    def list_self_evolution_events(
+        self,
+        *,
+        learning_key: str | None = None,
+        problem_code: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM self_evolution_events"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if learning_key:
+            clauses.append("learning_key = ?")
+            params.append(learning_key)
+        if problem_code:
+            clauses.append("problem_code = ?")
+            params.append(problem_code)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                **dict(row),
+                "details": json.loads(row["details_json"] or "{}"),
+            }
+            for row in rows
+        ]
+
+    def rebuild_self_evolution_projection(self, *, learning_key: str | None = None) -> None:
+        query = "SELECT * FROM self_evolution_events"
+        params: list[Any] = []
+        if learning_key:
+            query += " WHERE learning_key = ?"
+            params.append(learning_key)
+        query += " ORDER BY learning_key ASC, created_at ASC, id ASC"
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            grouped: dict[str, list[sqlite3.Row]] = {}
+            for row in rows:
+                grouped.setdefault(str(row["learning_key"]), []).append(row)
+
+            if learning_key and not grouped:
+                conn.execute("DELETE FROM self_evolution_projection WHERE learning_key = ?", (learning_key,))
+                return
+
+            for current_key, event_rows in grouped.items():
+                projection: dict[str, Any] = {
+                    "learning_key": current_key,
+                    "problem_code": "task_closure_missing",
+                    "current_state": "recorded",
+                    "title": "",
+                    "summary": "",
+                    "candidate_rule_json": "{}",
+                    "adopted_rule_target": "",
+                    "verified_at": 0,
+                    "verified_in": "",
+                    "recurrence_count": 0,
+                    "last_root_task_id": "",
+                    "last_workflow_run_id": "",
+                    "last_evidence_json": "{}",
+                    "last_actor": "",
+                    "last_event_type": "",
+                    "created_at": 0,
+                    "updated_at": 0,
+                    "closed_at": 0,
+                }
+                for row in event_rows:
+                    details = json.loads(row["details_json"] or "{}")
+                    event_type = str(row["event_type"] or "")
+                    projection["problem_code"] = self._normalize_problem_code(row["problem_code"])
+                    projection["last_root_task_id"] = str(row["root_task_id"] or projection["last_root_task_id"])
+                    projection["last_workflow_run_id"] = str(row["workflow_run_id"] or projection["last_workflow_run_id"])
+                    projection["last_actor"] = str(row["actor"] or projection["last_actor"])
+                    projection["last_event_type"] = event_type
+                    projection["updated_at"] = int(row["created_at"] or projection["updated_at"])
+                    if not projection["created_at"]:
+                        projection["created_at"] = int(row["created_at"] or 0)
+                    if details.get("title"):
+                        projection["title"] = str(details.get("title") or projection["title"])
+                    if details.get("summary"):
+                        projection["summary"] = str(details.get("summary") or projection["summary"])
+                    if details.get("evidence") is not None:
+                        projection["last_evidence_json"] = json.dumps(details.get("evidence") or {}, ensure_ascii=False)
+                    elif details:
+                        projection["last_evidence_json"] = json.dumps(details, ensure_ascii=False)
+
+                    if event_type == "recorded":
+                        projection["current_state"] = "recorded"
+                    elif event_type == "candidate_rule":
+                        projection["current_state"] = "candidate_rule"
+                        projection["candidate_rule_json"] = json.dumps(details.get("candidate_rule") or details, ensure_ascii=False)
+                    elif event_type == "adopted":
+                        projection["current_state"] = "adopted"
+                        projection["adopted_rule_target"] = str(details.get("rule_target") or details.get("rule_file") or "")
+                    elif event_type == "verified":
+                        projection["current_state"] = "verified"
+                        projection["verified_at"] = int(row["created_at"] or 0)
+                        projection["verified_in"] = str(details.get("scenario") or details.get("verified_in") or "")
+                    elif event_type == "closed":
+                        projection["current_state"] = "closed"
+                        projection["closed_at"] = int(row["created_at"] or 0)
+                    elif event_type == "reopened":
+                        projection["current_state"] = "reopened"
+                    elif event_type == "recurrence":
+                        projection["recurrence_count"] = int(projection["recurrence_count"] or 0) + 1
+
+                conn.execute(
+                    """
+                    INSERT INTO self_evolution_projection(
+                        learning_key, problem_code, current_state, title, summary,
+                        candidate_rule_json, adopted_rule_target, verified_at, verified_in,
+                        recurrence_count, last_root_task_id, last_workflow_run_id,
+                        last_evidence_json, last_actor, last_event_type, created_at,
+                        updated_at, closed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(learning_key) DO UPDATE SET
+                        problem_code = excluded.problem_code,
+                        current_state = excluded.current_state,
+                        title = excluded.title,
+                        summary = excluded.summary,
+                        candidate_rule_json = excluded.candidate_rule_json,
+                        adopted_rule_target = excluded.adopted_rule_target,
+                        verified_at = excluded.verified_at,
+                        verified_in = excluded.verified_in,
+                        recurrence_count = excluded.recurrence_count,
+                        last_root_task_id = excluded.last_root_task_id,
+                        last_workflow_run_id = excluded.last_workflow_run_id,
+                        last_evidence_json = excluded.last_evidence_json,
+                        last_actor = excluded.last_actor,
+                        last_event_type = excluded.last_event_type,
+                        created_at = excluded.created_at,
+                        updated_at = excluded.updated_at,
+                        closed_at = excluded.closed_at
+                    """,
+                    (
+                        projection["learning_key"],
+                        projection["problem_code"],
+                        projection["current_state"],
+                        projection["title"],
+                        projection["summary"],
+                        projection["candidate_rule_json"],
+                        projection["adopted_rule_target"],
+                        projection["verified_at"],
+                        projection["verified_in"],
+                        projection["recurrence_count"],
+                        projection["last_root_task_id"],
+                        projection["last_workflow_run_id"],
+                        projection["last_evidence_json"],
+                        projection["last_actor"],
+                        projection["last_event_type"],
+                        projection["created_at"],
+                        projection["updated_at"],
+                        projection["closed_at"],
+                    ),
+                )
+
+    def _row_to_self_evolution_projection(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        payload = dict(row)
+        payload["candidate_rule"] = json.loads(payload.pop("candidate_rule_json") or "{}")
+        payload["evidence"] = json.loads(payload.pop("last_evidence_json") or "{}")
+        return payload
+
+    def get_self_evolution_projection(self, learning_key: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM self_evolution_projection WHERE learning_key = ?",
+                (learning_key,),
+            ).fetchone()
+        return self._row_to_self_evolution_projection(row)
+
+    def list_self_evolution_projections(
+        self,
+        *,
+        states: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM self_evolution_projection"
+        params: list[Any] = []
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            query += f" WHERE current_state IN ({placeholders})"
+            params.extend(states)
+        query += " ORDER BY updated_at DESC, learning_key DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [item for row in rows if (item := self._row_to_self_evolution_projection(row))]
+
+    def summarize_self_evolution(self) -> dict[str, Any]:
+        summary = {
+            "recorded": 0,
+            "candidate_rule": 0,
+            "adopted": 0,
+            "verified": 0,
+            "closed": 0,
+            "reopened": 0,
+            "pending": 0,
+            "reviewed": 0,
+            "promoted": 0,
+            "pending_total": 0,
+            "total": 0,
+        }
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT current_state, COUNT(*) AS cnt FROM self_evolution_projection GROUP BY current_state"
+            ).fetchall()
+        for row in rows:
+            state = str(row["current_state"] or "")
+            if state in summary:
+                summary[state] = int(row["cnt"] or 0)
+        summary["pending_total"] = (
+            summary["recorded"]
+            + summary["candidate_rule"]
+            + summary["adopted"]
+            + summary["reopened"]
+        )
+        summary["pending"] = summary["pending_total"]
+        summary["reviewed"] = summary["verified"]
+        summary["promoted"] = summary["closed"]
+        summary["total"] = sum(
+            v
+            for k, v in summary.items()
+            if k not in {"pending", "reviewed", "promoted", "pending_total", "total"}
+        )
+        return summary
+
+    def list_learning_view(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        items = self.list_self_evolution_projections(limit=limit)
+        if items:
+            result: list[dict[str, Any]] = []
+            for item in items:
+                state = str(item.get("current_state") or "")
+                if state in {"recorded", "candidate_rule", "adopted", "reopened"}:
+                    status = "pending"
+                elif state == "verified":
+                    status = "reviewed"
+                else:
+                    status = "promoted"
+                result.append(
+                    {
+                        "learning_key": item.get("learning_key"),
+                        "env_id": "primary",
+                        "task_id": item.get("last_root_task_id") or "",
+                        "category": "self_evolution",
+                        "title": item.get("title") or item.get("problem_code") or "未命名学习",
+                        "detail": item.get("summary") or "",
+                        "status": status,
+                        "lifecycle_state": state,
+                        "evidence": item.get("evidence") or {},
+                        "occurrences": int(item.get("recurrence_count") or 0) + 1,
+                        "promoted_target": item.get("adopted_rule_target") or "",
+                        "first_seen_at": int(item.get("created_at") or 0),
+                        "last_seen_at": int(item.get("updated_at") or 0),
+                        "updated_at": int(item.get("updated_at") or 0),
+                        "problem_code": item.get("problem_code") or "task_closure_missing",
+                        "verified_at": int(item.get("verified_at") or 0),
+                        "verified_in": item.get("verified_in") or "",
+                        "rule_added": bool(item.get("adopted_rule_target")),
+                    }
+                )
+            return result
+        return self.list_learnings(limit=limit)
 
     def upsert_watcher_task(self, task: dict[str, Any]) -> None:
         now = int(time.time())

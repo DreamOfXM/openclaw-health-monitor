@@ -237,20 +237,53 @@ class GuardianLearningDelegationTests(unittest.TestCase):
         self.assertEqual(result["from_state"], TaskState.RUNNING.value)
         self.assertEqual(result["error"], "invalid_transition")
 
-    def test_capture_control_plane_learnings_skips_when_openclaw_artifacts_ready(self):
-        with mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_EVOLUTION_PLANE": True}), \
-            mock.patch.object(guardian, "should_delegate_learning_ownership_to_openclaw", return_value=True):
-            captured = guardian.capture_control_plane_learnings([
-                {"task_id": "task-1", "action": "blocked", "control_state": "blocked_unverified"}
-            ])
-        self.assertEqual(captured, [])
+    def test_capture_control_plane_learnings_keeps_supervision_even_when_openclaw_artifacts_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "session-a",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "blocked",
+                    "current_stage": "等待结构化回执",
+                    "question": "做一个系统",
+                    "last_user_message": "做一个系统",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            with mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_EVOLUTION_PLANE": True}), \
+                mock.patch.object(guardian, "should_delegate_learning_ownership_to_openclaw", return_value=True), \
+                mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary"}):
+                captured = guardian.capture_control_plane_learnings([
+                    {"task_id": "task-1", "action": "blocked", "blocked_reason": "missing_pipeline_receipt", "control_state": "blocked_unverified"}
+                ])
+        self.assertEqual(len(captured), 1)
 
-    def test_run_reflection_cycle_returns_delegated_when_openclaw_artifacts_ready(self):
-        with mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_EVOLUTION_PLANE": True}), \
-            mock.patch.object(guardian, "should_delegate_learning_ownership_to_openclaw", return_value=True):
-            result = guardian.run_reflection_cycle()
-        self.assertEqual(result["status"], "delegated")
-        self.assertEqual(result["promoted"], 0)
+    def test_run_reflection_cycle_keeps_reporting_when_openclaw_artifacts_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.record_self_evolution_event(
+                learning_key="lk-1",
+                event_type="recorded",
+                problem_code="missing_pipeline_receipt",
+                root_task_id="task-1",
+                actor="guardian",
+                details={"title": "缺少回执", "summary": "missing ack"},
+            )
+            with mock.patch.object(guardian, "BASE_DIR", base), \
+                mock.patch.object(guardian, "STORE", store), \
+                mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_EVOLUTION_PLANE": True}), \
+                mock.patch.object(guardian, "should_delegate_learning_ownership_to_openclaw", return_value=True), \
+                mock.patch.object(guardian.time, "time", return_value=100):
+                result = guardian.run_reflection_cycle(force=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("report", result)
 
     def test_push_runtime_progress_updates_prefers_guardian_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -452,6 +485,9 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             facts_file = base / "data" / "current-task-facts.json"
             self.assertTrue(summary_file.exists())
             self.assertTrue(facts_file.exists())
+            facts = json.loads(facts_file.read_text(encoding="utf-8"))
+            self.assertIn("current_root_task", facts)
+            self.assertIn("current_workflow_run", facts)
 
     def test_sync_runtime_task_registry_creates_initial_control_action(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -528,7 +564,9 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             events = store.list_task_events(task["task_id"], limit=10)
             self.assertTrue(any(item["event_type"] == "pipeline_receipt" for item in events))
 
-    def test_sync_runtime_task_registry_rejects_duplicate_final(self):
+    def test_sync_runtime_task_registry_ignores_visible_completion_text(self):
+        # 减法重构：运行时日志文本不再触发 visible_completion 事件
+        # 真正的终态必须来自结构化 receipt / delivery 记录
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
@@ -548,9 +586,10 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             task = store.list_tasks(limit=5)[0]
             events = store.list_task_events(task["task_id"], limit=10)
             final_events = [item for item in events if item["event_type"] == "visible_completion"]
-            violations = [item for item in events if item["event_type"] == "protocol_violation"]
-            self.assertEqual(len(final_events), 1)
-            self.assertTrue(any(item["payload"]["violation_kind"] == "duplicate_final" for item in violations))
+            # 新行为：日志文本不再触发 visible_completion
+            self.assertEqual(len(final_events), 0)
+            # 任务状态仍为 running，因为没有结构化 receipt
+            self.assertEqual(task["status"], "running")
 
     def test_extract_runtime_question_strips_json_runtime_metadata(self):
         line = '{"0":"{\\"subsystem\\":\\"gateway/channels/feishu\\"}","1":"Feishu[default] DM from ou_test: 我再提个需求，就是做一个系统","_meta":{"runtime":"node"}}'
@@ -580,6 +619,11 @@ class GuardianLearningDelegationTests(unittest.TestCase):
 
     def test_is_visible_completion_message_filters_internal_lines(self):
         self.assertTrue(guardian.is_visible_completion_message("2026-03-06T05:02:00 任务已完成 ✅"))
+        self.assertTrue(
+            guardian.is_visible_completion_message(
+                "2026-03-06T05:02:00 主人，修复已经完成，你现在可以直接使用了。"
+            )
+        )
         self.assertFalse(
             guardian.is_visible_completion_message(
                 "2026-03-06T05:02:00 dispatch complete (queuedFinal=true, replies=1)"
@@ -588,6 +632,11 @@ class GuardianLearningDelegationTests(unittest.TestCase):
         self.assertFalse(
             guardian.is_visible_completion_message(
                 "2026-03-06T05:02:00 已完成：当前恢复阶段已识别，等待 dev 继续推进"
+            )
+        )
+        self.assertFalse(
+            guardian.is_visible_completion_message(
+                "2026-03-06T05:02:00 主人，已经完成定位，下一步我继续推进测试验收。"
             )
         )
 
@@ -993,7 +1042,7 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertEqual(second[0]["type"], "blocked_notice")
             self.assertIn("任务当前已阻塞", messages[-1][1])
 
-    def test_enforce_task_registry_control_plane_marks_ops_attention_for_weak_task_by_default(self):
+    def test_enforce_task_registry_control_plane_pushes_followup_for_weak_task_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
@@ -1049,10 +1098,10 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 with mock.patch.object(guardian.time, "time", return_value=100):
                     outcomes = guardian.enforce_task_registry_control_plane()
 
-            self.assertEqual(outcomes[0]["action"], "ops_attention_needed")
-            self.assertEqual(followup.call_count, 0)
+            self.assertEqual(outcomes[0]["action"], "followup_sent")
+            self.assertEqual(followup.call_count, 1)
             events = store.list_task_events("task-weak", limit=10)
-            self.assertTrue(any(item["event_type"] == "ops_attention_needed" for item in events))
+            self.assertTrue(any(item["event_type"] == "control_followup" for item in events))
 
     def test_enforce_task_registry_control_plane_blocks_after_max_attempts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1241,7 +1290,7 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertIn("hard追证窗口", action["details"]["status_template"])
             self.assertEqual(followup.call_count, 1)
 
-    def test_enforce_task_registry_control_plane_native_root_does_not_create_legacy_control_action(self):
+    def test_enforce_task_registry_control_plane_native_root_keeps_core_followup_without_legacy_control_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
@@ -1339,10 +1388,11 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 with mock.patch.object(guardian.time, "time", return_value=100):
                     outcomes = guardian.enforce_task_registry_control_plane()
 
-            self.assertEqual(outcomes[0]["action"], "ops_attention_needed")
+            self.assertEqual(outcomes[0]["action"], "blocked")
             self.assertIsNone(store.get_open_control_action("task-native"))
             control = store.derive_task_control_state("task-native")
             self.assertEqual(control["control_action"]["source"], "core_followup")
+            self.assertEqual(store.get_task("task-native")["blocked_reason"], "pipeline_recovery_failed")
 
     def test_build_control_plane_followup_targets_dev_start(self):
         task = {
@@ -1390,30 +1440,28 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 learnings = guardian.capture_control_plane_learnings(
                     [{"task_id": "task-1", "action": "blocked", "blocked_reason": "missing_pipeline_receipt", "control_state": "blocked_unverified"}]
                 )
-            self.assertEqual(learnings[0]["category"], "control_plane")
-            self.assertEqual(store.summarize_learnings()["pending"], 1)
+            self.assertEqual(learnings[0]["problem_code"], "missing_pipeline_receipt")
+            self.assertEqual(store.summarize_self_evolution()["pending"], 1)
 
     def test_run_reflection_cycle_promotes_repeated_learning(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
-            store.upsert_learning(
+            store.record_self_evolution_event(
                 learning_key="lk-1",
-                env_id="primary",
-                task_id="task-1",
-                category="control_plane",
-                title="缺少回执",
-                detail="missing ack",
-                evidence={"task_id": "task-1"},
+                event_type="recorded",
+                problem_code="missing_pipeline_receipt",
+                root_task_id="task-1",
+                actor="guardian",
+                details={"title": "缺少回执", "summary": "missing ack"},
             )
-            store.upsert_learning(
+            store.record_self_evolution_event(
                 learning_key="lk-1",
-                env_id="primary",
-                task_id="task-1",
-                category="control_plane",
-                title="缺少回执",
-                detail="missing ack",
-                evidence={"task_id": "task-1"},
+                event_type="candidate_rule",
+                problem_code="missing_pipeline_receipt",
+                root_task_id="task-1",
+                actor="main",
+                details={"title": "缺少回执", "summary": "missing ack", "candidate_rule": {"rule_target": "EXECUTION_PROTOCOL.md"}},
             )
             with mock.patch.object(guardian, "STORE", store), \
                 mock.patch.object(
@@ -1427,10 +1475,9 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 ), \
                 mock.patch.object(guardian.time, "time", return_value=100):
                 summary = guardian.run_reflection_cycle(force=True)
-            self.assertEqual(summary["promoted"], 1)
-            learning = store.get_learning("lk-1")
-            self.assertEqual(learning["status"], "promoted")
-            self.assertEqual(learning["promoted_target"], "contract")
+            self.assertEqual(summary["report"]["pending_verification"], 1)
+            learning = store.get_self_evolution_projection("lk-1")
+            self.assertEqual(learning["current_state"], "candidate_rule")
 
     def test_current_task_facts_exports_user_visible_progress_for_a_share_pipeline(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1486,6 +1533,95 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertEqual(facts["current_task"]["phase_statuses"][0]["state"], "completed")
             self.assertEqual(facts["current_task"]["phase_statuses"][1]["state"], "pending")
             self.assertEqual(facts["current_task"]["phase_statuses"][2]["state"], "pending")
+
+    def test_write_task_registry_snapshot_exports_public_control_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            home = base / ".openclaw"
+            home.mkdir()
+            (home / "openclaw.json").write_text("{}", encoding="utf-8")
+
+            def snapshot_for(task_payload: dict, contract: dict | None = None, receipts: list[dict] | None = None):
+                store.upsert_task(task_payload)
+                if contract:
+                    store.upsert_task_contract(task_payload["task_id"], contract)
+                for receipt in receipts or []:
+                    store.record_task_event(task_payload["task_id"], "dispatch_started", {"question": task_payload["question"]})
+                    store.record_task_event(task_payload["task_id"], "pipeline_receipt", {"receipt": receipt})
+                with mock.patch.object(guardian, "BASE_DIR", base), \
+                    mock.patch.object(guardian, "STORE", store), \
+                    mock.patch.object(guardian, "CONFIG", {**guardian.DEFAULT_CONFIG, "ENABLE_BOOTSTRAP_INIT": True, "BOOTSTRAP_WRITE_MISSING": False}), \
+                    mock.patch.object(guardian, "current_env_spec", return_value={"id": "primary", "home": home}), \
+                    mock.patch.object(guardian, "all_env_specs", return_value={"primary": {"id": "primary", "port": 18789}}), \
+                    mock.patch.object(guardian, "get_system_metrics", return_value={"cpu": 1.0, "mem_used": 1.0, "mem_total": 8.0}), \
+                    mock.patch.object(guardian, "check_process_running", return_value=True), \
+                    mock.patch.object(guardian, "check_gateway_health", return_value=True):
+                    guardian.write_task_registry_snapshot()
+                return json.loads((base / "data" / "current-task-facts.json").read_text(encoding="utf-8"))["current_task"]["public_control_state"]
+
+            now = int(time.time())
+            healthy = snapshot_for(
+                {
+                    "task_id": "task-healthy",
+                    "session_key": "session-healthy",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "implementation",
+                    "question": "healthy task",
+                    "last_user_message": "healthy task",
+                    "started_at": now,
+                    "last_progress_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {"id": "delivery_pipeline", "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"]},
+                [{"agent": "dev", "phase": "implementation", "action": "started", "evidence": "files=1"}],
+            )
+            self.assertEqual(healthy, "healthy")
+            store.update_task_fields("task-healthy", status="completed", completed_at=now + 1, updated_at=now + 1)
+
+            followup_pending = snapshot_for(
+                {
+                    "task_id": "task-followup-public",
+                    "session_key": "session-followup",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "implementation",
+                    "question": "followup task",
+                    "last_user_message": "followup task",
+                    "started_at": 1,
+                    "last_progress_at": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                },
+                {"id": "delivery_pipeline", "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"]},
+                [{"agent": "dev", "phase": "implementation", "action": "started", "evidence": "files=1"}],
+            )
+            self.assertEqual(followup_pending, "followup_pending")
+            store.update_task_fields("task-followup-public", status="completed", completed_at=now + 2, updated_at=now + 2)
+
+            blocked = snapshot_for(
+                {
+                    "task_id": "task-blocked-public",
+                    "session_key": "session-blocked",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "blocked",
+                    "blocked_reason": "control_followup_failed",
+                    "current_stage": "planning",
+                    "question": "blocked task",
+                    "last_user_message": "blocked task",
+                    "started_at": 1,
+                    "last_progress_at": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                },
+                {"id": "delivery_pipeline", "required_receipts": ["pm:started", "pm:completed"]},
+            )
+            self.assertEqual(blocked, "blocked")
 
     def test_write_task_registry_snapshot_exports_shared_state_and_memory_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2021,7 +2157,7 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertEqual(issues, [])
             record_change_log.assert_not_called()
 
-    def test_enforce_task_registry_control_plane_marks_pipeline_recovery_as_ops_attention_by_default(self):
+    def test_enforce_task_registry_control_plane_marks_pipeline_recovery_as_followup_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
@@ -2083,14 +2219,14 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             task = store.get_task("task-detached")
             events = store.list_task_events("task-detached", limit=20)
             action = store.get_open_control_action("task-detached")
-            self.assertEqual(task["status"], "blocked")
-            self.assertEqual(task["blocked_reason"], "missing_pipeline_receipt")
-            self.assertFalse(any(item["event_type"] == "recovery_started" for item in events))
-            self.assertFalse(any(item["event_type"] == "recovery_succeeded" for item in events))
-            self.assertTrue(any(item["event_type"] == "ops_attention_needed" for item in events))
-            self.assertEqual(action["status"], "pending")
-            self.assertEqual(action["details"]["policy"], "observe_only")
-            self.assertEqual(outcomes[0]["action"], "ops_attention_needed")
+            self.assertEqual(task["status"], "running")
+            self.assertEqual(task["blocked_reason"], "")
+            self.assertTrue(any(item["event_type"] == "recovery_started" for item in events))
+            self.assertTrue(any(item["event_type"] == "recovery_succeeded" for item in events))
+            self.assertFalse(any(item["event_type"] == "ops_attention_needed" for item in events))
+            self.assertEqual(action["status"], "sent")
+            self.assertNotIn("policy", action["details"])
+            self.assertEqual(outcomes[0]["action"], "recovery_sent")
 
 
 if __name__ == "__main__":

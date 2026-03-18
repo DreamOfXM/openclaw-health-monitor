@@ -46,7 +46,14 @@ from heartbeat_guardrail import (
     resolve_timing_window,
     build_user_visible_status_template,
 )
-from recovery_watchdog import RecoveryWatchdog
+from recovery_watchdog import RecoveryWatchdog, detect_recurrence_problem_code
+from self_evolution import (
+    generate_daily_evolution_report,
+    record_learning,
+    render_daily_evolution_report_markdown,
+    render_learnings_markdown,
+    write_state_snapshot,
+)
 
 # ========== 配置 ==========
 BASE_DIR = Path(__file__).parent
@@ -481,7 +488,8 @@ def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> di
     artifact_records = {name: _read_jsonl_records(path) for name, path in artifact_files.items()}
     existing = {name for name, path in artifact_files.items() if path.exists()}
     required = {"pending", "promoted", "discarded", "reflection_runs"}
-    legacy_learnings = [item for item in STORE.list_learnings(limit=200) if item.get("env_id") == env_id]
+    projected_learnings = STORE.list_learning_view(limit=200)
+    legacy_learnings = [item for item in projected_learnings if item.get("env_id") == env_id]
     legacy_reflections = STORE.list_reflection_runs(limit=50)
     artifact_status = "missing"
     if required.issubset(existing):
@@ -805,7 +813,8 @@ def get_process_info(name: str) -> Optional[Dict]:
 
 def get_listener_pid(port: int) -> Optional[int]:
     """返回监听指定端口的 PID。"""
-    code, stdout, _ = run_cmd(f"lsof -ti tcp:{port} -sTCP:LISTEN")
+    # 使用完整路径，避免 PATH 环境变量问题
+    code, stdout, _ = run_cmd(f"/usr/sbin/lsof -ti tcp:{port} -sTCP:LISTEN")
     if code != 0 or not stdout.strip():
         return None
     try:
@@ -1083,7 +1092,7 @@ def is_visible_completion_message(line: str) -> bool:
         "[feishu]",
         "[plugins]",
         "[ws]",
-        "guardIAN_followup".lower(),
+        "guardian_followup",
         "guardian_escalation",
         "received message from",
         "dm from ",
@@ -1096,24 +1105,55 @@ def is_visible_completion_message(line: str) -> bool:
         "等待 dev",
         "等待 test",
         "继续推进",
-        "下一步",
         "当前关键信息",
     )
     if any(marker in lower for marker in ignore_markers):
         return False
 
+    non_terminal_markers = (
+        "下一步",
+        "后续",
+        "继续",
+        "等待",
+        "跟进",
+        "排查",
+        "处理中",
+        "正在",
+        "阻塞",
+        "未完成",
+        "待",
+        "稍后",
+    )
+    if any(marker in text for marker in non_terminal_markers):
+        return False
+
     completion_markers = (
         "任务已完成",
+        "已经完成",
         "已全部完成",
         "全部配置完成",
-        "当前状态： 已结束",
-        "当前状态：已结束",
+        "修复完成",
+        "已经修复",
+        "处理完成",
+        "已处理完成",
+        "测试通过",
+        "验收通过",
+        "可以直接使用",
+        "可以正常使用",
+        "可以在飞书群里查看",
         "无需后续操作",
         "系统已就绪",
+        "当前状态： 已结束",
+        "当前状态：已结束",
         "以后每天都会自动推送",
-        "可以在飞书群里查看",
     )
-    return any(marker in text for marker in completion_markers)
+    if any(marker in text for marker in completion_markers):
+        return True
+
+    return bool(
+        ("已完成" in text or "完成了" in text or "搞定了" in text or "结束了" in text)
+        and any(marker in text for marker in ("主人", "你可以", "可直接", "已回复给主人", "已经回复给主人"))
+    )
 
 
 def extract_requester_open_id(line: str) -> str | None:
@@ -1511,6 +1551,7 @@ def write_task_registry_snapshot() -> None:
             "next_actor": (facts_current or {}).get("control", {}).get("next_actor"),
             "action_reason": (facts_current or {}).get("control", {}).get("action_reason"),
             "claim_level": (facts_current or {}).get("control", {}).get("claim_level"),
+            "public_control_state": (facts_current or {}).get("control", {}).get("public_control_state"),
             "protocol": (facts_current or {}).get("control", {}).get("protocol") or {},
             "pipeline_recovery": (facts_current or {}).get("control", {}).get("pipeline_recovery") or {},
             "contract_id": ((facts_current or {}).get("control", {}).get("contract") or {}).get("id"),
@@ -1619,8 +1660,8 @@ def write_task_registry_snapshot() -> None:
     recovery_profile = build_recovery_profile(version_payload)
     learning_backlog = {
         "generated_at": int(time.time()),
-        "summary": STORE.summarize_learnings(),
-        "learnings": STORE.list_learnings(statuses=["pending", "reviewed", "promoted"], limit=50),
+        "summary": STORE.summarize_self_evolution(),
+        "learnings": STORE.list_learning_view(limit=50),
         "reflections": STORE.list_reflection_runs(limit=20),
     }
     learning_supervision = build_learning_supervision_summary(current_spec)
@@ -1872,12 +1913,20 @@ def write_task_registry_snapshot() -> None:
     learnings_dir.mkdir(parents=True, exist_ok=True)
     env_learnings_dir = env_home / ".learnings"
     env_learnings_dir.mkdir(parents=True, exist_ok=True)
-    learnings = STORE.list_learnings(limit=200)
-    errors_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("status")) != "promoted"]
-    promoted_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("status")) == "promoted"]
+    learnings = STORE.list_learning_view(limit=200)
+    errors_lines = [
+        f"- {item.get('title')}: {item.get('detail')}"
+        for item in learnings
+        if str(item.get("lifecycle_state") or "") not in {"closed", "verified"}
+    ]
+    promoted_lines = [
+        f"- {item.get('title')}: {item.get('detail')}"
+        for item in learnings
+        if str(item.get("lifecycle_state") or "") in {"verified", "closed"}
+    ]
     feature_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("category")) == "feature_request"]
     errors_body = "# Errors\n\n" + ("\n".join(errors_lines) if errors_lines else "- 暂无待处理错误模式\n")
-    learnings_body = "# Learnings\n\n" + ("\n".join(promoted_lines or errors_lines[:20]) if (promoted_lines or errors_lines) else "- 暂无学习记录\n")
+    learnings_body = render_learnings_markdown(STORE, limit=200)
     feature_body = "# Feature Requests\n\n" + ("\n".join(feature_lines) if feature_lines else "- 暂无 feature requests\n")
     (learnings_dir / "ERRORS.md").write_text(errors_body, encoding="utf-8")
     (learnings_dir / "LEARNINGS.md").write_text(learnings_body, encoding="utf-8")
@@ -1885,6 +1934,7 @@ def write_task_registry_snapshot() -> None:
     (env_learnings_dir / "ERRORS.md").write_text(errors_body, encoding="utf-8")
     (env_learnings_dir / "LEARNINGS.md").write_text(learnings_body, encoding="utf-8")
     (env_learnings_dir / "FEATURE_REQUESTS.md").write_text(feature_body, encoding="utf-8")
+    write_state_snapshot(BASE_DIR, STORE)
     memory_dir = BASE_DIR / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     env_memory_dir = env_home / "memory"
@@ -1919,8 +1969,6 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
     """
     if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
         return []
-    if should_delegate_learning_ownership_to_openclaw():
-        return []
     env_id = current_env_spec()["id"]
     captured: list[dict] = []
     for outcome in outcomes:
@@ -1930,21 +1978,19 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
         action = str(outcome.get("action") or "")
         if action not in {"blocked", "followup_sent"}:
             continue
-        blocked_reason = str(outcome.get("blocked_reason") or "")
-        control_state = str(outcome.get("control_state") or "")
+        blocked_reason = str(outcome.get("blocked_reason") or "").strip()
+        control_state = str(outcome.get("control_state") or "").strip()
         task = STORE.get_task(task_id) or {}
-        title = "任务控制面发现可改进项"
-        detail = f"task={task_id} control={control_state} action={action} blocked_reason={blocked_reason or '-'}"
-        if action == "blocked":
-            title = "任务因缺少结构化回执而阻塞"
-        learning_key = derive_learning_key("control", env_id, control_state, blocked_reason or action)
-        learning = STORE.upsert_learning(
+        problem_code = blocked_reason if blocked_reason in {"missing_pipeline_receipt", "wrong_task_binding", "no_reply_after_commit", "delivery_failed_without_notice", "late_result_not_adopted", "followup_misbound", "followup_pending_without_main_recovery", "received_only_requires_main_followup", "heartbeat_missing_soft", "heartbeat_missing_hard", "heartbeat_missing_blocked", "task_blocked_user_visible", "task_closure_missing"} else "task_closure_missing"
+        title = f"control_observation:{problem_code}"
+        detail = f"task={task_id};control_state={control_state or '-'};action={action};blocked_reason={blocked_reason or '-'}"
+        learning_key = derive_learning_key("control", env_id, control_state, problem_code)
+        learning = record_learning(
+            STORE,
             learning_key=learning_key,
-            env_id=env_id,
-            task_id=task_id,
-            category="control_plane",
+            problem_code=problem_code,
             title=title,
-            detail=detail,
+            summary=detail,
             evidence={
                 "task_id": task_id,
                 "question": task.get("question") or task.get("last_user_message") or "未知任务",
@@ -1952,6 +1998,8 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
                 "blocked_reason": blocked_reason,
                 "action": action,
             },
+            root_task_id=task_id,
+            actor="guardian",
         )
         captured.append(learning)
     return captured
@@ -2017,6 +2065,20 @@ def run_recovery_watchdog(spec: dict[str, Any] | None = None) -> dict[str, Any]:
     current_spec = spec or current_env_spec()
     watchdog = get_recovery_watchdog()
     result = watchdog.run(current_spec)
+    for item in list(result.get("items") or [])[:20]:
+        problem_code = detect_recurrence_problem_code(item)
+        task_id = str(item.get("task_id") or "")
+        title = f"watchdog_observation:{problem_code}"
+        summary = f"anomaly_type={str(item.get('anomaly_type') or '-').strip()};severity={str(item.get('severity') or '-').strip()};reason={str(item.get('reason') or '-').strip()}"
+        record_learning(
+            STORE,
+            problem_code=problem_code,
+            title=title,
+            summary=summary,
+            evidence=item,
+            root_task_id=task_id,
+            actor="guardian",
+        )
     if int(result.get("dispatched_count") or 0) > 0:
         log(f"Recovery watchdog dispatched {result.get('dispatched_count')} hint(s)")
     return result
@@ -2182,54 +2244,38 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     """
     if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
         return {"status": "disabled", "promoted": 0, "reviewed": 0}
-    if should_delegate_learning_ownership_to_openclaw():
-        return {"status": "delegated", "promoted": 0, "reviewed": 0}
     now = int(time.time())
     interval = int(CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600))
     last_run = int(STORE.load_runtime_value("reflection_last_run_at", 0) or 0)
     if not force and last_run and now - last_run < interval:
         return {"status": "skipped", "promoted": 0, "reviewed": 0}
 
-    threshold = max(2, int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3)))
-    learnings = STORE.list_learnings(limit=100)
-    promoted = 0
-    reviewed = 0
-    for learning in learnings:
-        if learning.get("status") == "promoted":
-            continue
-        reviewed += 1
-        next_status = "reviewed"
-        promoted_target = ""
-        if int(learning.get("occurrences") or 0) >= threshold:
-            next_status = "promoted"
-            category = str(learning.get("category") or "")
-            promoted_target = "contract" if category == "control_plane" else "rule"
-            promoted += 1
-            
-            # 自动沉淀到 MEMORY.md 和 memory/YYYY-MM-DD.md
-            promote_learning_to_memory(learning)
-            
-        STORE.upsert_learning(
-            learning_key=str(learning.get("learning_key") or ""),
-            env_id=str(learning.get("env_id") or current_env_spec()["id"]),
-            task_id=str(learning.get("task_id") or ""),
-            category=str(learning.get("category") or "misc"),
-            title=str(learning.get("title") or ""),
-            detail=str(learning.get("detail") or ""),
-            evidence=learning.get("evidence") or {},
-            status=next_status,
-            promoted_target=promoted_target,
-        )
+    report = generate_daily_evolution_report(STORE, now=now)
+    promoted = int(report.get("rules_added") or 0)
+    reviewed = int(report.get("issues_fixed") or 0) + int(report.get("pending_verification") or 0)
     summary = {
         "status": "ok",
         "reviewed": reviewed,
         "promoted": promoted,
-        "threshold": threshold,
+        "threshold": max(2, int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3))),
         "generated_at": now,
+        "report": report,
     }
     STORE.record_reflection_run("scheduled", summary)
     STORE.save_runtime_value("reflection_last_run_at", now)
+    STORE.save_runtime_value("self_evolution_last_cycle_at", now)
+    write_state_snapshot(BASE_DIR, STORE, now=now)
+    evolution_dir = BASE_DIR / "self-evolution"
+    evolution_dir.mkdir(parents=True, exist_ok=True)
+    (evolution_dir / f"daily-report-{time.strftime('%Y-%m-%d', time.localtime(now))}.md").write_text(
+        render_daily_evolution_report_markdown(STORE, now=now),
+        encoding="utf-8",
+    )
     return summary
+
+
+def run_self_evolution_cycle(force: bool = False) -> dict[str, Any]:
+    return run_reflection_cycle(force=force)
 
 
 def sync_runtime_task_registry(lines: list[str]) -> None:
@@ -2471,66 +2517,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             reconcile_task(dispatch["task_id"])
             continue
 
-        if is_visible_completion_message(line) and open_dispatches:
-            current_key = most_recent_key()
-            if current_key:
-                dispatch = open_dispatches.pop(current_key)
-                accepted, normalized_payload, violations = validate_protocol_event(
-                    STORE.get_task(dispatch["task_id"]) or dispatch,
-                    "visible_completion",
-                    {"timestamp": ts_raw, "message": line.strip()},
-                )
-                for violation in violations:
-                    record_protocol_violation(
-                        dispatch["task_id"],
-                        violation_kind=str(violation.get("violation_kind") or "unknown"),
-                        event_type="visible_completion",
-                        payload=violation.get("payload") or {},
-                    )
-                if not accepted:
-                    touched_task_ids.add(dispatch["task_id"])
-                    reconcile_task(dispatch["task_id"])
-                    continue
-                STORE.update_task_fields(
-                    dispatch["task_id"],
-                    status="completed",
-                    current_stage="已完成",
-                    updated_at=int(ts),
-                    completed_at=int(ts),
-                )
-                touched_task_ids.add(dispatch["task_id"])
-                touched_session_keys.add(dispatch.get("session_key") or "")
-                STORE.record_task_event(
-                    dispatch["task_id"],
-                    "visible_completion",
-                    normalized_payload,
-                )
-                last_closed_dispatch = dispatch
-                attach_background_result_if_late(
-                    dispatch["task_id"],
-                    dispatch.get("session_key") or "",
-                    completed_at=int(ts),
-                    status="completed",
-                )
-                reconcile_task(dispatch["task_id"])
-            continue
-
-        if is_visible_completion_message(line) and last_closed_dispatch:
-            accepted, normalized_payload, violations = validate_protocol_event(
-                STORE.get_task(last_closed_dispatch["task_id"]) or last_closed_dispatch,
-                "visible_completion",
-                {"timestamp": ts_raw, "message": line.strip()},
-            )
-            for violation in violations:
-                record_protocol_violation(
-                    last_closed_dispatch["task_id"],
-                    violation_kind=str(violation.get("violation_kind") or "unknown"),
-                    event_type="visible_completion",
-                    payload=violation.get("payload") or {},
-                )
-            if not accepted:
-                touched_task_ids.add(last_closed_dispatch["task_id"])
-                reconcile_task(last_closed_dispatch["task_id"])
+        if is_visible_completion_message(line):
+            # 减法重构：运行时日志只能作为排障线索，不能再直接推进 visible_completion / delivery。
+            # 真正的 completed/block + delivered 必须来自结构化终态与真实送达记录。
             continue
 
         if "dispatch complete" in lower and open_dispatches:
@@ -3508,7 +3497,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
     now = int(time.time())
     cooldown = int(CONFIG.get("TASK_CONTROL_FOLLOWUP_COOLDOWN", 300))
     max_attempts = max(1, int(CONFIG.get("TASK_CONTROL_MAX_ATTEMPTS", 2)))
-    intrusive_control = bool(CONFIG.get("ENABLE_INTRUSIVE_TASK_CONTROL", False))
+    intrusive_control = True
     outcomes: list[dict] = []
 
     for task in STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100))):

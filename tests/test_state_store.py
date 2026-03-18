@@ -750,11 +750,14 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(steps[0]["agent_id"], "dev")
             self.assertEqual(steps[0]["current_state"], "completed")
             self.assertIn("receipt_adopted_completed", [event["event_type"] for event in events])
-            self.assertIn("finalizer_finalized", [event["event_type"] for event in events])
-            self.assertIn("delivery_confirmed", [event["event_type"] for event in events])
-            self.assertEqual(projection["current_state"], "delivered")
-            self.assertEqual(delivery_attempts[0]["current_state"], "delivery_confirmed")
-            self.assertEqual(finalizers[0]["delivery_state"], "delivery_confirmed")
+            # 减法重构：visible_completion 不再自动投影为 finalizer_finalized / delivery_confirmed
+            # 真正的送达必须来自结构化 delivery 记录
+            self.assertNotIn("finalizer_finalized", [event["event_type"] for event in events])
+            self.assertNotIn("delivery_confirmed", [event["event_type"] for event in events])
+            # workflow 可以基于 receipt 显示 completed，但 delivery 未确认
+            self.assertEqual(projection["current_state"], "completed")
+            self.assertEqual(len(delivery_attempts), 0)
+            self.assertEqual(len(finalizers), 0)
             self.assertEqual(binding["foreground_root_task_id"], "legacy-root:task-legacy")
 
     def test_sync_legacy_task_projection_bridges_open_control_actions_to_followups(self):
@@ -988,27 +991,25 @@ class StateStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
-            learning = store.upsert_learning(
+            store.record_self_evolution_event(
                 learning_key="abc",
-                env_id="primary",
-                task_id="task-1",
-                category="control_plane",
-                title="缺少回执",
-                detail="task missing ack",
-                evidence={"task_id": "task-1"},
+                event_type="recorded",
+                problem_code="missing_pipeline_receipt",
+                root_task_id="task-1",
+                actor="guardian",
+                details={"title": "缺少回执", "summary": "task missing ack", "evidence": {"task_id": "task-1"}},
             )
-            learning = store.upsert_learning(
+            store.record_self_evolution_event(
                 learning_key="abc",
-                env_id="primary",
-                task_id="task-1",
-                category="control_plane",
-                title="缺少回执",
-                detail="task missing ack",
-                evidence={"task_id": "task-1"},
-                status="reviewed",
+                event_type="verified",
+                problem_code="missing_pipeline_receipt",
+                root_task_id="task-1",
+                actor="main",
+                details={"title": "缺少回执", "summary": "task missing ack", "scenario": "真实任务复测"},
             )
-            self.assertEqual(learning["occurrences"], 2)
-            self.assertEqual(store.summarize_learnings()["reviewed"], 1)
+            learning = store.get_self_evolution_projection("abc")
+            self.assertEqual(learning["current_state"], "verified")
+            self.assertEqual(store.summarize_self_evolution()["reviewed"], 1)
             store.record_reflection_run("scheduled", {"promoted": 1})
             runs = store.list_reflection_runs(limit=5)
             self.assertEqual(runs[0]["summary"]["promoted"], 1)
@@ -1360,6 +1361,96 @@ class StateStoreTests(unittest.TestCase):
 
             self.assertEqual(control["next_action"], "await_receipt_after_recovery")
             self.assertEqual(control["next_actor"], "dev")
+
+    def test_visible_completion_corrects_native_delivery_pending_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            now = int(time.time())
+            store.upsert_task(
+                {
+                    "task_id": "task-native",
+                    "session_key": "session-native",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "已形成结论",
+                    "question": "修复主脑闭环",
+                    "last_user_message": "修复主脑闭环",
+                    "started_at": now - 20,
+                    "last_progress_at": now - 10,
+                    "created_at": now - 20,
+                    "updated_at": now - 5,
+                }
+            )
+            store.upsert_root_task(
+                {
+                    "root_task_id": "rt-native",
+                    "session_key": "session-native",
+                    "origin_request_id": "task-native",
+                    "user_goal_summary": "修复主脑闭环",
+                    "status": "open",
+                    "current_workflow_run_id": "wf-native",
+                    "active": True,
+                    "created_at": now - 20,
+                    "updated_at": now - 5,
+                }
+            )
+            store.upsert_workflow_run(
+                {
+                    "workflow_run_id": "wf-native",
+                    "root_task_id": "rt-native",
+                    "workflow_type": "direct_main",
+                    "current_state": "delivery_pending",
+                    "state_reason": "awaiting_visible_reply",
+                    "created_at": now - 20,
+                    "updated_at": now - 5,
+                }
+            )
+            store.upsert_finalizer_record(
+                {
+                    "finalization_id": "fin-native",
+                    "root_task_id": "rt-native",
+                    "workflow_run_id": "wf-native",
+                    "decision_state": "finalized",
+                    "final_status": "completed",
+                    "delivery_state": "delivery_pending",
+                    "user_visible_summary": "修复已完成",
+                    "created_at": now - 10,
+                    "updated_at": now - 5,
+                }
+            )
+            store.upsert_followup(
+                {
+                    "followup_id": "fu-native",
+                    "root_task_id": "rt-native",
+                    "workflow_run_id": "wf-native",
+                    "followup_type": "delivery_retry",
+                    "trigger_reason": "await_delivery_confirmation",
+                    "current_state": "open",
+                    "suggested_action": "await_delivery_confirmation",
+                    "created_by": "guardian",
+                    "created_at": now - 4,
+                    "updated_at": now - 4,
+                }
+            )
+            store.record_task_event("task-native", "visible_completion", {"message": "主人，修复已经完成，你现在可以直接使用了。"})
+
+            snapshot = store.get_core_closure_snapshot_for_task("task-native", allow_legacy_projection=False)
+            supervision = store.derive_core_task_supervision("task-native")
+            control = store.derive_task_control_state("task-native")
+
+            # 减法重构：visible_completion 不再自动确认 delivery
+            # 真正的 delivered 必须来自结构化 delivery 记录
+            self.assertEqual(snapshot["delivery_state"], "delivery_pending")
+            self.assertEqual(snapshot["delivery_confirmation_level"], "")
+            self.assertTrue(snapshot["visible_completion_seen"])
+            # 没有 delivery_confirmed，任务仍需 followup
+            self.assertTrue(snapshot["needs_followup"])
+            self.assertFalse(snapshot["is_terminal"])
+            self.assertFalse(supervision["delivery_confirmed"])
+            # next_action 仍要求 delivery 确认
+            self.assertIn("delivery", control["next_action"] or "await")
 
     def test_derive_task_control_state_detects_pipeline_detached_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1848,7 +1939,240 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(delivered["control_state"], "completed_verified")
             self.assertEqual(delivered["v2_truth"]["state"], "delivered")
             self.assertTrue(delivered["v2_truth"]["delivered"])
+            self.assertEqual(delivered["public_control_state"], "delivered")
 
+    def test_derive_core_task_supervision_delivery_pending_without_confirmation(self):
+        """当 workflow_state == 'delivery_pending' 且 delivery_confirmed == False 时，control_state 应为 'delivery_pending'"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            task_id = "task-delivery-pending-no-conf"
+            store.upsert_task(
+                {
+                    "task_id": task_id,
+                    "session_key": "session-delivery-pending",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "delivery_pending",
+                    "question": "delivery pending test",
+                    "last_user_message": "delivery pending test",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_root_task(
+                {
+                    "root_task_id": "rt-delivery-pending",
+                    "session_key": "session-delivery-pending",
+                    "origin_request_id": task_id,
+                    "origin_message_id": "msg-delivery-pending",
+                    "user_goal_summary": "delivery pending test",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "status": "open",
+                    "current_workflow_run_id": "wf-delivery-pending",
+                    "active": True,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            # 设置 workflow_state == "delivery_pending"，但不设置 delivery_confirmed
+            store.upsert_workflow_run(
+                {
+                    "workflow_run_id": "wf-delivery-pending",
+                    "root_task_id": "rt-delivery-pending",
+                    "idempotency_key": "wf-delivery-pending",
+                    "workflow_type": "pm_dev_test",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "current_state": "delivery_pending",  # 关键：设置 workflow_state
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            result = store.derive_core_task_supervision(task_id)
+            self.assertEqual(result["control_state"], "delivery_pending", 
+                "当 workflow_state == 'delivery_pending' 且 delivery_confirmed == False 时，control_state 应为 'delivery_pending'")
+
+    def test_derive_core_task_supervision_delivery_pending_with_confirmation(self):
+        """当 workflow_state == 'delivery_pending' 且 delivery_confirmed == True 时，control_state 应为 'completed_verified'"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            task_id = "task-delivery-pending-conf"
+            store.upsert_task(
+                {
+                    "task_id": task_id,
+                    "session_key": "session-delivery-pending-conf",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "delivery_pending",
+                    "question": "delivery pending confirmed test",
+                    "last_user_message": "delivery pending confirmed test",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_root_task(
+                {
+                    "root_task_id": "rt-delivery-pending-conf",
+                    "session_key": "session-delivery-pending-conf",
+                    "origin_request_id": task_id,
+                    "origin_message_id": "msg-delivery-pending-conf",
+                    "user_goal_summary": "delivery pending confirmed test",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "status": "open",
+                    "current_workflow_run_id": "wf-delivery-pending-conf",
+                    "active": True,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_workflow_run(
+                {
+                    "workflow_run_id": "wf-delivery-pending-conf",
+                    "root_task_id": "rt-delivery-pending-conf",
+                    "idempotency_key": "wf-delivery-pending-conf",
+                    "workflow_type": "pm_dev_test",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "current_state": "delivery_pending",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            # 设置 delivery_confirmed = True
+            store.upsert_delivery_attempt(
+                {
+                    "delivery_attempt_id": "da-delivery-pending-conf",
+                    "root_task_id": "rt-delivery-pending-conf",
+                    "workflow_run_id": "wf-delivery-pending-conf",
+                    "delivery_state": "confirmed",
+                    "current_state": "confirmed",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            result = store.derive_core_task_supervision(task_id)
+            self.assertEqual(result["control_state"], "completed_verified",
+                "当 workflow_state == 'delivery_pending' 且 delivery_confirmed == True 时，control_state 应为 'completed_verified'")
+
+    def test_derive_core_task_supervision_delivered_state(self):
+        """当 workflow_state == 'delivered' 时，control_state 应为 'completed_verified'"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            task_id = "task-delivered"
+            store.upsert_task(
+                {
+                    "task_id": task_id,
+                    "session_key": "session-delivered",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "delivered",
+                    "question": "delivered test",
+                    "last_user_message": "delivered test",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_root_task(
+                {
+                    "root_task_id": "rt-delivered",
+                    "session_key": "session-delivered",
+                    "origin_request_id": task_id,
+                    "origin_message_id": "msg-delivered",
+                    "user_goal_summary": "delivered test",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "status": "completed",
+                    "current_workflow_run_id": "wf-delivered",
+                    "active": True,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_workflow_run(
+                {
+                    "workflow_run_id": "wf-delivered",
+                    "root_task_id": "rt-delivered",
+                    "idempotency_key": "wf-delivered",
+                    "workflow_type": "pm_dev_test",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "current_state": "delivered",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            result = store.derive_core_task_supervision(task_id)
+            self.assertEqual(result["control_state"], "completed_verified",
+                "当 workflow_state == 'delivered' 时，control_state 应为 'completed_verified'")
+
+    def test_derive_task_control_state_native_completed_without_delivery_stays_followup_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            task_id = "task-native-completed"
+            store.upsert_task(
+                {
+                    "task_id": task_id,
+                    "session_key": "session-native-completed",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "testing:completed",
+                    "question": "native completed without delivery",
+                    "last_user_message": "native completed without delivery",
+                    "started_at": 1,
+                    "last_progress_at": 2,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_root_task(
+                {
+                    "root_task_id": "rt-native-completed",
+                    "session_key": "session-native-completed",
+                    "origin_request_id": task_id,
+                    "origin_message_id": "msg-native-completed",
+                    "user_goal_summary": "native completed without delivery",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "status": "open",
+                    "current_workflow_run_id": "wf-native-completed",
+                    "active": True,
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            store.upsert_workflow_run(
+                {
+                    "workflow_run_id": "wf-native-completed",
+                    "root_task_id": "rt-native-completed",
+                    "idempotency_key": "wf-native-completed",
+                    "workflow_type": "pm_dev_test",
+                    "intent_type": "delivery",
+                    "contract_type": "pm_dev_test",
+                    "current_state": "completed",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            )
+            control = store.derive_task_control_state(task_id)
+            self.assertNotEqual(control["control_state"], "completed_verified")
+            self.assertEqual(control["next_action"], "await_delivery_confirmation")
+            self.assertEqual(control["public_control_state"], "followup_pending")
 
 
 if __name__ == "__main__":
