@@ -3848,7 +3848,31 @@ class MonitorStateStore:
         blocked_reason = str(task.get("blocked_reason") or "")
         task_blocked_reason = blocked_reason
         blocked_state_locked = False
-        if blocked_reason == "missing_pipeline_receipt":
+        task_status = str(task.get("status") or "")
+        
+        # Bug 修复：如果 task.status == "blocked"，control_state 必须是 blocked_*
+        # 这是看门狗检测的必要条件
+        if task_status == "blocked":
+            if blocked_reason == "missing_pipeline_receipt":
+                control_state = "blocked_unverified"
+                approved_summary = "任务缺少结构化流水线回执，守护系统已判定为阻塞。"
+                next_action = "manual_or_session_recovery"
+                next_actor = "guardian"
+                blocked_state_locked = True
+            elif blocked_reason == "control_followup_failed":
+                control_state = "blocked_control_followup_failed"
+                approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
+                next_action = "manual_or_session_recovery"
+                next_actor = "guardian"
+                blocked_state_locked = True
+            else:
+                # 其他阻塞原因，也标记为 blocked_unverified
+                control_state = "blocked_unverified"
+                approved_summary = f"任务已阻塞：{blocked_reason or '原因未知'}"
+                next_action = "manual_or_session_recovery"
+                next_actor = "guardian"
+                blocked_state_locked = True
+        elif blocked_reason == "missing_pipeline_receipt":
             control_state = "blocked_unverified"
             approved_summary = "任务缺少结构化流水线回执，守护系统已判定为阻塞。"
             next_action = "manual_or_session_recovery"
