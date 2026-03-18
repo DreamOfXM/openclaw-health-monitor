@@ -37,6 +37,33 @@ def _tail_lines(path: Path, limit: int = 120) -> list[str]:
     return lines[-limit:]
 
 
+def detect_recurrence_problem_code(candidate: dict[str, Any]) -> str:
+    """Map watchdog anomalies to stable self-evolution problem codes."""
+    anomaly = str(candidate.get("anomaly_type") or "").strip()
+    blocked_reason = str(candidate.get("blocked_reason") or "").strip()
+    if blocked_reason == "missing_pipeline_receipt":
+        return "missing_pipeline_receipt"
+    if anomaly == "no_reply_after_commit":
+        return "no_reply_after_commit"
+    if anomaly in {"wrong_task_binding", "binding_mismatch"}:
+        return "wrong_task_binding"
+    if anomaly == "late_result_not_adopted":
+        return "late_result_not_adopted"
+    if anomaly == "delivery_failed_without_notice":
+        return "delivery_failed_without_notice"
+    if anomaly == "followup_misbound":
+        return "followup_misbound"
+    if anomaly == "followup_pending_without_main_recovery":
+        return "followup_pending_without_main_recovery"
+    if anomaly == "received_only_requires_main_followup":
+        return "received_only_requires_main_followup"
+    if anomaly.startswith("heartbeat_missing_"):
+        return anomaly
+    if anomaly == "task_blocked_user_visible":
+        return "task_blocked_user_visible"
+    return "task_closure_missing"
+
+
 class RecoveryWatchdog:
     def __init__(
         self,
@@ -116,6 +143,7 @@ class RecoveryWatchdog:
         }
 
     def _detect_candidates(self, context: dict[str, Any]) -> list[dict[str, Any]]:
+        # Phase 2 简化：watchdog 只负责"完成/阻塞但未送达就追"
         facts = context.get("current_facts") or {}
         current_task = dict(facts.get("current_task") or {})
         current_root = dict(facts.get("current_root_task") or {})
@@ -128,13 +156,22 @@ class RecoveryWatchdog:
         session_key = str(current_task.get("session_key") or facts.get("session_resolution", {}).get("session_key") or "")
         target_agent = "main"
         state_reason = str(current_run.get("state_reason") or current_root.get("state_reason") or "")
-        active_age = self._resolve_age_seconds(current_task, current_run, current_root)
-        followup_after = int(self.config.get("RECOVERY_WATCHDOG_FOLLOWUP_SECONDS", 180))
-        if task_id and active_age >= followup_after and not self._is_terminal(current_task, current_root, current_run, current_delivery):
+        control_state = str(current_task.get("control_state") or "")
+        next_action = str(current_task.get("next_action") or "")
+        delivery_state = str(
+            current_delivery.get("delivery_state")
+            or current_delivery.get("current_state")
+            or current_root.get("delivery_state")
+            or ""
+        ).strip().lower()
+        if not task_id:
+            return []
+
+        def add_candidate(anomaly_type: str, severity: str, summary: str, **extra: Any) -> None:
             candidates.append({
-                "anomaly_type": "task_closure_missing",
-                "severity": "high",
-                "summary": f"task {task_id} is still open after {active_age}s without explicit closure",
+                "anomaly_type": anomaly_type,
+                "severity": severity,
+                "summary": summary,
                 "task_id": task_id,
                 "root_task_id": root_task_id,
                 "workflow_run_id": workflow_run_id,
@@ -143,12 +180,31 @@ class RecoveryWatchdog:
                 "evidence": {
                     "task_id": task_id,
                     "state_reason": state_reason,
-                    "control_state": current_task.get("control_state"),
-                    "current_state": current_run.get("current_state") or current_root.get("workflow_state"),
-                    "active_age_seconds": active_age,
+                    "control_state": control_state,
+                    "next_action": next_action,
+                    "delivery_state": delivery_state,
+                    **extra,
                 },
             })
-        return [item for item in candidates if item.get("task_id")]
+
+        # 核心逻辑：完成/阻塞但未送达就追
+        is_completed = control_state == "completed_verified"
+        is_blocked = control_state in {"blocked_unverified", "blocked_control_followup_failed"}
+        is_delivered = delivery_state in {"confirmed", "delivered", "delivery_confirmed"}
+
+        if is_completed and not is_delivered:
+            add_candidate(
+                "completed_not_delivered",
+                "high",
+                f"task {task_id} is completed but not delivered; main must deliver the result",
+            )
+        if is_blocked and not is_delivered:
+            add_candidate(
+                "blocked_not_delivered",
+                "critical",
+                f"task {task_id} is blocked but not delivered; main must deliver the block verdict",
+            )
+        return candidates
 
     @staticmethod
     def _is_terminal(
@@ -159,13 +215,28 @@ class RecoveryWatchdog:
     ) -> bool:
         workflow_state = str(current_run.get("current_state") or current_root.get("workflow_state") or "").strip().lower()
         control_state = str(current_task.get("control_state") or "").strip().lower()
-        delivery_state = str(current_delivery.get("delivery_state") or current_root.get("delivery_state") or "").strip().lower()
-        if workflow_state in {"delivered", "blocked", "failed", "cancelled"}:
+        delivery_state = str(
+            current_delivery.get("delivery_state")
+            or current_delivery.get("current_state")
+            or current_root.get("delivery_state")
+            or current_root.get("current_state")
+            or ""
+        ).strip().lower()
+        next_action = str(current_task.get("next_action") or "").strip().lower()
+        needs_followup = bool(current_task.get("core_truth", {}).get("needs_followup") or current_root.get("needs_followup"))
+        if delivery_state in {"confirmed", "delivered", "delivery_confirmed"}:
+            return True
+        if workflow_state in {"failed", "cancelled", "dlq"}:
             return True
         if control_state in {"blocked", "failed"}:
             return True
-        if delivery_state in {"confirmed", "delivered"}:
+        # 当 control_state == "completed_verified" 但 delivery_state 不是 confirmed/delivered 时，非终态
+        if control_state == "completed_verified" and delivery_state not in {"confirmed", "delivered", "delivery_confirmed"}:
+            return False
+        if workflow_state == "delivered":
             return True
+        if workflow_state == "delivery_pending" and (needs_followup or next_action == "await_delivery_confirmation"):
+            return False
         return False
 
     @staticmethod
@@ -198,7 +269,7 @@ class RecoveryWatchdog:
             "should_dispatch": True,
             "target_agent": candidate.get("target_agent") or "main",
             "severity": candidate.get("severity") or "medium",
-            "reason": candidate.get("anomaly_type") or "watchdog_signal",
+            "reason": detect_recurrence_problem_code(candidate),
             "hint_title": f"WATCHDOG_RECOVERY_HINT:{candidate.get('anomaly_type') or 'unknown'}",
             "hint_message": candidate.get("summary") or "detected a recoverable closure anomaly",
         }
@@ -265,7 +336,7 @@ class RecoveryWatchdog:
             "should_dispatch": bool(parsed.get("should_dispatch")),
             "target_agent": target_agent,
             "severity": str(parsed.get("severity") or candidate.get("severity") or "medium"),
-            "reason": str(parsed.get("reason") or candidate.get("anomaly_type") or "watchdog_signal"),
+            "reason": str(parsed.get("reason") or detect_recurrence_problem_code(candidate)),
             "hint_title": str(parsed.get("hint_title") or f"WATCHDOG_RECOVERY_HINT:{candidate.get('anomaly_type') or 'unknown'}"),
             "hint_message": str(parsed.get("hint_message") or candidate.get("summary") or "detected anomaly"),
         }
@@ -347,20 +418,56 @@ class RecoveryWatchdog:
             "evidence": item.get("evidence") or {},
         }
         return (
-            "Internal watchdog recovery hint. Do not answer the user directly based only on this hint. "
-            "Re-evaluate the active task, decide whether to resume, block, retry, or ignore, and only produce a user-visible reply if that decision genuinely requires one. "
-            "If no action is needed, reply ONLY with NO_REPLY.\n\n"
+            "Internal watchdog recovery hint. This is a control-plane pushback, not a user request. "
+            "You must re-evaluate the active task and choose one of: resume execution, ask the responsible agent for structured evidence, or declare a user-visible blocked state. "
+            "Do not leave this hint as pending bookkeeping only, and do not claim closure until a real reply reached the user. "
+            "If the task is already truly closed and delivered, reply ONLY with NO_REPLY.\n\n"
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
 
     @staticmethod
-    def _dispatch_via_openclaw(code_root: Path, target_session_key: str, message: str) -> dict[str, Any]:
+    def _lookup_session_id_via_openclaw(code_root: Path, target_session_key: str) -> dict[str, Any]:
+        cmd = ["node", "openclaw.mjs", "sessions", "--json", "--all-agents", "--active", "10080"]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(code_root),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "command": cmd}
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0 or not stdout:
+            return {
+                "ok": False,
+                "returncode": result.returncode,
+                "stdout": stdout[-400:],
+                "stderr": stderr[-400:],
+                "command": cmd,
+            }
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "error": f"invalid sessions json: {exc}", "stdout": stdout[-400:], "command": cmd}
+        for item in payload.get("sessions", []):
+            if item.get("key") == target_session_key and item.get("sessionId"):
+                return {"ok": True, "session_id": str(item["sessionId"]), "command": cmd}
+        return {"ok": False, "error": f"session not found: {target_session_key}", "command": cmd}
+
+    @classmethod
+    def _dispatch_via_openclaw(cls, code_root: Path, target_session_key: str, message: str) -> dict[str, Any]:
+        lookup = cls._lookup_session_id_via_openclaw(code_root, target_session_key)
+        if not lookup.get("ok"):
+            return {"ok": False, "phase": "lookup_session", **lookup}
         cmd = [
             "node",
             "openclaw.mjs",
             "agent",
-            "--session-key",
-            target_session_key,
+            "--session-id",
+            str(lookup.get("session_id") or ""),
             "--message",
             message,
             "--timeout",
@@ -377,9 +484,13 @@ class RecoveryWatchdog:
                 timeout=90,
             )
         except Exception as exc:
-            return {"ok": False, "error": str(exc), "command": cmd}
+            return {"ok": False, "error": str(exc), "command": cmd, "phase": "dispatch"}
         return {
             "ok": result.returncode == 0,
+            "phase": "dispatch",
+            "session_id": lookup.get("session_id"),
+            "target_session_key": target_session_key,
+            "command": cmd,
             "returncode": result.returncode,
             "stdout": (result.stdout or "").strip()[-400:],
             "stderr": (result.stderr or "").strip()[-400:],
