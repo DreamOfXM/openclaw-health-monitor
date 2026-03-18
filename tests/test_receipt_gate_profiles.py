@@ -102,8 +102,9 @@ class ReceiptGateStateProjectionTests(unittest.TestCase):
             self.assertEqual(control["timing"]["hard_followup"], 420)
             self.assertEqual(control["timing"]["auto_blocked_unverified"], 2700)
             self.assertTrue(control["timing"]["blocked_user_visible"])
-            self.assertIn("soft_followup=120", control["evidence_summary"])
-            self.assertIn("blocked_user_visible=true", control["evidence_summary"])
+            # Phase 2 简化后：evidence_summary 不再包含 timing 字段，直接从 timing 对象检查
+            self.assertIn("control_state=dev_running", control["evidence_summary"])
+            self.assertIn("followup_stage=soft", control["evidence_summary"])
 
     def test_followup_template_is_surfaceable_to_user(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -385,8 +386,8 @@ class ReceiptGateFollowupChainTests(unittest.TestCase):
             self.assertTrue(control["timing"]["blocked_user_visible"])
             # 验证用户可见播报包含阻塞信息
             self.assertIn("阻塞", control["user_visible_progress"])
-            # 验证 evidence_summary 包含关键信息
-            self.assertIn("blocked_user_visible=true", control["evidence_summary"])
+            # Phase 2 简化后：evidence_summary 不再包含 blocked_user_visible，直接从 timing 对象检查
+            self.assertIn("control_state=blocked", control["evidence_summary"]) or self.assertIn("followup_stage=blocked", control["evidence_summary"])
 
     def test_complete_chain_received_to_blocked(self):
         """完整链路测试：验证 timing 字段和 blocked_user_visible 标志正确传递"""
