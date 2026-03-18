@@ -1532,6 +1532,9 @@ def write_task_registry_snapshot() -> None:
         if facts_current and facts_current.get("session_key")
         else None
     )
+    # Phase 2 简化：current-task-facts.json 从"解释性快照"改成"事实性快照"
+    # 只保留核心事实：execution_state, delivery_state, next_action
+    control_data = (facts_current or {}).get("control") or {}
     facts_payload = {
         "generated_at": payload["generated_at"],
         "env_id": env_id,
@@ -1540,31 +1543,18 @@ def write_task_registry_snapshot() -> None:
             "question": facts_current.get("question") if facts_current else None,
             "status": facts_current.get("status") if facts_current else None,
             "current_stage": facts_current.get("current_stage") if facts_current else None,
-            "core_truth": (facts_current or {}).get("core_truth") or {},
-            "latest_receipt": (facts_current or {}).get("latest_receipt") or {},
-            "approved_summary": (facts_current or {}).get("control", {}).get("approved_summary"),
-            "user_visible_progress": (facts_current or {}).get("control", {}).get("user_visible_progress"),
-            "evidence_level": (facts_current or {}).get("control", {}).get("evidence_level"),
-            "evidence_summary": (facts_current or {}).get("control", {}).get("evidence_summary"),
-            "control_state": (facts_current or {}).get("control", {}).get("control_state"),
-            "next_action": (facts_current or {}).get("control", {}).get("next_action"),
-            "next_actor": (facts_current or {}).get("control", {}).get("next_actor"),
-            "action_reason": (facts_current or {}).get("control", {}).get("action_reason"),
-            "claim_level": (facts_current or {}).get("control", {}).get("claim_level"),
-            "public_control_state": (facts_current or {}).get("control", {}).get("public_control_state"),
-            "protocol": (facts_current or {}).get("control", {}).get("protocol") or {},
-            "pipeline_recovery": (facts_current or {}).get("control", {}).get("pipeline_recovery") or {},
-            "contract_id": ((facts_current or {}).get("control", {}).get("contract") or {}).get("id"),
-            "missing_receipts": (facts_current or {}).get("control", {}).get("missing_receipts") or [],
-            "control_action": (facts_current or {}).get("control", {}).get("control_action"),
-            "phase_statuses": (facts_current or {}).get("control", {}).get("phase_statuses") or [],
-            "timing": (facts_current or {}).get("control", {}).get("timing") or {},
-            "active_phase": (facts_current or {}).get("control", {}).get("active_phase"),
-            "followup_stage": (facts_current or {}).get("control", {}).get("followup_stage"),
-            "heartbeat_age_seconds": (facts_current or {}).get("control", {}).get("heartbeat_age_seconds"),
-            "heartbeat_ok": (facts_current or {}).get("control", {}).get("heartbeat_ok"),
-            "terminal_state_seen": (facts_current or {}).get("control", {}).get("terminal_state_seen"),
-            "control": (facts_current or {}).get("control") or {},
+            # 核心事实：execution_state, delivery_state, next_action
+            "execution_state": control_data.get("control_state") or "unknown",
+            "delivery_state": control_data.get("protocol", {}).get("final") or "missing",
+            "next_action": control_data.get("next_action") or "none",
+            "next_actor": control_data.get("next_actor") or "",
+            "is_closed": control_data.get("control_state") == "completed_verified",
+            # 保留必要的审计字段
+            "approved_summary": control_data.get("approved_summary"),
+            "evidence_level": control_data.get("evidence_level"),
+            "control_state": control_data.get("control_state"),
+            # 向后兼容：保留完整的 control 对象
+            "control": control_data,
         },
         "session_resolution": session_resolution,
     }

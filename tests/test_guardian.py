@@ -1525,14 +1525,14 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 guardian.write_task_registry_snapshot()
             facts = json.loads((base / "data" / "current-task-facts.json").read_text(encoding="utf-8"))
             self.assertEqual(facts["current_task"]["control_state"], "planning_only")
-            self.assertEqual(facts["current_task"]["user_visible_progress"], "A股闭环方案已完成，但开发尚未启动。")
+            self.assertEqual(facts["current_task"]["control"]["user_visible_progress"], "A股闭环方案已完成，但开发尚未启动。")
             self.assertEqual(
-                [item["agent"] for item in facts["current_task"]["phase_statuses"]],
+                [item["agent"] for item in facts["current_task"]["control"]["phase_statuses"]],
                 ["pm", "dev", "test"],
             )
-            self.assertEqual(facts["current_task"]["phase_statuses"][0]["state"], "completed")
-            self.assertEqual(facts["current_task"]["phase_statuses"][1]["state"], "pending")
-            self.assertEqual(facts["current_task"]["phase_statuses"][2]["state"], "pending")
+            self.assertEqual(facts["current_task"]["control"]["phase_statuses"][0]["state"], "completed")
+            self.assertEqual(facts["current_task"]["control"]["phase_statuses"][1]["state"], "pending")
+            self.assertEqual(facts["current_task"]["control"]["phase_statuses"][2]["state"], "pending")
 
     def test_write_task_registry_snapshot_exports_public_control_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1558,7 +1558,7 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                     mock.patch.object(guardian, "check_process_running", return_value=True), \
                     mock.patch.object(guardian, "check_gateway_health", return_value=True):
                     guardian.write_task_registry_snapshot()
-                return json.loads((base / "data" / "current-task-facts.json").read_text(encoding="utf-8"))["current_task"]["public_control_state"]
+                return json.loads((base / "data" / "current-task-facts.json").read_text(encoding="utf-8"))["current_task"]["control"]["public_control_state"]
 
             now = int(time.time())
             healthy = snapshot_for(
