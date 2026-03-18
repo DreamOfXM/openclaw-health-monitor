@@ -1254,7 +1254,6 @@ def build_control_plane_followup(
     control_state = str(control.get("control_state") or "unknown")
     next_action = str(control.get("next_action") or "require_receipt_or_block")
     next_actor = str(control.get("next_actor") or "guardian")
-    claim_level = str(control.get("claim_level") or "received_only")
     contract = control.get("contract") or {}
     contract_id = str(contract.get("id") or "single_agent")
     missing = ", ".join(control.get("missing_receipts") or []) or "none"
@@ -1277,7 +1276,7 @@ def build_control_plane_followup(
     return (
         "GUARDIAN_TASK_CONTROL: 这不是用户新需求。"
         f"当前 task_id={task['task_id']}，任务合同={contract_id}，控制状态={control_state}，"
-        f"对外可宣称级别={claim_level}，下一执行责任人={next_actor}，"
+        f"下一执行责任人={next_actor}，"
         f"当前阶段={stage}，已静默={format_duration_label(idle)}，累计运行={format_duration_label(total)}，"
         f"缺失回执={missing}。当前问题={question}。"
         f"{action_instruction}"

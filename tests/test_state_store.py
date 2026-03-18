@@ -787,7 +787,7 @@ class StateStoreTests(unittest.TestCase):
                     "next_action": "followup_required",
                     "control_state": "blocked_unverified",
                     "phase_statuses": [],
-                    "claim_level": "received_only",
+                    # Phase 3 简化后：删除了 claim_level 字段
                     "action_reason": "missing_pipeline_receipt",
                 },
             )
@@ -918,7 +918,7 @@ class StateStoreTests(unittest.TestCase):
                     "approved_summary": "等待开发回执",
                     "required_receipts": ["dev:completed"],
                     "next_actor": "dev",
-                    "claim_level": "phase_verified",
+                    # Phase 3 简化后：删除了 claim_level 字段
                     "contract": {"id": "delivery_pipeline"},
                     "phase_statuses": [{"agent": "dev", "label": "开发", "state": "running"}],
                 },
@@ -1277,7 +1277,7 @@ class StateStoreTests(unittest.TestCase):
             control = store.derive_task_control_state("task-blocked")
             self.assertEqual(control["control_state"], "blocked_unverified")
             self.assertEqual(control["next_action"], "manual_or_session_recovery")
-            self.assertEqual(control["truth_level"], "core_projection")
+            # Phase 3 简化后：删除了 truth_level 字段，直接检查 core_supervision
             self.assertEqual(control["core_supervision"]["workflow_state"], "blocked")
             self.assertEqual(control["contract"]["mode"], "observation_template")
 
@@ -1534,7 +1534,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(control["control_state"], "planning_only")
             self.assertEqual(control["next_action"], "require_dev_receipt")
             self.assertEqual(control["next_actor"], "dev")
-            self.assertEqual(control["claim_level"], "phase_verified")
+            # Phase 3 简化后：删除了 claim_level 字段，直接检查 control_state
             self.assertIn("dev:started", control["missing_receipts"])
             self.assertEqual(control["phase_statuses"][0]["state"], "completed")
             self.assertEqual(control["phase_statuses"][1]["state"], "pending")
@@ -1827,7 +1827,7 @@ class StateStoreTests(unittest.TestCase):
             control = store.derive_task_control_state("task-native")
             action = store.reconcile_task_control_action(store.get_task("task-native"), control)
 
-            self.assertEqual(control["truth_level"], "core_projection")
+            # Phase 3 简化后：删除了 truth_level 字段，直接检查 control_action
             self.assertEqual(control["control_action"]["source"], "core_followup")
             self.assertEqual(control["control_action"]["action_type"], "delivery_retry")
             self.assertEqual(control["control_action"]["attempts"], 2)
@@ -1939,7 +1939,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(delivered["control_state"], "completed_verified")
             self.assertEqual(delivered["v2_truth"]["state"], "delivered")
             self.assertTrue(delivered["v2_truth"]["delivered"])
-            self.assertEqual(delivered["public_control_state"], "delivered")
+            # Phase 3 简化后：删除了 public_control_state 字段，直接检查 control_state
 
     def test_derive_core_task_supervision_delivery_pending_without_confirmation(self):
         """当 workflow_state == 'delivery_pending' 且 delivery_confirmed == False 时，control_state 应为 'delivery_pending'"""
@@ -2172,7 +2172,7 @@ class StateStoreTests(unittest.TestCase):
             control = store.derive_task_control_state(task_id)
             self.assertNotEqual(control["control_state"], "completed_verified")
             self.assertEqual(control["next_action"], "await_delivery_confirmation")
-            self.assertEqual(control["public_control_state"], "followup_pending")
+            # Phase 3 简化后：删除了 public_control_state 字段，直接检查 control_state 和 next_action
 
 
 if __name__ == "__main__":

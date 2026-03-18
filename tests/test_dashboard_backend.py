@@ -448,14 +448,13 @@ class DashboardMemoryTests(unittest.TestCase):
             self.assertEqual(payload["current"]["task_id"], "task-1")
             self.assertEqual(payload["current"]["receipt_summary"]["agent"], "dev")
             self.assertEqual(payload["current"]["control"]["control_state"], "dev_running")
-            self.assertEqual(payload["current"]["control"]["truth_level"], "core_projection")
-            self.assertEqual(payload["current"]["control"]["claim_level"], "phase_verified")
+            # Phase 3 简化后：删除了 truth_level 和 claim_level 字段
             self.assertEqual(payload["current"]["control"]["next_actor"], "dev")
             self.assertEqual(payload["current"]["control"]["native_state"]["status"], "running")
             self.assertEqual(payload["current"]["control"]["derived_state"]["contract_id"], "delivery_pipeline")
             self.assertEqual(payload["current"]["root_task"]["root_task_id"], "legacy-root:task-1")
             self.assertEqual(payload["current"]["current_workflow_run"]["workflow_run_id"], "legacy-run:task-1")
-            self.assertEqual(payload["current"]["core_truth"]["truth_level"], "core_projection")
+            # Phase 3 简化后：core_truth 中不再有 truth_level 字段
             self.assertEqual(payload["control_queue"][0]["action_type"], "await_dev_completion")
             self.assertEqual(payload["session_resolution"]["active_task_id"], "task-1")
             self.assertEqual(len(payload["current"]["timeline"]), 3)
@@ -597,15 +596,13 @@ class DashboardMemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             store = MonitorStateStore(base)
-            store.upsert_learning(
+            store.record_self_evolution_event(
                 learning_key="lk-1",
-                env_id="primary",
-                task_id="task-1",
-                category="control_plane",
-                title="缺少回执",
-                detail="task missing ack",
-                evidence={"task_id": "task-1"},
-                status="pending",
+                event_type="recorded",
+                problem_code="missing_pipeline_receipt",
+                root_task_id="task-1",
+                actor="guardian",
+                details={"title": "缺少回执", "summary": "task missing ack", "evidence": {"task_id": "task-1"}},
             )
             store.record_reflection_run("scheduled", {"promoted": 1, "reviewed": 2})
             with mock.patch.object(dashboard, "STORE", store), \
@@ -1268,8 +1265,10 @@ class DashboardMemoryTests(unittest.TestCase):
     @mock.patch("dashboard_backend.run_script")
     @mock.patch("dashboard_backend.get_listener_pid")
     @mock.patch("dashboard_backend.enforce_single_active_listener")
+    @mock.patch("dashboard_backend.record_version_state")
     def test_restart_active_openclaw_environment_restarts_primary_only(
         self,
+        record_version_state,
         single_active,
         get_listener_pid,
         run_script,
@@ -1304,6 +1303,7 @@ class DashboardMemoryTests(unittest.TestCase):
         write_active_binding.assert_called_once()
         self.assertEqual(write_active_binding.call_args.args[2], "primary")
         self.assertEqual(write_active_binding.call_args.kwargs["switch_state"], "committed")
+        self.assertEqual(record_version_state.call_count, 2)
         self.assertEqual(
             [call.args[0] for call in run_script.call_args_list],
             [
@@ -1321,6 +1321,7 @@ class DashboardMemoryTests(unittest.TestCase):
                 return_value={"purity_gate_ok": False, "purity_gate_reasons": ["shadow_state_detected"]},
             ), \
             mock.patch.object(dashboard, "run_script") as run_script, \
+            mock.patch.object(dashboard, "record_version_state") as record_version_state, \
             mock.patch.object(dashboard, "record_restart_event") as restart_event:
             ok, message, old_pid, new_pid, env_id = dashboard.restart_active_openclaw_environment()
 
@@ -1330,7 +1331,22 @@ class DashboardMemoryTests(unittest.TestCase):
         self.assertIsNone(new_pid)
         self.assertEqual(env_id, "primary")
         run_script.assert_not_called()
+        record_version_state.assert_not_called()
         restart_event.assert_called_once()
+
+    def test_load_versions_uses_version_tracker_file_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            payload = {
+                "current": {"describe": "v2"},
+                "history": [{"describe": "v1"}, {"describe": "v2"}],
+                "known_good": {"describe": "v2"},
+            }
+            (base / "versions.json").write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.object(dashboard, "BASE_DIR", base), \
+                mock.patch.object(dashboard, "VERSIONS_FILE", base / "versions.json"):
+                versions = dashboard.load_versions()
+        self.assertEqual(versions["known_good"]["describe"], "v2")
 
     def test_enforce_single_active_listener_is_noop_in_single_env_mode(self):
         ok, message = dashboard.enforce_single_active_listener("primary")

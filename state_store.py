@@ -4196,16 +4196,12 @@ class MonitorStateStore:
             heartbeat_ok=heartbeat_ok,
         )
         return {
-            "truth_level": truth_level,
             "evidence_level": evidence_level,
             "evidence_summary": evidence_summary,
             "control_state": control_state,
             "approved_summary": approved_summary,
             "next_action": next_action,
             "next_actor": next_actor,
-            "action_reason": action_reason,
-            "claim_level": claim_level,
-            "public_control_state": public_control_state,
             "user_visible_progress": user_visible_progress,
             "protocol": protocol_status,
             "contract": contract_view,

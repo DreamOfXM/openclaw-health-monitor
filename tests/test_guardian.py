@@ -1558,7 +1558,7 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                     mock.patch.object(guardian, "check_process_running", return_value=True), \
                     mock.patch.object(guardian, "check_gateway_health", return_value=True):
                     guardian.write_task_registry_snapshot()
-                return json.loads((base / "data" / "current-task-facts.json").read_text(encoding="utf-8"))["current_task"]["control"]["public_control_state"]
+                return json.loads((base / "data" / "current-task-facts.json").read_text(encoding="utf-8"))["current_task"]["control_state"]
 
             now = int(time.time())
             healthy = snapshot_for(
@@ -1579,7 +1579,8 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 {"id": "delivery_pipeline", "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"]},
                 [{"agent": "dev", "phase": "implementation", "action": "started", "evidence": "files=1"}],
             )
-            self.assertEqual(healthy, "healthy")
+            # Phase 3 简化后：直接检查 control_state，不再有 public_control_state
+            self.assertEqual(healthy, "dev_running")
             store.update_task_fields("task-healthy", status="completed", completed_at=now + 1, updated_at=now + 1)
 
             followup_pending = snapshot_for(
@@ -1600,7 +1601,8 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 {"id": "delivery_pipeline", "required_receipts": ["pm:started", "pm:completed", "dev:started", "dev:completed", "test:started", "test:completed"]},
                 [{"agent": "dev", "phase": "implementation", "action": "started", "evidence": "files=1"}],
             )
-            self.assertEqual(followup_pending, "followup_pending")
+            # Phase 3 简化后：直接检查 control_state
+            self.assertEqual(followup_pending, "dev_running")
             store.update_task_fields("task-followup-public", status="completed", completed_at=now + 2, updated_at=now + 2)
 
             blocked = snapshot_for(
@@ -1621,7 +1623,8 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 },
                 {"id": "delivery_pipeline", "required_receipts": ["pm:started", "pm:completed"]},
             )
-            self.assertEqual(blocked, "blocked")
+            # Phase 3 简化后：control_state 直接返回 blocked_control_followup_failed
+            self.assertEqual(blocked, "blocked_control_followup_failed")
 
     def test_write_task_registry_snapshot_exports_shared_state_and_memory_files(self):
         with tempfile.TemporaryDirectory() as tmp:
