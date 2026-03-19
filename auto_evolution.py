@@ -19,6 +19,7 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+import re
 
 
 # ============================================================================
@@ -147,6 +148,50 @@ RULE_TEMPLATES = {
                 "constraint_text": "严格遵守 PIPELINE_RECEIPT 协议",
             },
         ],
+    },
+    "guardian_crash": {
+        "category": "monitoring",
+        "description": "看门狗进程崩溃或启动失败",
+        "root_cause": "guardian 自身异常，导致未闭环任务无人追踪",
+        "solutions": [
+            {
+                "type": "constraint",
+                "target": "AGENTS.md",
+                "template": """
+### {constraint_id}（{learning_key}）
+
+**问题**：{description}
+**根因**：{root_cause}
+**约束**：自我进化周期必须检查 guardian.launchd.err.log 与 guardian 进程状态；发现 guardian 崩溃必须优先修复，不得只记录业务问题。
+
+**来源**：自我进化系统自动生成
+**生成时间**：{generated_at}
+""",
+                "constraint_text": "guardian 崩溃优先级高于普通业务问题",
+            }
+        ]
+    },
+    "tool_interrupted_no_reply": {
+        "category": "delivery",
+        "description": "主脑在工具执行阶段中断，导致没有最终回复",
+        "root_cause": "工具执行/会话修复异常后，没有形成用户可见终态",
+        "solutions": [
+            {
+                "type": "constraint",
+                "target": "AGENTS.md",
+                "template": """
+### {constraint_id}（{learning_key}）
+
+**问题**：{description}
+**根因**：{root_cause}
+**约束**：涉及 restart/reload/tool 执行的核心操作，必须在执行前给出阶段确认；若工具失败，必须立即发送 blocked explanation，不得静默结束。
+
+**来源**：自我进化系统自动生成
+**生成时间**：{generated_at}
+""",
+                "constraint_text": "工具中断必须转成用户可见终态",
+            }
+        ]
     },
 }
 
@@ -374,6 +419,35 @@ def verify_rule_effectiveness(
     }
 
 
+def scan_system_health(base_dir: Path) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    guardian_err = base_dir / "logs" / "guardian.launchd.err.log"
+    if guardian_err.exists():
+        text = guardian_err.read_text(encoding="utf-8", errors="ignore")[-20000:]
+        if "sqlite3.IntegrityError" in text or "Traceback" in text:
+            findings.append({
+                "problem_code": "guardian_crash",
+                "learning_key": "guardian-crash-healthcheck",
+                "evidence": {
+                    "log": "guardian.launchd.err.log",
+                    "matched": "sqlite3.IntegrityError" if "sqlite3.IntegrityError" in text else "Traceback",
+                },
+            })
+    gateway_log = Path("/tmp/openclaw/openclaw-2026-03-19.log")
+    if gateway_log.exists():
+        text = gateway_log.read_text(encoding="utf-8", errors="ignore")[-50000:]
+        if "missing tool result in session history" in text:
+            findings.append({
+                "problem_code": "tool_interrupted_no_reply",
+                "learning_key": "tool-interrupted-healthcheck",
+                "evidence": {
+                    "log": str(gateway_log),
+                    "matched": "missing tool result in session history",
+                },
+            })
+    return findings
+
+
 # ============================================================================
 # 完整的进化周期
 # ============================================================================
@@ -416,6 +490,37 @@ def run_evolution_cycle(
         "details": [],
     }
     
+    # 0. 扫描系统健康问题（guardian 崩溃 / 工具中断未回复）
+    for finding in scan_system_health(Path("/Users/hangzhou/openclaw-health-monitor")):
+        problem_code = str(finding.get("problem_code") or "")
+        learning_key = str(finding.get("learning_key") or f"health-{problem_code}")
+        evidence = finding.get("evidence") or {}
+        rule = generate_candidate_rule(problem_code=problem_code, learning_key=learning_key, evidence=evidence, now=now)
+        result["scanned_count"] += 1
+        if rule:
+            result["rules_generated"] += 1
+            adopt_result = adopt_rule(rule, base_dir, dry_run=dry_run)
+            if adopt_result.get("status") in ["adopted", "dry_run", "already_exists"]:
+                result["rules_adopted"] += 1
+                if not dry_run:
+                    try:
+                        store.record_self_evolution_event(
+                            learning_key=learning_key,
+                            event_type="recorded",
+                            problem_code=problem_code,
+                            actor="auto_evolution",
+                            details={"title": problem_code, "summary": json.dumps(evidence, ensure_ascii=False)},
+                        )
+                    except Exception:
+                        pass
+            result["details"].append({
+                "learning_key": learning_key,
+                "problem_code": problem_code,
+                "status": adopt_result.get("status"),
+                "rule_id": rule.get("rule_id"),
+                "system_health": True,
+            })
+
     # 1. 扫描重复问题
     projections = store.list_self_evolution_projections(limit=500)
     

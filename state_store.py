@@ -165,6 +165,8 @@ SELF_EVOLUTION_PROBLEM_CODES = {
     "heartbeat_missing_blocked",
     "task_blocked_user_visible",
     "task_closure_missing",
+    "guardian_crash",
+    "tool_interrupted_no_reply",
     "unknown_problem",
 }
 
@@ -657,6 +659,12 @@ class MonitorStateStore:
             dedupe_map: dict[tuple[str, str, str], int] = {}
             duplicate_ids: list[int] = []
             pending_updates: list[tuple[str, int]] = []
+            existing_rows = conn.execute(
+                "SELECT id, task_id, event_type, event_key FROM task_events WHERE event_key != '' AND event_key IS NOT NULL"
+            ).fetchall()
+            for row in existing_rows:
+                marker = (str(row["task_id"] or ""), str(row["event_type"] or ""), str(row["event_key"] or ""))
+                dedupe_map[marker] = int(row["id"])
             if rows:
                 needs_rebuild = True
             for row in rows:
@@ -673,18 +681,18 @@ class MonitorStateStore:
 
             if needs_rebuild:
                 conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
+            if duplicate_ids:
+                placeholders = ",".join("?" for _ in duplicate_ids)
+                conn.execute(
+                    f"DELETE FROM task_events WHERE id IN ({placeholders})",
+                    duplicate_ids,
+                )
             for event_key, row_id in pending_updates:
                 conn.execute(
                     "UPDATE task_events SET event_key = ? WHERE id = ?",
                     (event_key, row_id),
                 )
             if needs_rebuild:
-                if duplicate_ids:
-                    placeholders = ",".join("?" for _ in duplicate_ids)
-                    conn.execute(
-                        f"DELETE FROM task_events WHERE id IN ({placeholders})",
-                        duplicate_ids,
-                    )
                 conn.execute(
                     """
                     DELETE FROM task_events
