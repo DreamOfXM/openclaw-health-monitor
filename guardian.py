@@ -2721,6 +2721,24 @@ def send_feishu_progress_push(open_id: str, message: str) -> bool:
     return False
 
 
+def check_session_has_response(session_key: str, since_timestamp: int) -> bool:
+    """检查会话是否有新的响应（追问后主脑是否回复）"""
+    if not session_key:
+        return False
+    
+    # 从会话缓存中获取最后活动时间
+    cache = STORE.load_runtime_value("openclaw_session_cache", {})
+    session_info = cache.get(session_key, {})
+    last_activity = int(session_info.get("last_activity", 0) or 0)
+    
+    # 如果最后活动时间 > 追问时间，说明有响应
+    if last_activity > since_timestamp:
+        log(f"检测到会话有新响应: {session_key} (last_activity={last_activity}, since={since_timestamp})")
+        return True
+    
+    return False
+
+
 def deliver_guardian_progress_update(
     dispatch: dict[str, Any],
     *,
@@ -2732,13 +2750,33 @@ def deliver_guardian_progress_update(
     open_id = dispatch.get("requester_open_id") or ""
     retries = max(1, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRIES", 2)))
     retry_delay = max(0, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRY_DELAY", 3)))
+    response_check_delay = max(5, int(CONFIG.get("GUARDIAN_RESPONSE_CHECK_DELAY", 10)))  # 等待响应的时间
     blocked_reason: str | None = None
 
     if session_key:
         for attempt in range(1, retries + 1):
+            # 记录追问时间
+            followup_sent_at = int(time.time())
+            
             ok, error_kind = send_guardian_followup(session_key, followup_message)
             if ok:
-                return "session", None
+                # 追问发送成功，等待主脑响应
+                log(f"追问已发送，等待主脑响应: {session_key}")
+                time.sleep(response_check_delay)
+                
+                # 检查是否有响应
+                if check_session_has_response(session_key, followup_sent_at):
+                    log(f"主脑已响应追问: {session_key}")
+                    return "session", None
+                else:
+                    log(f"主脑未响应追问，可能需要继续追踪: {session_key}", "WARNING")
+                    # 记录追问成功但未确认响应
+                    STORE.save_runtime_value(
+                        f"followup_pending:{session_key}",
+                        {"sent_at": followup_sent_at, "confirmed": False}
+                    )
+                    return "session", "response_not_confirmed"
+                    
             blocked_reason = error_kind or blocked_reason
             if blocked_reason in {"session_lock", "model_auth", "model_unavailable", "model_pool_failed"}:
                 break
@@ -3800,6 +3838,40 @@ def enforce_task_registry_control_plane() -> list[dict]:
         if recovery_candidate:
             session_key = str(task.get("session_key") or "")
             question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+            # 新增：陈旧任务年龄检查，避免对过时任务发送恢复消息
+            stale_task_max_age = int(CONFIG.get("GUARDIAN_STALE_TASK_MAX_AGE", 3600))
+            if total >= stale_task_max_age:
+                log(
+                    f"检测到过时任务，抑制流水线恢复：{task['task_id']} (idle={format_duration_label(idle)}, total={format_duration_label(total)})",
+                    "INFO",
+                )
+                STORE.update_task_fields(
+                    task["task_id"],
+                    status="blocked",
+                    current_stage="已抑制（过时任务）",
+                    blocked_reason="stale_task_suppressed",
+                    updated_at=now,
+                )
+                STORE.record_task_event(
+                    task["task_id"],
+                    "recovery_suppressed",
+                    {
+                        "reason": "stale_task",
+                        "duration": total,
+                        "idle": idle,
+                        "threshold": stale_task_max_age,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "suppressed",
+                        "suppressed_reason": "stale_task",
+                        "control_state": control_state,
+                    }
+                )
+                continue
             if now - last_followup_at < cooldown:
                 continue
             next_attempts = attempts + 1

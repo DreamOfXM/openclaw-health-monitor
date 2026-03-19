@@ -1,21 +1,21 @@
 # 每日进化报告 - 2026-03-19
 
 ## 今天发现的问题
-1. control_observation:missing_pipeline_receipt
+1. control_observation:task_closure_missing
 2. control_observation:missing_pipeline_receipt
-3. control_observation:task_closure_missing
+3. control_observation:missing_pipeline_receipt
 4. watchdog_observation:task_closure_missing
 5. 看门狗发现重复异常
 
 ## 今日汇总
 - 新记录问题: 0
-- 重新打开: 7
-- 复发事件: 981
-- 新采纳规则: 4
+- 重新打开: 2
+- 复发事件: 993
+- 新采纳规则: 1
 - 新规则候选: 0
-- 今日验证通过: 8
+- 今日验证通过: 4
 - 今日关闭归档: 0
-- 待验证: 3
+- 待验证: 2
 
 ## 复发统计
 - followup_pending_without_main_recovery: 复发 723 次
