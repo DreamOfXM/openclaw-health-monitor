@@ -2687,7 +2687,17 @@ def send_guardian_followup(
         "--channel",
         "feishu",  # 指定通道，避免多通道配置冲突
     ]
-    if deliver:
+    
+    # 从 session_key 中提取 open_id 用于 --reply-to
+    # session_key 格式: agent:main:feishu:direct:ou_xxx
+    if deliver and session_key:
+        parts = session_key.split(":")
+        if len(parts) >= 5 and parts[-1].startswith("ou_"):
+            open_id = parts[-1]
+            args.extend(["--reply-channel", "feishu", "--reply-to", f"user:{open_id}"])
+        else:
+            args.append("--deliver")
+    elif deliver:
         args.append("--deliver")
 
     timeout = int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120)) + 30
