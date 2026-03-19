@@ -2,8 +2,10 @@
   "last_reflection_at": 1773923780,
   "pending_learnings": [
     "f3862fc8181275ffce0c95d8",
-    "3f01e92713fa94c70cf4407c",
     "8b715ca8b6ccb37a038b46b5",
+    "3f01e92713fa94c70cf4407c",
+    "92f5f4d90758d69c5ed44aac",
+    "e9be8b2be2e5a30a4114f5b7",
     "sev-fb8c0e00373f17c2",
     "b84725dde43b0e1f2a7cb078",
     "a74969be17513ee24146384e"
@@ -19,6 +21,7 @@
   ],
   "recurrent_issues": [
     "missing_pipeline_receipt",
+    "missing_pipeline_receipt",
     "task_closure_missing",
     "missing_pipeline_receipt",
     "task_closure_missing",
@@ -33,14 +36,17 @@
   "lifecycle_view": {
     "pending": [
       "f3862fc8181275ffce0c95d8",
-      "3f01e92713fa94c70cf4407c",
       "8b715ca8b6ccb37a038b46b5",
+      "3f01e92713fa94c70cf4407c",
+      "92f5f4d90758d69c5ed44aac",
+      "e9be8b2be2e5a30a4114f5b7",
       "sev-fb8c0e00373f17c2",
       "b84725dde43b0e1f2a7cb078",
       "a74969be17513ee24146384e"
     ],
     "adopted": [
-      "8b715ca8b6ccb37a038b46b5"
+      "f3862fc8181275ffce0c95d8",
+      "3f01e92713fa94c70cf4407c"
     ],
     "verified": [
       "sev-8abcb484e60dba6d",
@@ -53,25 +59,29 @@
     ],
     "closed": [],
     "reopened": [
-      "f3862fc8181275ffce0c95d8",
-      "3f01e92713fa94c70cf4407c",
+      "8b715ca8b6ccb37a038b46b5",
       "b84725dde43b0e1f2a7cb078"
     ],
     "recurrence": [
       {
         "learning_key": "f3862fc8181275ffce0c95d8",
         "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 24684
-      },
-      {
-        "learning_key": "3f01e92713fa94c70cf4407c",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 1509
+        "recurrence_count": 26660
       },
       {
         "learning_key": "8b715ca8b6ccb37a038b46b5",
         "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 457
+        "recurrence_count": 484
+      },
+      {
+        "learning_key": "3f01e92713fa94c70cf4407c",
+        "problem_code": "task_closure_missing",
+        "recurrence_count": 1513
+      },
+      {
+        "learning_key": "92f5f4d90758d69c5ed44aac",
+        "problem_code": "missing_pipeline_receipt",
+        "recurrence_count": 24
       },
       {
         "learning_key": "sev-8abcb484e60dba6d",
@@ -117,13 +127,13 @@
   },
   "daily_report": {
     "date": "2026-03-19",
-    "generated_at": 1773924194,
+    "generated_at": 1773926101,
     "issues_found": 0,
-    "issues_reopened": 2,
+    "issues_reopened": 1,
     "recurrence_events": 996,
-    "rules_added": 0,
+    "rules_added": 2,
     "candidate_rules": 0,
-    "issues_fixed": 2,
+    "issues_fixed": 1,
     "closed": 0,
     "pending_verification": 4,
     "recurrent_issues": {
@@ -136,23 +146,37 @@
       {
         "learning_key": "f3862fc8181275ffce0c95d8",
         "title": "control_observation:missing_pipeline_receipt",
-        "state": "reopened",
+        "state": "adopted",
         "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 24684
-      },
-      {
-        "learning_key": "3f01e92713fa94c70cf4407c",
-        "title": "control_observation:task_closure_missing",
-        "state": "reopened",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 1509
+        "recurrence_count": 26660
       },
       {
         "learning_key": "8b715ca8b6ccb37a038b46b5",
         "title": "control_observation:missing_pipeline_receipt",
-        "state": "adopted",
+        "state": "reopened",
         "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 457
+        "recurrence_count": 484
+      },
+      {
+        "learning_key": "3f01e92713fa94c70cf4407c",
+        "title": "control_observation:task_closure_missing",
+        "state": "adopted",
+        "problem_code": "task_closure_missing",
+        "recurrence_count": 1513
+      },
+      {
+        "learning_key": "92f5f4d90758d69c5ed44aac",
+        "title": "control_observation:missing_pipeline_receipt",
+        "state": "recorded",
+        "problem_code": "missing_pipeline_receipt",
+        "recurrence_count": 24
+      },
+      {
+        "learning_key": "e9be8b2be2e5a30a4114f5b7",
+        "title": "control_observation:task_closure_missing",
+        "state": "recorded",
+        "problem_code": "task_closure_missing",
+        "recurrence_count": 0
       },
       {
         "learning_key": "sev-fb8c0e00373f17c2",
@@ -188,35 +212,21 @@
         "state": "verified",
         "problem_code": "unknown_problem",
         "recurrence_count": 1206
-      },
-      {
-        "learning_key": "sev-e4f883a10d437083",
-        "title": "看门狗发现重复异常",
-        "state": "verified",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 665
-      },
-      {
-        "learning_key": "sev-d749b5bf01932a88",
-        "title": "看门狗发现重复异常",
-        "state": "verified",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 616
       }
     ]
   },
   "summary": {
-    "recorded": 2,
+    "recorded": 4,
     "candidate_rule": 0,
-    "adopted": 1,
+    "adopted": 2,
     "verified": 7,
     "closed": 0,
-    "reopened": 3,
-    "pending": 6,
+    "reopened": 2,
+    "pending": 8,
     "reviewed": 7,
     "promoted": 0,
-    "pending_total": 6,
-    "total": 13
+    "pending_total": 8,
+    "total": 15
   },
-  "generated_at": 1773924194
+  "generated_at": 1773926101
 }

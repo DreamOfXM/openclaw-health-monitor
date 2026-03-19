@@ -115,7 +115,10 @@ def generate_daily_report(trade_log, results, account):
         report += "| 股票 | 操作 | 价格 | 数量 | 金额 |\n"
         report += "|------|------|------|------|------|\n"
         for t in trades[:10]:
-            report += f"| {t.get('symbol', 'N/A')} | {t.get('direction', 'N/A')} | {t.get('price', 0):.2f} | {t.get('quantity', 0)} | {t.get('amount', 0):,.0f} |\n"
+            price = float(t.get('price', 0) or 0)
+            quantity = int(t.get('quantity', 0) or 0)
+            amount = float(t.get('amount', 0) or 0)
+            report += f"| {t.get('symbol', 'N/A')} | {t.get('direction', 'N/A')} | {price:.2f} | {quantity} | {amount:,.0f} |\n"
     else:
         report += "今日无交易\n"
     
@@ -126,7 +129,11 @@ def generate_daily_report(trade_log, results, account):
         report += "| 股票 | 数量 | 成本 | 现价 | 盈亏 | 仓位 |\n"
         report += "|------|------|------|------|------|------|\n"
         for p in positions[:10]:
-            report += f"| {p.get('symbol', 'N/A')} | {p.get('quantity', 0)} | {p.get('cost_price', 0):.2f} | {p.get('current_price', 0):.2f} | {p.get('pnl_pct', 0):.2f}% | {p.get('weight', 0):.2f}% |\n"
+            cost_price = float(p.get('cost_price', 0) or 0)
+            current_price = float(p.get('current_price', 0) or 0)
+            pnl_pct = float(p.get('pnl_pct', 0) or 0)
+            weight = float(p.get('weight', 0) or 0)
+            report += f"| {p.get('symbol', 'N/A')} | {p.get('quantity', 0)} | {cost_price:.2f} | {current_price:.2f} | {pnl_pct:.2f}% | {weight:.2f}% |\n"
     else:
         report += "当前无持仓\n"
     
