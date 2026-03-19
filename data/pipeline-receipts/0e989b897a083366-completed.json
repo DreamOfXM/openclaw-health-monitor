@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "0e989b897a083366",
+  "task_id": "0e989b897a083366",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773747320000,
+  "summary": "用户确认了之前的回答。无需进一步操作。",
+  "deliverable": {
+    "question": "可以",
+    "answer": "收到确认。之前的回答已被用户接受。",
+    "type": "confirmation"
+  },
+  "protocol_version": "hm.v1"
+}

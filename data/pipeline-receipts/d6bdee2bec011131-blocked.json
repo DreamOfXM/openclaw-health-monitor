@@ -1,0 +1,21 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "d6bdee2bec011131",
+  "task_id": "d6bdee2bec011131",
+  "agent": "main",
+  "phase": "execution",
+  "status": "blocked",
+  "timestamp": 1773767621000,
+  "summary": "请求不完整，未指定具体代码位置；已阻塞等待澄清。",
+  "deliverable": {
+    "question": "对，你说的对，但是你也需要再看下代码是",
+    "blocked": true,
+    "reason": "消息不完整：\"再看下代码是\" 后没有指定具体代码文件、路径或项目。需要你补充：要我看哪个代码？",
+    "required_info": [
+      "代码文件路径",
+      "或项目名称",
+      "或具体问题描述"
+    ]
+  },
+  "protocol_version": "hm.v1"
+}

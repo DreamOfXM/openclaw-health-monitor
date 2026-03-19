@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "d25c4c688c79950a",
+  "task_id": "d25c4c688c79950a",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773805901000,
+  "summary": "已接手处理“你到底建议方案几”这一既有追问。",
+  "deliverable": {
+    "question": "你给了这么多方案，你到底建议方案几呀？",
+    "type": "decision_request",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

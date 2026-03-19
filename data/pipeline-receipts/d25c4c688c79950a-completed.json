@@ -1,0 +1,17 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "d25c4c688c79950a",
+  "task_id": "d25c4c688c79950a",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773805902000,
+  "summary": "已完成该追问的决策归并：建议收敛到单一主方案，不继续并列补丁路径。",
+  "deliverable": {
+    "decision_needed": true,
+    "recommended_direction": "choose_one_primary_systemic_solution",
+    "blocked": false,
+    "note": "本任务完成于问题识别与决策归并回执补发；不重复其他既有任务 final。"
+  },
+  "protocol_version": "hm.v1"
+}

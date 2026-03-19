@@ -1,0 +1,19 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "d6bdee2bec011131",
+  "task_id": "d6bdee2bec011131",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773772701000,
+  "summary": "终端回执：代码核验已完成，pipeline_receipt 机制正确。任务完成。",
+  "deliverable": {
+    "question": "对，你说的对，但是你也需要再看下代码是",
+    "answer": "已检查 state_store.py 和 guardian.py。pipeline_receipt 机制存在且正确，visible_completion 与 receipt 分离，Guardian 检测 missing_pipeline_receipt 正常。当前阻塞原因是 model_pool_failed，非代码缺陷。",
+    "code_verified": true,
+    "recovery_action": "session_recovery_completed",
+    "stale_subagent_detection": "none_detected",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

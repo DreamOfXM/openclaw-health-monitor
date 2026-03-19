@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "5ce778a990e17a6e",
+  "task_id": "5ce778a990e17a6e",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773854701000,
+  "summary": "Interactive Card 已识别并完成重绑；该内容不构成新的独立执行链路。",
+  "deliverable": {
+    "interactive_card_detected": true,
+    "blocked": false,
+    "reason_if_not_continued": "Interactive Card 仅为引用内容，未形成新的可执行链路。"
+  },
+  "protocol_version": "hm.v1"
+}

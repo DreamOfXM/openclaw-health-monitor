@@ -121,6 +121,10 @@ const API = {
         return await this.post('/api/v2/environments/restart', {});
     },
 
+    async emergencyRecover() {
+        return await this.post('/api/v2/environments/emergency-recover', {});
+    },
+
     /**
      * 获取快照列表
      */

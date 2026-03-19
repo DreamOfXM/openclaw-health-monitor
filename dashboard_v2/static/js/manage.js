@@ -20,6 +20,7 @@ function initManage() {
     document.getElementById('btn-restart-primary')?.addEventListener('click', () => {
         showConfirmModal('restart');
     });
+    document.getElementById('btn-emergency-recover')?.addEventListener('click', executeEmergencyRecover);
     document.getElementById('btn-create-snapshot')?.addEventListener('click', createSnapshot);
     document.getElementById('btn-save-config')?.addEventListener('click', saveConfig);
     document.getElementById('btn-confirm-cancel')?.addEventListener('click', hideConfirmModal);
@@ -141,9 +142,62 @@ async function loadRuntimeStatus() {
             activeBadge.textContent = 'OPENCLAW';
         }
 
+        renderVersionRecovery(
+            primaryEnv,
+            envData.version_info || {},
+            envData.recovery_profile || {},
+            envData.watchdog_recovery_status || {},
+            envData.watchdog_recovery_hints || [],
+        );
+
         updateSwitchButtons(activeEnv, envData.environments || []);
     } catch (error) {
         console.error('加载运行状态失败:', error);
+    }
+}
+
+function renderVersionRecovery(primaryEnv, versionInfo, recoveryProfile, watchdogStatus, watchdogHints) {
+    const runtimeEl = document.getElementById('version-runtime-summary');
+    const knownGoodEl = document.getElementById('version-known-good');
+    const driftEl = document.getElementById('version-upstream-drift');
+    const recoveryEl = document.getElementById('recovery-profile-summary');
+    const watchdogSummaryEl = document.getElementById('watchdog-recovery-summary');
+    const watchdogHintsEl = document.getElementById('watchdog-recovery-hints');
+    const branch = versionInfo.branch || 'unknown';
+    const describe = versionInfo.describe || primaryEnv.git_head || 'unknown';
+    const shortCommit = versionInfo.short_commit || versionInfo.commit || 'unknown';
+    if (runtimeEl) {
+        runtimeEl.textContent = `${describe} · ${branch} · ${shortCommit}${versionInfo.dirty ? ' · dirty' : ''}`;
+    }
+    if (knownGoodEl) {
+        const knownGood = recoveryProfile.known_good || {};
+        knownGoodEl.textContent = `known good: ${knownGood.describe || knownGood.commit || '未记录'}`;
+    }
+    if (driftEl) {
+        driftEl.textContent = `upstream 偏移: ahead ${Number(versionInfo.upstream_ahead || 0)} / behind ${Number(versionInfo.upstream_behind || 0)}`;
+    }
+    if (recoveryEl) {
+        const hint = recoveryProfile.rollback_hint || {};
+        recoveryEl.textContent = hint.target_describe || hint.target_commit
+            ? `优先配置快照恢复；代码回退目标 ${hint.target_describe || hint.target_commit}`
+            : '优先配置快照恢复；暂无 known good 代码回退目标';
+    }
+    if (watchdogSummaryEl) {
+        watchdogSummaryEl.textContent = `watchdog: ${watchdogStatus.enabled === false ? 'disabled' : 'enabled'} | candidates ${Number(watchdogStatus.candidate_count || 0)} | dispatched ${Number(watchdogStatus.dispatched_count || 0)} | cooldown ${Number(watchdogStatus.cooldown_skips || 0)}`;
+    }
+    if (watchdogHintsEl) {
+        const items = Array.isArray(watchdogHints) ? watchdogHints.slice(0, 5) : [];
+        watchdogHintsEl.innerHTML = items.length
+            ? items.map(item => `
+                <div class="snapshot-item">
+                    <div class="snapshot-info">
+                        <span class="snapshot-name">${item.anomaly_type || 'watchdog_hint'}</span>
+                        <span class="snapshot-date">${item.target_agent || 'main'}</span>
+                    </div>
+                    <div class="env-status-text">${item.hint_message || item.summary || ''}</div>
+                </div>
+            `).join('')
+            : '<div class="empty">最近没有 watchdog 恢复提示</div>';
     }
 }
 
@@ -351,6 +405,24 @@ async function executeRestart() {
     }
     showToast(response.data.message || 'Primary 已开始重启', 'success');
     setTimeout(() => window.location.reload(), 500);
+}
+
+async function executeEmergencyRecover() {
+    if (!confirm('急救恢复会优先恢复最近配置快照并重启 OpenClaw。若快照不可用，会返回 known good 代码回退提示。确定执行吗？')) {
+        return;
+    }
+    try {
+        const response = await API.emergencyRecover();
+        if (!response.success) {
+            const guidance = response.data?.rollback_guidance?.target;
+            throw new Error(`${response.data?.message || response.error || '急救恢复失败'}${guidance ? `；建议回退到 ${guidance}` : ''}`);
+        }
+        showToast(response.data.message || '急救恢复已执行', 'success');
+        await loadManageData();
+    } catch (error) {
+        console.error('急救恢复失败:', error);
+        showToast('急救恢复失败: ' + error.message, 'error');
+    }
 }
 
 async function loadConfig() {

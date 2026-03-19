@@ -5,6 +5,7 @@ import unittest
 import time
 import sys
 import os
+import pathlib
 import types
 from unittest import mock
 
@@ -164,7 +165,20 @@ class TestDataCollector(unittest.TestCase):
 
         with mock.patch("services.data_collector._legacy_dashboard", return_value=fake_legacy), \
             mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": True, "gateway_healthy": True}), \
-            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}, {}, {}]):
+            mock.patch.object(
+                self.collector,
+                "_shared_state",
+                side_effect=lambda name, default=None: {
+                    "bootstrap-status.json": {},
+                    "context-lifecycle-baseline.json": {},
+                    "watcher-summary.json": {},
+                    "restart-runtime-status.json": {},
+                    "openclaw-version.json": {},
+                    "openclaw-recovery-profile.json": {},
+                    "watchdog-recovery-status.json": {},
+                    "watchdog-recovery-hints.json": [],
+                }.get(name, default),
+            ):
             env = self.collector.get_environment(force_refresh=True)
 
         self.assertEqual(env["active_environment"], "primary")
@@ -190,7 +204,20 @@ class TestDataCollector(unittest.TestCase):
         }
         with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
             mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": False, "gateway_healthy": False}), \
-            mock.patch.object(self.collector, "_shared_state", side_effect=[{}, {}, {}, {}]):
+            mock.patch.object(
+                self.collector,
+                "_shared_state",
+                side_effect=lambda name, default=None: {
+                    "bootstrap-status.json": {},
+                    "context-lifecycle-baseline.json": {},
+                    "watcher-summary.json": {},
+                    "restart-runtime-status.json": {},
+                    "openclaw-version.json": {},
+                    "openclaw-recovery-profile.json": {},
+                    "watchdog-recovery-status.json": {},
+                    "watchdog-recovery-hints.json": [],
+                }.get(name, default),
+            ):
             env = self.collector._fetch_environment_data()
         self.assertEqual(env["binding_audit"]["active_env"], "primary")
 
@@ -209,12 +236,19 @@ class TestDataCollector(unittest.TestCase):
         }
         with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
             mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": True, "gateway_healthy": True}), \
-            mock.patch.object(self.collector, "_shared_state", side_effect=[
-                {"env_id": "primary", "context_readiness": {"status": "ready"}, "config_merge": {"applied": []}},
-                {},
-                {},
-                {},
-            ]):
+            mock.patch.object(
+                self.collector,
+                "_shared_state",
+                side_effect=lambda name, default=None: {
+                    "bootstrap-status.json": {"env_id": "primary", "context_readiness": {"status": "ready"}, "config_merge": {"applied": []}},
+                    "watcher-summary.json": {},
+                    "restart-runtime-status.json": {},
+                    "openclaw-version.json": {},
+                    "openclaw-recovery-profile.json": {},
+                    "watchdog-recovery-status.json": {},
+                    "watchdog-recovery-hints.json": [],
+                }.get(name, default),
+            ):
             env = self.collector._fetch_environment_data()
 
         self.assertTrue(env["gateway_healthy"])
@@ -237,12 +271,19 @@ class TestDataCollector(unittest.TestCase):
         }
         with mock.patch.object(self.collector, "_load_runtime_context", return_value=context), \
             mock.patch.object(self.collector, "_shared_state_fresh", return_value={"env_id": "primary", "gateway_running": True, "gateway_healthy": False}), \
-            mock.patch.object(self.collector, "_shared_state", side_effect=[
-                {"env_id": "primary", "context_readiness": {"status": "ready"}, "config_merge": {"applied": []}},
-                {},
-                {},
-                {},
-            ]):
+            mock.patch.object(
+                self.collector,
+                "_shared_state",
+                side_effect=lambda name, default=None: {
+                    "bootstrap-status.json": {"env_id": "primary", "context_readiness": {"status": "ready"}, "config_merge": {"applied": []}},
+                    "watcher-summary.json": {},
+                    "restart-runtime-status.json": {},
+                    "openclaw-version.json": {},
+                    "openclaw-recovery-profile.json": {},
+                    "watchdog-recovery-status.json": {},
+                    "watchdog-recovery-hints.json": [],
+                }.get(name, default),
+            ):
             env = self.collector._fetch_environment_data()
 
         self.assertTrue(env["gateway_healthy"])
@@ -312,9 +353,12 @@ class TestDataCollector(unittest.TestCase):
                     "emoji": "🌸",
                     "updated_at": 100,
                     "updated_label": "03-14 00:00:00",
+                    "status_code": "idle",
                     "state_label": "待机",
+                    "state_reason": "最近没有新的代理动作",
                     "detail": "暂无最近会话",
                     "task_hint": "",
+                    "task_title": "",
                     "sessions": 0,
                     "recent_sessions": [],
                     "is_active": False,
@@ -327,11 +371,14 @@ class TestDataCollector(unittest.TestCase):
                     "emoji": "🛠️",
                     "updated_at": int(time.time()) - 60,
                     "updated_label": "03-14 00:01:00",
+                    "status_code": "completed",
                     "state_label": "命令完成",
+                    "state_reason": "当前阶段已完成",
                     "detail": "最近会话有更新",
                     "task_hint": "修复同步链路",
+                    "task_title": "修复同步链路",
                     "sessions": 2,
-                    "recent_sessions": [{"session_file": "a.jsonl", "updated_at": int(time.time()) - 60, "updated_label": "03-14 00:01:00", "state_label": "命令完成", "detail": "最近会话有更新", "task_hint": "修复同步链路"}],
+                    "recent_sessions": [{"session_file": "a.jsonl", "updated_at": int(time.time()) - 60, "updated_label": "03-14 00:01:00", "status_code": "completed", "state_label": "命令完成", "state_reason": "当前阶段已完成", "detail": "最近会话有更新", "task_hint": "修复同步链路", "task_title": "修复同步链路", "recent_context": []}],
                     "is_active": False,
                     "activity_source": "session",
                     "activity_excerpt": "最近会话有更新",
@@ -341,7 +388,9 @@ class TestDataCollector(unittest.TestCase):
                 "main": {
                     "updated_at": int(time.time()) - 30,
                     "updated_label": "03-14 00:01:30",
-                    "state_label": "日志活跃",
+                    "status_code": "processing",
+                    "state_label": "正在处理",
+                    "state_reason": "最近日志显示代理正在执行或派发任务",
                     "detail": "dispatching to agent",
                     "activity_source": "gateway_log",
                     "activity_excerpt": "dispatching to agent",
@@ -353,9 +402,60 @@ class TestDataCollector(unittest.TestCase):
         self.assertEqual(data["active_agent_id"], "main")
         self.assertEqual(data["agents"][0]["id"], "main")
         self.assertTrue(data["agents"][0]["is_active"])
+        self.assertTrue(data["agents"][0]["is_processing"])
         self.assertEqual(data["agents"][0]["activity_source"], "gateway_log")
         self.assertEqual(data["agents"][1]["id"], "dev")
         self.assertEqual(data["agents"][1]["sessions"], 2)
+        self.assertFalse(data["agents"][1]["is_processing"])
+
+    def test_summarize_session_entries_prefers_human_task_title_and_explainable_state(self):
+        entries = [
+            {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "[粘贴用户原始需求]"}],
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "name": "sessions_spawn",
+                            "arguments": {"agentId": "dev", "label": "实现 A 股模拟交易闭环"},
+                        }
+                    ],
+                },
+            },
+        ]
+        summary = self.collector._summarize_session_entries(entries, pathlib.Path("/tmp/pm.jsonl"))
+        self.assertEqual(summary["status_code"], "waiting_downstream")
+        self.assertIn("等待下游", summary["state_label"])
+        self.assertIn("等待下游回执", summary["state_reason"])
+        self.assertIn("实现 A 股模拟交易闭环", summary["detail"])
+        self.assertFalse(summary["task_title"].startswith("[粘贴"))
+
+    def test_summarize_session_entries_marks_exec_as_processing(self):
+        entries = [
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "任务标题：修复同步链路"},
+                        {"type": "toolCall", "name": "exec", "arguments": {"cmd": "pytest"}},
+                    ],
+                },
+            }
+        ]
+        summary = self.collector._summarize_session_entries(entries, pathlib.Path("/tmp/dev.jsonl"))
+        self.assertEqual(summary["status_code"], "processing")
+        self.assertEqual(summary["state_label"], "正在处理")
+        self.assertIn("正在执行", summary["detail"])
+        self.assertEqual(summary["task_title"], "修复同步链路")
     
     def test_get_learnings(self):
         """测试获取学习数据"""
@@ -410,11 +510,57 @@ class TestDataCollector(unittest.TestCase):
         snapshots = self.collector.get_snapshots(force_refresh=True)
         self.assertIn('count', snapshots)
         self.assertIn('snapshots', snapshots)
+
+    def test_fetch_environment_data_includes_version_and_recovery_profile(self):
+        with mock.patch.object(self.collector, '_load_runtime_context') as context_mock, \
+            mock.patch.object(self.collector, '_shared_state_fresh', return_value={"env_id": "primary", "gateway_running": True, "gateway_healthy": True}), \
+            mock.patch.object(
+                self.collector,
+                '_shared_state',
+                side_effect=lambda name, default=None: {
+                    "bootstrap-status.json": {},
+                    "context-lifecycle-baseline.json": {},
+                    "watcher-summary.json": {},
+                    "restart-runtime-status.json": {},
+                    "openclaw-version.json": {"describe": "v2026.3.11", "branch": "main", "short_commit": "abc123", "upstream_ahead": 2, "upstream_behind": 138},
+                    "openclaw-recovery-profile.json": {"known_good": {"describe": "v2026.3.11"}, "rollback_hint": {"target_describe": "v2026.3.11"}},
+                    "watchdog-recovery-status.json": {},
+                    "watchdog-recovery-hints.json": [],
+                }.get(name, default),
+            ):
+            legacy = mock.Mock()
+            legacy.get_gateway_process_for_env.return_value = {"pid": 1234}
+            legacy.check_gateway_health_for_env.return_value = True
+            legacy.env_has_control_ui_assets.return_value = True
+            legacy.env_dashboard_url.return_value = "http://localhost:18789"
+            legacy.env_open_link.return_value = "http://localhost:18789"
+            context_mock.return_value = {
+                "legacy": legacy,
+                "active_env": "primary",
+                "selected_env": {"id": "primary", "name": "OpenClaw", "port": 18789, "code": "/tmp/code", "home": "/tmp/home"},
+                "binding": {},
+            }
+
+            data = self.collector._fetch_environment_data()
+
+        self.assertEqual(data["version_info"]["describe"], "v2026.3.11")
+        self.assertEqual(data["recovery_profile"]["known_good"]["describe"], "v2026.3.11")
     
     def test_get_events(self):
         """测试获取事件数据"""
         events = self.collector.get_events(limit=10)
         self.assertIsInstance(events, list)
+
+    def test_emergency_recover_returns_known_good_guidance_when_no_snapshot_exists(self):
+        fake_legacy = mock.Mock()
+        fake_legacy.load_config.return_value = {"ENABLE_SNAPSHOT_RECOVERY": True}
+        fake_legacy.SNAPSHOTS.restore_latest_snapshot.return_value = None
+        fake_legacy.load_versions.return_value = {"known_good": {"describe": "v2026.3.11", "commit": "abc"}}
+        with mock.patch('services.data_collector._legacy_dashboard', return_value=fake_legacy):
+            result = self.collector.emergency_recover()
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["rollback_guidance"]["target"], "v2026.3.11")
     
     def test_get_health_score_data(self):
         """测试获取健康评分数据"""

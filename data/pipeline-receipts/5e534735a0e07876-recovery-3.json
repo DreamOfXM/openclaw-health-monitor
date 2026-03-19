@@ -1,0 +1,19 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "5e534735a0e07876",
+  "task_id": "5e534735a0e07876",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "confirmed",
+  "timestamp": 1773799601000,
+  "summary": "已再次执行 session recovery / stale subagent detection / active task rebind；未发现失联子代理。该任务仍需人工恢复或重新发起。",
+  "deliverable": {
+    "recovery_action": "manual_rebind_review_completed",
+    "active_task_rebind": "guardian",
+    "stale_subagent_detection": "none_detected",
+    "blocked_state_remains": true,
+    "reason": "blocked_control_followup_failed，缺少可继续执行的新上下文。",
+    "note": "恢复回执补发，不重复 final。"
+  },
+  "protocol_version": "hm.v1"
+}

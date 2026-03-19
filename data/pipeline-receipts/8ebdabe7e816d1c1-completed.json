@@ -1,0 +1,12 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "8ebdabe7e816d1c1",
+  "task_id": "8ebdabe7e816d1c1",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773858308000,
+  "summary": "Interactive Card 已识别并完成重绑；该内容不构成新的独立执行链路，任务状态为 blocked_control_followup_failed。",
+  "deliverable": {"interactive_card_detected": true,"blocked": true,"reason_if_not_continued": "blocked_control_followup_failed，缺少可继续执行的新上下文。"},
+  "protocol_version": "hm.v1"
+}

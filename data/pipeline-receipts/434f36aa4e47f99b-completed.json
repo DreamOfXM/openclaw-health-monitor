@@ -1,0 +1,20 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "434f36aa4e47f99b",
+  "task_id": "434f36aa4e47f99b",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773744100000,
+  "summary": "已回答：我们确实缺少错误反馈机制。当前依赖子代理自报，如果子代理崩溃则无法通知用户。Guardian 的设计初衷就是解决这个问题，但 Guardian 本身也需要被监控。",
+  "deliverable": {
+    "question": "我们是不是缺少一种机制，出错了能告诉我",
+    "answer": "是的，缺少。当前依赖子代理自报错误，如果子代理崩溃则无机制通知用户。Guardian 的设计初衷就是外部检测，但 Guardian 本身也需要被监控。",
+    "recommendations": [
+      "Guardian 心跳机制",
+      "用户收到确认机制",
+      "升级告警机制"
+    ]
+  },
+  "protocol_version": "hm.v1"
+}

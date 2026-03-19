@@ -1,0 +1,15 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "794dafed1e28d9e8",
+  "task_id": "794dafed1e28d9e8",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773828000000,
+  "summary": "已接手处理 fetched quoted message: [Interactive Card]。",
+  "deliverable": {
+    "resolution": "interactive_card_rebind",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

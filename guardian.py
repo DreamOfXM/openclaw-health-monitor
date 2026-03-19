@@ -48,6 +48,7 @@ from heartbeat_guardrail import (
 )
 from recovery_watchdog import RecoveryWatchdog, detect_recurrence_problem_code
 from self_evolution import (
+    check_and_resolve_learnings,
     generate_daily_evolution_report,
     record_learning,
     render_daily_evolution_report_markdown,
@@ -2252,6 +2253,7 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     2. 自动 promote 达到阈值的 learnings
     3. 将 promoted learnings 写入 MEMORY.md 和 memory/YYYY-MM-DD.md
     4. 根据学习结果自动改进系统
+    5. 主动检查并解决重复问题
     
     边界原则：
     - 这是自我学习进化的核心闭环
@@ -2266,7 +2268,41 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     if not force and last_run and now - last_run < interval:
         return {"status": "skipped", "promoted": 0, "reviewed": 0}
 
+    # 1. 生成每日报告
     report = generate_daily_evolution_report(STORE, now=now)
+    
+    # 2. 主动检查并解决重复问题
+    from self_evolution import spawn_reflection_agent
+    
+    resolution_result = check_and_resolve_learnings(
+        STORE,
+        recurrence_threshold=int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3)),
+        dry_run=False,
+    )
+    
+    # 3. 如果有无法自动解决的问题，派发给主脑（不通知主人，等主脑处理完再通知）
+    if resolution_result.get("unresolvable"):
+        spawn_result = spawn_reflection_agent(
+            BASE_DIR,
+            resolution_result["unresolvable"],
+        )
+        log(f"反思链派发任务给主脑: {spawn_result.get('task_file')}", "INFO")
+        resolution_result["spawn_result"] = spawn_result
+    
+    # 3. 写入 LEARNINGS.md
+    learnings_dir = BASE_DIR / ".learnings"
+    learnings_dir.mkdir(parents=True, exist_ok=True)
+    learnings_md = render_learnings_markdown(STORE, limit=100)
+    (learnings_dir / "LEARNINGS.md").write_text(learnings_md, encoding="utf-8")
+    
+    # 4. 将 promoted learnings 写入 MEMORY.md
+    projections = STORE.list_self_evolution_projections(limit=100)
+    for item in projections:
+        current_state = str(item.get("current_state") or "")
+        if current_state in ("adopted", "verified"):
+            promote_learning_to_memory(item)
+    
+    # 5. 写入状态快照和日报
     promoted = int(report.get("rules_added") or 0)
     reviewed = int(report.get("issues_fixed") or 0) + int(report.get("pending_verification") or 0)
     summary = {
@@ -2276,6 +2312,7 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
         "threshold": max(2, int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3))),
         "generated_at": now,
         "report": report,
+        "resolution": resolution_result,
     }
     STORE.record_reflection_run("scheduled", summary)
     STORE.save_runtime_value("reflection_last_run_at", now)
@@ -2287,6 +2324,13 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
         render_daily_evolution_report_markdown(STORE, now=now),
         encoding="utf-8",
     )
+    
+    # 6. 如果有高复发问题，记录告警
+    if resolution_result.get("unresolvable_count", 0) > 0:
+        log(f"反思链发现 {resolution_result['unresolvable_count']} 个无法自动解决的问题", "WARNING")
+        for item in resolution_result.get("unresolvable", [])[:3]:
+            log(f"  - {item.get('problem_code')}: 复发 {item.get('recurrence_count')} 次", "WARNING")
+    
     return summary
 
 
@@ -2640,6 +2684,8 @@ def send_guardian_followup(
         "--json",
         "--timeout",
         str(int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120))),
+        "--channel",
+        "feishu",  # 指定通道，避免多通道配置冲突
     ]
     if deliver:
         args.append("--deliver")

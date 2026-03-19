@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "18d135dac5b99ef9",
+  "task_id": "18d135dac5b99ef9",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773807200000,
+  "summary": "已接手处理“再读一下，我的桌面上有一个小忆 ag”这一既有追问。",
+  "deliverable": {
+    "question": "你再读一下，我的桌面上有一个小忆 ag",
+    "intent": "desktop_file_reference_rebind",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

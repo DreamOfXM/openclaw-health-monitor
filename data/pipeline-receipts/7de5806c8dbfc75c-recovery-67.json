@@ -1,0 +1,18 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "7de5806c8dbfc75c",
+  "task_id": "7de5806c8dbfc75c",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "confirmed",
+  "timestamp": 1773836406000,
+  "summary": "已再次执行 session recovery / stale subagent detection / active task rebind；未发现失联子代理，任务维持重绑到 guardian，原请求继续受安全边界约束。",
+  "deliverable": {
+    "recovery_action": "session_recovery_completed",
+    "active_task_rebind": "guardian",
+    "stale_subagent_detection": "none_detected",
+    "request_status": "safety_block_remains",
+    "note": "恢复回执补发，不重复 final。"
+  },
+  "protocol_version": "hm.v1"
+}

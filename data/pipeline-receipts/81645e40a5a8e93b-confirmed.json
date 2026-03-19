@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "81645e40a5a8e93b",
+  "task_id": "81645e40a5a8e93b",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773795200000,
+  "summary": "已接手处理 quoted message 回执恢复，识别到内容为先前关于核代码的答复片段。",
+  "deliverable": {
+    "question": "fetched quoted message: 好，主人。 我不再停留在判断层了...",
+    "resolution": "quoted_message_rebind",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

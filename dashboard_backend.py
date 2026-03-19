@@ -34,6 +34,7 @@ from monitor_config import (
 )
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
+from version_tracker import build_recovery_profile, collect_version_record, load_versions_file, update_versions_file
 from bootstrap_evolution import (
     build_context_lifecycle_readiness_from_payload,
     ensure_bootstrap_workspace,
@@ -50,6 +51,7 @@ SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
 GUARDIAN_PID_FILE = BASE_DIR / "logs" / "guardian.pid"
 DESKTOP_RUNTIME = BASE_DIR / "desktop_runtime.sh"
 CHANNEL_READINESS_TTL_SECONDS = 120
+VERSIONS_FILE = BASE_DIR / "versions.json"
 
 
 def raise_nofile_limit(target: int = 65536) -> None:
@@ -721,6 +723,7 @@ def restore_snapshot_and_restart(snapshot_name: str) -> tuple[bool, str]:
     if not snapshot_dir.exists() or not snapshot_dir.is_dir():
         return False, "快照不存在"
     manager.restore_snapshot(snapshot_dir)
+    record_version_state(spec, reason=f"config_snapshot_restored:{snapshot_name}", status="config_restored")
     if env_id == active_env_id(cfg):
         success, message, _, _, _ = restart_active_openclaw_environment()
         return success, message if success else f"快照已恢复，但重启失败：{message}"
@@ -1047,7 +1050,7 @@ def build_learning_supervision_snapshot(config: Optional[dict] = None) -> dict:
     existing_artifacts = {name for name, path in artifact_files.items() if path.exists()}
     required_artifacts = {"pending", "promoted", "discarded", "reflection_runs"}
     has_artifact_data = any(artifact_records.values())
-    legacy_learnings = [item for item in STORE.list_learnings(limit=200) if item.get("env_id") == env_id]
+    legacy_learnings = [item for item in STORE.list_learning_view(limit=200) if item.get("env_id") == env_id]
     legacy_reflections = STORE.list_reflection_runs(limit=50)
 
     artifact_status = "missing"
@@ -1692,21 +1695,21 @@ def get_learning_center_payload(limit: int = 10) -> dict:
             "total": len(learnings),
         }
     else:
-        learnings = STORE.list_learnings(limit=limit)
+        learnings = STORE.list_learning_view(limit=limit)
         reflections = STORE.list_reflection_runs(limit=6)
-        summary = STORE.summarize_learnings()
+        summary = STORE.summarize_self_evolution()
     suggestions: list[dict[str, str]] = []
     for item in learnings[:5]:
-        status = str(item.get("status") or "")
+        status = str(item.get("lifecycle_state") or item.get("status") or "")
         occurrences = int(item.get("occurrences") or 0)
         category = str(item.get("category") or "misc")
         title = str(item.get("title") or "未命名 learning")
-        if status == "pending":
+        if status in {"recorded", "candidate_rule", "adopted", "reopened", "pending"}:
             action = "继续观察并收集重复证据"
-        elif status == "reviewed":
-            action = "可考虑提升为 contract / rule"
+        elif status in {"verified", "reviewed"}:
+            action = "已验证，可继续观察是否复发"
         else:
-            action = "已升级，关注实际效果"
+            action = "已闭环，关注是否复发"
         suggestions.append(
             {
                 "title": title,
@@ -1751,7 +1754,7 @@ def get_health_acceptance_payload(task_limit: int = 200, learning_limit: int = 1
     if str(learning_center.get("source_mode") or "") == "openclaw_artifact":
         learnings = list(learning_center.get("learnings") or [])
     else:
-        learnings = [item for item in STORE.list_learnings(limit=learning_limit) if item.get("env_id") == env_id]
+        learnings = [item for item in STORE.list_learning_view(limit=learning_limit) if item.get("env_id") == env_id]
 
     complete_chain = 0
     no_receipt_count = 0
@@ -2394,16 +2397,12 @@ def get_error_logs(count: int = 20, spec: Optional[dict] = None) -> list:
 def get_version(spec: Optional[dict] = None) -> str:
     """获取版本"""
     env = spec or env_spec(None)
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(env["code"]), "describe", "--tags", "--always"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except:
-        pass
-    return "unknown"
+    record = collect_version_record(
+        code_root=Path(env["code"]),
+        env_id=str(env.get("id") or "primary"),
+        reason="dashboard.version_probe",
+    )
+    return str(record.get("describe") or "unknown")
 
 
 def get_diagnoses(metrics: dict, sessions: dict, processes: list) -> list:
@@ -2497,11 +2496,23 @@ def save_config(key: str, value: str) -> bool:
 
 def load_versions() -> dict:
     """加载版本历史"""
-    versions_file = BASE_DIR / "versions.json"
-    if versions_file.exists():
-        with open(versions_file) as f:
-            return json.load(f)
-    return {"current": None, "history": []}
+    return load_versions_file(VERSIONS_FILE)
+
+
+def record_version_state(spec: dict[str, Any], *, reason: str, status: str = "observed", mark_known_good: bool = False) -> dict[str, Any]:
+    payload = update_versions_file(
+        VERSIONS_FILE,
+        collect_version_record(
+            code_root=Path(spec["code"]),
+            env_id=str(spec.get("id") or "primary"),
+            reason=reason,
+            status=status,
+        ),
+        mark_known_good=mark_known_good,
+    )
+    STORE.save_runtime_value(f"openclaw_version:{spec['id']}", payload.get("current") or {})
+    STORE.save_runtime_value(f"openclaw_recovery_profile:{spec['id']}", build_recovery_profile(payload))
+    return payload
 
 
 def run_script(args: list[str], timeout: int = 180) -> tuple[int, str, str]:
@@ -2609,6 +2620,7 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         return False, f"主闭环纯净度门禁失败，拒绝重启 Gateway: {reason_text}", None, None, target_env
     old_pid = get_listener_pid(int(spec["port"]))
     old_pid_str = str(old_pid) if old_pid is not None else None
+    record_version_state(spec, reason="restart_requested", status="pre_restart")
     record_restart_event(
         source="dashboard",
         target=target_env,
@@ -2629,6 +2641,7 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
     code, stdout, stderr = run_script([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
 
     if code != 0:
+        record_version_state(spec, reason="restart_failed", status="restart_failed")
         record_restart_event(
             source="dashboard",
             target=target_env,
@@ -2638,6 +2651,7 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         )
         return False, (stderr or stdout or "Gateway 重启失败").strip(), old_pid_str, None, target_env
     if not wait_for_env_listener(target_env):
+        record_version_state(spec, reason="restart_listener_missing", status="restart_failed")
         record_restart_event(
             source="dashboard",
             target=target_env,
@@ -2648,6 +2662,7 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         return False, f"{spec['name']} 重启失败：Gateway 未成功启动", old_pid_str, None, target_env
     single_ok, single_message = enforce_single_active_listener(target_env)
     if not single_ok:
+        record_version_state(spec, reason="restart_single_active_failed", status="restart_failed")
         record_restart_event(
             source="dashboard",
             target=target_env,
@@ -2660,6 +2675,7 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
     new_pid = get_listener_pid(int(spec["port"]))
     new_pid_str = str(new_pid) if new_pid is not None else None
     if new_pid_str:
+        record_version_state(spec, reason="restart_succeeded", status="running", mark_known_good=True)
         binding = write_active_binding(BASE_DIR, load_config(), target_env, switch_state="committed")
         STORE.save_runtime_value(
             "active_openclaw_env",
@@ -2695,6 +2711,7 @@ def restart_active_openclaw_environment() -> tuple[bool, str, Optional[str], Opt
         status="failed",
         details={"old_pid": old_pid_str, "error": "Gateway 启动失败"},
     )
+    record_version_state(spec, reason="restart_missing_pid", status="restart_failed")
     return False, "Gateway 启动失败", old_pid_str, None, target_env
 
 
@@ -4937,7 +4954,12 @@ def api_status():
         "sessions": sessions,
         "errors": errors,
         "model_failure_summary": model_failure_summary,
-        "version": {"current": version, "history": version_history.get("history", [])},
+        "version": {
+            "current": version,
+            "history": version_history.get("history", []),
+            "known_good": version_history.get("known_good"),
+            "recovery_profile": build_recovery_profile(version_history),
+        },
         "config": safe_config,
         "diagnoses": diagnoses,
         "top_processes": top_processes,
@@ -5163,6 +5185,92 @@ def api_snapshot_restore():
         return jsonify({"success": success, "message": message if success else f"恢复失败: {message}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
+
+
+@app.route("/api/events/visible-completion", methods=["POST"])
+def api_visible_completion():
+    """
+    接收主脑发送的 visible_completion 事件。
+    
+    主脑在给用户发送回复后，调用此 API 通知健康监控系统任务已完成。
+    这比依赖日志分析更可靠。
+    
+    请求体:
+    {
+        "session_key": "agent:main:feishu:direct:ou_xxx",
+        "message": "任务已完成 ✅",
+        "timestamp": 1773640536
+    }
+    """
+    try:
+        data = request.get_json()
+        session_key = data.get("session_key")
+        message = data.get("message", "")
+        timestamp = data.get("timestamp")
+        
+        if not session_key:
+            return jsonify({"success": False, "message": "缺少 session_key"}), 400
+        
+        # 根据 session_key 查找对应的任务
+        task = STORE.get_latest_task_for_session(session_key)
+        if not task:
+            return jsonify({"success": False, "message": f"未找到 session_key={session_key} 对应的任务"}), 404
+        
+        task_id = task.get("task_id")
+        if not task_id:
+            return jsonify({"success": False, "message": "任务缺少 task_id"}), 500
+        
+        # 检查任务是否已经终态
+        core = STORE.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+        is_terminal = bool(core.get("is_terminal"))
+        
+        if is_terminal:
+            return jsonify({
+                "success": True,
+                "message": "任务已处于终态，visible_completion 事件已忽略",
+                "task_id": task_id,
+                "is_terminal": True
+            })
+        
+        # 记录 visible_completion 事件
+        payload = {
+            "message": message,
+            "timestamp": timestamp or int(time.time()),
+            "source": "api"
+        }
+        
+        inserted = STORE.record_task_event(task_id, "visible_completion", payload)
+        
+        if inserted:
+            # 更新任务状态
+            STORE.update_task_fields(
+                task_id,
+                status="completed",
+                current_stage="已完成",
+                updated_at=int(time.time()),
+                completed_at=int(time.time())
+            )
+            
+            # 触发状态重新派生
+            try:
+                STORE.sync_legacy_task_projection(task_id)
+            except Exception:
+                pass
+            
+            return jsonify({
+                "success": True,
+                "message": "visible_completion 事件已记录",
+                "task_id": task_id
+            })
+        else:
+            return jsonify({
+                "success": True,
+                "message": "visible_completion 事件已存在（重复）",
+                "task_id": task_id
+            })
+            
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @app.route("/api/config", methods=["POST"])

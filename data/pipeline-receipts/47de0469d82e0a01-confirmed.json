@@ -1,0 +1,15 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "47de0469d82e0a01",
+  "task_id": "47de0469d82e0a01",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773833405000,
+  "summary": "已接手处理 quoted message：基于事实文件的当前状态说明。",
+  "deliverable": {
+    "resolution": "status_quote_rebind",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

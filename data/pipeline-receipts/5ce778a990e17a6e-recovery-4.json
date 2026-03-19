@@ -1,0 +1,12 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "5ce778a990e17a6e",
+  "task_id": "5ce778a990e17a6e",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "confirmed",
+  "timestamp": 1773858904000,
+  "summary": "已再次执行 Interactive Card recovery / stale subagent detection / active task rebind；未发现失联子代理，引用内容维持重绑到 guardian。",
+  "deliverable": {"recovery_action": "interactive_card_rebind_completed","active_task_rebind": "guardian","stale_subagent_detection": "none_detected","note": "恢复回执补发，不重复 final。"},
+  "protocol_version": "hm.v1"
+}

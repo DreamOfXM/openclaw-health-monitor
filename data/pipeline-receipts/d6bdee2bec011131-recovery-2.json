@@ -1,0 +1,18 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "d6bdee2bec011131",
+  "task_id": "d6bdee2bec011131",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "completed",
+  "timestamp": 1773771101000,
+  "summary": "恢复回执：代码核验已完成，pipeline_receipt 机制正确。任务已恢复并完成。",
+  "deliverable": {
+    "recovery_type": "session_recovery",
+    "stale_subagent_detection": "none",
+    "active_task_rebind": "completed",
+    "code_verification": "passed",
+    "result": "pipeline_receipt 机制存在于 state_store.py:2693，visible_completion 与 receipt 分离，Guardian 检测 missing_pipeline_receipt 正常。"
+  },
+  "protocol_version": "hm.v1"
+}

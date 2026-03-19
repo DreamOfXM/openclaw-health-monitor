@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "47e5e6c518386e33",
+  "task_id": "47e5e6c518386e33",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773764455000,
+  "summary": "已接手并执行安装 china-stock-analysis skill。",
+  "deliverable": {
+    "question": "帮我安装 china-stock-an",
+    "intent_resolution": "按 china-stock-analysis skill 处理",
+    "workspace": "/Users/hangzhou/.openclaw/workspace-xiaoyi"
+  },
+  "protocol_version": "hm.v1"
+}

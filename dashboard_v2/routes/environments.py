@@ -95,6 +95,24 @@ def restart_environment():
         }), 500
 
 
+@bp.route('/emergency-recover', methods=['POST'])
+def emergency_recover():
+    """恢复最近配置快照并重启；无快照时返回 known-good 回退提示。"""
+    try:
+        collector = get_collector()
+        result = collector.emergency_recover()
+        success = bool(result.get('success'))
+        return jsonify({
+            'success': success,
+            'data': result,
+        }), (200 if success else 500)
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @bp.route('/snapshots', methods=['GET'])
 def get_snapshots():
     """获取快照列表"""

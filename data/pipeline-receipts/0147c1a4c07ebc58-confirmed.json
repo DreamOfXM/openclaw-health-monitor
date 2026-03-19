@@ -1,0 +1,15 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "0147c1a4c07ebc58",
+  "task_id": "0147c1a4c07ebc58",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773842106000,
+  "summary": "已接手处理 quoted message：继续推进 Phase 2 并压缩 derive_task。",
+  "deliverable": {
+    "resolution": "phase2_quote_rebind",
+    "active_task_rebind": "4acc58ac5a521028"
+  },
+  "protocol_version": "hm.v1"
+}

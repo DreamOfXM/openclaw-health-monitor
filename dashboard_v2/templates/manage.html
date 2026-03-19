@@ -102,6 +102,37 @@
             <section class="manage-section">
                 <div class="section-header">
                     <h2 class="section-title">
+                        <span class="section-icon">🧬</span>
+                        版本与复活
+                    </h2>
+                    <span class="badge badge-warning">复活器</span>
+                </div>
+
+                <div class="snapshot-card">
+                    <div class="snapshot-create">
+                        <h4>当前运行版本</h4>
+                        <div id="version-runtime-summary" class="env-status-text">加载中...</div>
+                        <p id="version-known-good" class="hint">known good: --</p>
+                        <p id="version-upstream-drift" class="hint">upstream 偏移: --</p>
+                    </div>
+                    <div class="snapshot-list">
+                        <h4>急救恢复策略</h4>
+                        <div id="recovery-profile-summary" class="env-status-text">加载中...</div>
+                        <div id="watchdog-recovery-summary" class="env-status-text" style="margin-top: 8px;">加载中...</div>
+                        <div id="watchdog-recovery-hints" class="snapshots-container" style="margin-top: 12px;">
+                            <div class="loading">加载 watchdog 恢复提示...</div>
+                        </div>
+                        <div class="snapshot-actions" style="margin-top: 12px;">
+                            <button id="btn-emergency-recover" class="btn btn-danger">执行急救恢复</button>
+                        </div>
+                        <p class="hint">急救流程优先恢复最近配置快照并重启；若仍失败，再参考 known good commit 手动回退代码。</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="manage-section">
+                <div class="section-header">
+                    <h2 class="section-title">
                         <span class="section-icon">🚨</span>
                         绑定巡检
                     </h2>

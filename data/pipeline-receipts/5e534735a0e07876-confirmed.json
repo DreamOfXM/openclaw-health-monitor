@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "5e534735a0e07876",
+  "task_id": "5e534735a0e07876",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773796200000,
+  "summary": "已接手处理 blocked_control_followup_failed 控制恢复。",
+  "deliverable": {
+    "question": "继续",
+    "control_state": "blocked_control_followup_failed",
+    "recovery_mode": "manual_rebind"
+  },
+  "protocol_version": "hm.v1"
+}

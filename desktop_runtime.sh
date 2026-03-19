@@ -241,12 +241,12 @@ purity_gate_status() {
         printf 'unknown\n'
         return 0
     fi
-    ok="$(printf '%s' "$value" | sed -n 's/.*"ok"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')"
+    ok="$(sqlite3 "$db_path" "SELECT CASE json_extract(value_json, '$.ok') WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE '' END FROM kv_state WHERE namespace='runtime' AND key='main_closure_purity_gate:${env_id}' LIMIT 1;" 2>/dev/null || true)"
     if [ "$ok" = "true" ]; then
         printf 'ok\n'
         return 0
     fi
-    reasons="$(printf '%s' "$value" | sed -n 's/.*"reasons"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr -d '"' | tr ',' ' ' | xargs 2>/dev/null || true)"
+    reasons="$(sqlite3 "$db_path" "SELECT COALESCE(group_concat(value, ' '), '') FROM kv_state, json_each(value_json, '$.reasons') WHERE namespace='runtime' AND key='main_closure_purity_gate:${env_id}';" 2>/dev/null || true)"
     printf 'failed:%s\n' "${reasons:-main_closure_purity_gate_failed}"
 }
 

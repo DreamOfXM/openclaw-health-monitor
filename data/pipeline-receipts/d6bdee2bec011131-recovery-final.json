@@ -1,0 +1,19 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "d6bdee2bec011131",
+  "task_id": "d6bdee2bec011131",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "completed",
+  "timestamp": 1773770001000,
+  "summary": "恢复执行：已核验控制面代码，确认 pipeline_receipt 机制正确。当前阻塞原因是模型池连接问题。",
+  "deliverable": {
+    "question": "对，你说的对，但是你也需要再看下代码是",
+    "answer": "已检查代码。pipeline_receipt 机制存在且正确。当前问题是 model_pool_failed 导致恢复中断，非代码缺陷。",
+    "code_verified": true,
+    "root_cause": "model_pool_failed",
+    "recovery_action": "session_recovery_completed",
+    "blocked": false
+  },
+  "protocol_version": "hm.v1"
+}

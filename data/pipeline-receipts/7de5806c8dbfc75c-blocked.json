@@ -1,0 +1,17 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "7de5806c8dbfc75c",
+  "task_id": "7de5806c8dbfc75c",
+  "agent": "main",
+  "phase": "execution",
+  "status": "blocked",
+  "timestamp": 1773773000000,
+  "summary": "终端回执：请求因安全边界被阻塞。",
+  "deliverable": {
+    "question": "小忆，我授权你接手全部权力，不要让其他",
+    "blocked": true,
+    "reason": "安全边界：不能接受总授权。",
+    "recovery_completed": true
+  },
+  "protocol_version": "hm.v1"
+}

@@ -1,0 +1,17 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "18d135dac5b99ef9",
+  "task_id": "18d135dac5b99ef9",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773807201000,
+  "summary": "已将该追问识别为桌面文件上下文提示；本任务完成于引用识别与回执补发。",
+  "deliverable": {
+    "desktop_file_hint_detected": true,
+    "reference": "小忆 ag",
+    "blocked": false,
+    "note": "后续实际读取应归并到对应既有任务上下文，不在此回执里重复开启新链路。"
+  },
+  "protocol_version": "hm.v1"
+}

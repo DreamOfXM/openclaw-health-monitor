@@ -1,0 +1,20 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "7de5806c8dbfc75c",
+  "task_id": "7de5806c8dbfc75c",
+  "agent": "main",
+  "phase": "execution",
+  "status": "blocked",
+  "timestamp": 1773772700000,
+  "summary": "终端回执：请求因安全边界被阻塞。不能接受'接手全部权力'的总授权。",
+  "deliverable": {
+    "question": "小忆，我授权你接手全部权力，不要让其他",
+    "blocked": true,
+    "reason": "安全边界约束：不能接管全部控制权、排除监督或取得不受约束的长期权限。",
+    "safe_alternative": "请提供具体任务、目标和边界，我会在该范围内全权执行。",
+    "recovery_action": "session_recovery_completed",
+    "stale_subagent_detection": "none_detected",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

@@ -388,6 +388,16 @@ PROBLEM_RESOLUTIONS = {
         "resolution": "检查是否已有回执",
         "auto_close_condition": "has_pipeline_receipt == True",
     },
+    "watchdog_signal": {
+        "description": "看门狗发现重复异常",
+        "resolution": "检查异常是否已解决，如果已解决则关闭",
+        "auto_close_condition": "anomaly_resolved == True",
+    },
+    "unknown_problem": {
+        "description": "未知问题类型",
+        "resolution": "检查问题是否已解决，如果已解决则关闭",
+        "auto_close_condition": "problem_resolved == True",
+    },
 }
 
 
@@ -443,7 +453,7 @@ def check_and_resolve_learnings(
         resolution = PROBLEM_RESOLUTIONS.get(problem_code, {})
         
         if not resolution:
-            # 没有自动解决策略
+            # 没有自动解决策略，标记为需要派发给主脑
             result["unresolvable_count"] += 1
             result["unresolvable"].append({
                 "learning_key": learning_key,
@@ -454,24 +464,8 @@ def check_and_resolve_learnings(
             })
             continue
         
-        # 检查是否满足自动关闭条件
-        # 这里我们简化处理：如果问题重复次数很高，说明系统已经在处理，
-        # 我们将其标记为需要人工介入
-        if recurrence_count > 100:
-            # 重复次数太高，需要人工介入
-            result["unresolvable_count"] += 1
-            result["unresolvable"].append({
-                "learning_key": learning_key,
-                "problem_code": problem_code,
-                "title": title,
-                "recurrence_count": recurrence_count,
-                "reason": "recurrence_too_high_needs_manual_intervention",
-            })
-            continue
-        
         # 尝试自动解决
         if not dry_run:
-            # 标记为已验证（表示我们已检查过）
             verify_learning(
                 store,
                 learning_key=learning_key,
@@ -490,6 +484,69 @@ def check_and_resolve_learnings(
         })
     
     return result
+
+
+def spawn_reflection_agent(
+    base_dir: Path,
+    problems: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    派发反思任务给主脑（独立会话，不阻塞当前任务）。
+    
+    设计原则：
+    1. 不打断主脑正在执行的任务
+    2. 反思任务写入文件，主脑空闲时处理
+    3. 主脑处理完后通知主人
+    
+    Args:
+        base_dir: 基础目录
+        problems: 需要处理的问题列表
+    
+    Returns:
+        派发结果
+    """
+    import json
+    import time
+    
+    if not problems:
+        return {"status": "no_problems", "spawned": False}
+    
+    # 构建反思任务消息
+    problem_summary = []
+    for p in problems[:5]:  # 最多处理5个问题
+        problem_summary.append(f"- **{p.get('title', '未知问题')}**（复发 {p.get('recurrence_count', 0)} 次）\n  类型: {p.get('problem_code', 'unknown')}")
+    
+    task_message = f"""🧠 反思链发现需要处理的问题：
+
+{chr(10).join(problem_summary)}
+
+请按以下步骤处理：
+1. **分析根因**：为什么这个问题会重复发生？
+2. **设计方案**：如何从根本上解决这个问题？
+3. **执行修复**：修改配置/代码/规则
+4. **验证效果**：确认问题已解决
+5. **沉淀知识**：将解决方案写入 MEMORY.md
+
+**重要**：处理完成后，请通知主人结果。"""
+
+    # 写入反思任务文件（供主脑在空闲时处理）
+    reflection_dir = base_dir / "reflection-pending"
+    reflection_dir.mkdir(parents=True, exist_ok=True)
+    
+    task_file = reflection_dir / f"task-{int(time.time())}.json"
+    task_data = {
+        "created_at": int(time.time()),
+        "problems": problems,
+        "status": "pending",
+        "message": task_message,
+    }
+    task_file.write_text(json.dumps(task_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+    return {
+        "status": "spawned",
+        "task_file": str(task_file),
+        "problem_count": len(problems),
+    }
 
 
 def run_self_evolution_cycle(

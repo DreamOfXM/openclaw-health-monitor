@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "47de0469d82e0a01",
+  "task_id": "47de0469d82e0a01",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773833406000,
+  "summary": "quoted message 已识别并完成重绑；该内容仅为状态引用，不构成新的独立执行链路。",
+  "deliverable": {
+    "quoted_message_detected": true,
+    "blocked": false,
+    "reason_if_not_continued": "当前仅为事实状态引用，未形成新的独立执行链路。"
+  },
+  "protocol_version": "hm.v1"
+}

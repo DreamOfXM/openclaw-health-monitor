@@ -1,0 +1,17 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "81645e40a5a8e93b",
+  "task_id": "81645e40a5a8e93b",
+  "agent": "main",
+  "phase": "execution",
+  "status": "completed",
+  "timestamp": 1773795201000,
+  "summary": "quoted message 已识别并完成重绑；该内容指向既有代码核验任务，不构成新的执行链路。",
+  "deliverable": {
+    "quoted_message_detected": true,
+    "maps_to_existing_task": "d6bdee2bec011131",
+    "blocked": false,
+    "note": "此任务本身完成为消息识别与回执补发，不重复原任务 final。"
+  },
+  "protocol_version": "hm.v1"
+}

@@ -121,6 +121,94 @@ def _clean_log_detail(line: str) -> str:
     return text[:220]
 
 
+def _extract_text_items(content: Any) -> list[str]:
+    if not isinstance(content, list):
+        return []
+    items: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                items.append(text)
+    return items
+
+
+def _strip_timestamp_prefix(text: str) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"^\[[^\]]+\]\s*", "", value)
+    value = re.sub(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\s*", "", value)
+    return value.strip()
+
+
+def _is_placeholder_task_text(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    return lowered in {
+        "-",
+        "--",
+        "[粘贴用户原始需求]",
+        "粘贴用户原始需求",
+        "未命名任务",
+        "暂无",
+    }
+
+
+def _compress_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _shorten(text: str, limit: int = 120) -> str:
+    value = _compress_whitespace(text)
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _extract_task_hint_from_text(text: str) -> str:
+    raw = _strip_timestamp_prefix(text)
+    if not raw:
+        return ""
+    patterns = (
+        r"\[Subagent Task\]:(.+)",
+        r"主人需求[：:](.+)",
+        r"任务标题[：:](.+)",
+        r"目标[：:](.+)",
+        r"^task[：:](.+)",
+        r"\ntask[：:](.+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, raw, re.DOTALL)
+        if not match:
+            continue
+        chunk = match.group(1).strip()
+        for line in chunk.splitlines():
+            candidate = _shorten(line, 120)
+            if candidate and not _is_placeholder_task_text(candidate):
+                return candidate
+    first_line = _shorten(raw.splitlines()[0], 120)
+    if _is_placeholder_task_text(first_line):
+        return ""
+    return first_line
+
+
+def _classify_log_signal(detail: str) -> tuple[str, str]:
+    text = _compress_whitespace(detail).lower()
+    if not text:
+        return "idle", "没有新的运行信号"
+    if "blocked" in text or "failed" in text:
+        return "blocked", "最近运行信号显示代理被阻塞"
+    if "dispatching to agent" in text or "spawn" in text or "execut" in text or "toolcall" in text:
+        return "processing", "最近日志显示代理正在执行或派发任务"
+    if "dispatch complete" in text or "announce_skip" in text:
+        return "waiting_downstream", "最近日志显示任务已继续下发，正在等待后续结果"
+    if "no_reply" in text or "timeout" in text:
+        return "silent_waiting", "最近日志显示代理在等待内部链路继续推进"
+    return "observed", "最近日志记录到代理活动，但未看到明确执行状态"
+
+
 def _runtime_value(legacy: Any, key: str, default: Any) -> Any:
     try:
         store = getattr(legacy, "STORE", None)
@@ -372,6 +460,10 @@ class DataCollector:
             bootstrap_status = self._shared_state("bootstrap-status.json", {})
             watcher_summary = self._shared_state("watcher-summary.json", {})
             restart_runtime_status = self._shared_state("restart-runtime-status.json", {})
+            openclaw_version = self._shared_state("openclaw-version.json", {})
+            recovery_profile = self._shared_state("openclaw-recovery-profile.json", {})
+            watchdog_recovery_status = self._shared_state("watchdog-recovery-status.json", {})
+            watchdog_recovery_hints = self._shared_state("watchdog-recovery-hints.json", [])
 
             if not isinstance(bootstrap_status, dict) or str(bootstrap_status.get("env_id") or active_env) != active_env:
                 bootstrap_status = _runtime_value(legacy, f"bootstrap_status:{active_env}", {}) or {}
@@ -487,6 +579,10 @@ class DataCollector:
                 },
                 "watcher_summary": watcher_summary,
                 "restart_runtime_status": restart_runtime_status,
+                "version_info": openclaw_version,
+                "recovery_profile": recovery_profile,
+                "watchdog_recovery_status": watchdog_recovery_status,
+                "watchdog_recovery_hints": watchdog_recovery_hints,
                 "binding_audit": binding_audit,
                 "environment_integrity": environment_integrity,
                 "timestamp": datetime.now().isoformat(),
@@ -504,6 +600,10 @@ class DataCollector:
                 "config_drift": {"mode": "merge_missing", "applied": [], "preserved": [], "status": "error"},
                 "watcher_summary": {},
                 "restart_runtime_status": {},
+                "version_info": {},
+                "recovery_profile": {},
+                "watchdog_recovery_status": {},
+                "watchdog_recovery_hints": [],
                 "binding_audit": {},
                 "environment_integrity": [],
                 "error": str(exc),
@@ -726,16 +826,22 @@ class DataCollector:
 
     def _normalize_agent(self, item: Dict[str, Any]) -> Dict[str, Any]:
         updated_at = int(item.get("updated_at") or 0)
+        status_code = str(item.get("status_code") or "idle")
+        is_processing = status_code == "processing"
         return {
             "id": item.get("agent_id"),
             "name": item.get("display_name") or item.get("agent_id"),
             "emoji": item.get("emoji") or "",
             "is_active": bool(item.get("is_active", False)),
+            "is_processing": is_processing,
             "last_activity": _iso_from_timestamp(updated_at),
             "last_activity_label": item.get("updated_label") or "-",
-            "state_label": item.get("state_label") or "活动中",
+            "status_code": status_code,
+            "state_label": item.get("state_label") or "待机",
+            "state_reason": item.get("state_reason") or "",
             "detail": item.get("detail") or "",
             "task_hint": item.get("task_hint") or "",
+            "task_title": item.get("task_title") or item.get("task_hint") or "",
             "sessions": int(item.get("sessions") or 0),
             "recent_sessions": item.get("recent_sessions") or [],
             "activity_source": item.get("activity_source") or "session",
@@ -762,15 +868,164 @@ class DataCollector:
             current = signals.get(agent_id)
             if current and ts and current.get("updated_at", 0) > ts:
                 continue
+            detail = _clean_log_detail(line)
+            status_code, state_reason = _classify_log_signal(detail)
             signals[agent_id] = {
                 "updated_at": ts or int(log_path.stat().st_mtime),
                 "updated_label": datetime.fromtimestamp(ts or int(log_path.stat().st_mtime)).strftime("%m-%d %H:%M:%S"),
-                "state_label": "日志活跃",
-                "detail": _clean_log_detail(line),
+                "status_code": status_code,
+                "state_label": self._status_label(status_code),
+                "state_reason": state_reason,
+                "detail": detail,
                 "activity_source": "gateway_log",
-                "activity_excerpt": _clean_log_detail(line),
+                "activity_excerpt": detail,
             }
         return signals
+
+    def _status_label(self, status_code: str) -> str:
+        return {
+            "processing": "正在处理",
+            "waiting_downstream": "等待下游",
+            "silent_waiting": "静默等待",
+            "blocked": "处理受阻",
+            "completed": "已完成",
+            "observed": "有活动",
+            "idle": "待机",
+        }.get(status_code, "待机")
+
+    def _summarize_session_entries(self, entries: list[dict], session_path: Path) -> Dict[str, Any]:
+        title = ""
+        context_lines: list[str] = []
+        status_code = "idle"
+        state_reason = "最近没有明确的执行信号"
+        detail = "暂无最近会话"
+        task_hint = ""
+        for entry in entries:
+            message = entry.get("message") or {}
+            texts = _extract_text_items(message.get("content") or [])
+            for text in texts:
+                cleaned = _strip_timestamp_prefix(text)
+                if cleaned:
+                    context_lines.append(_shorten(cleaned, 200))
+                if not title:
+                    candidate = _extract_task_hint_from_text(cleaned)
+                    if candidate and not _is_placeholder_task_text(candidate):
+                        title = candidate
+                if not task_hint:
+                    candidate = _extract_task_hint_from_text(cleaned)
+                    if candidate and not _is_placeholder_task_text(candidate):
+                        task_hint = candidate
+        recent_context = context_lines[-6:]
+        for entry in reversed(entries):
+            message = entry.get("message") or {}
+            role = str(message.get("role") or "")
+            content = message.get("content") or []
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "toolCall":
+                    continue
+                name = str(item.get("name") or "")
+                args = item.get("arguments") or {}
+                if name == "exec":
+                    detail = "正在执行命令、检查或代码修改"
+                    status_code = "processing"
+                    state_reason = "最近一条会话记录显示代理正在执行本地动作"
+                    return {
+                        "status_code": status_code,
+                        "state_label": self._status_label(status_code),
+                        "state_reason": state_reason,
+                        "detail": detail,
+                        "task_title": title,
+                        "task_hint": task_hint,
+                        "recent_context": recent_context,
+                        "context_preview": " | ".join(recent_context[-3:]),
+                        "has_full_context": bool(recent_context),
+                    }
+                if name == "sessions_spawn":
+                    downstream = str(args.get("agentId") or "").strip()
+                    label = _shorten(str(args.get("label") or ""), 80)
+                    suffix = f"：{label}" if label else ""
+                    detail = f"已把任务派发给下游代理 {downstream}{suffix}" if downstream else "已把任务继续派发给下游代理"
+                    status_code = "waiting_downstream"
+                    state_reason = "当前代理已经把工作下发，正在等待下游回执"
+                    return {
+                        "status_code": status_code,
+                        "state_label": self._status_label(status_code),
+                        "state_reason": state_reason,
+                        "detail": detail,
+                        "task_title": title,
+                        "task_hint": task_hint,
+                        "recent_context": recent_context,
+                        "context_preview": " | ".join(recent_context[-3:]),
+                        "has_full_context": bool(recent_context),
+                    }
+                if name == "sessions_send":
+                    detail = "正在向上游回传进度或结构化回执"
+                    status_code = "processing"
+                    state_reason = "当前代理正在回传阶段结果"
+                    return {
+                        "status_code": status_code,
+                        "state_label": self._status_label(status_code),
+                        "state_reason": state_reason,
+                        "detail": detail,
+                        "task_title": title,
+                        "task_hint": task_hint,
+                        "recent_context": recent_context,
+                        "context_preview": " | ".join(recent_context[-3:]),
+                        "has_full_context": bool(recent_context),
+                    }
+            texts = _extract_text_items(content)
+            if texts:
+                last_text = _strip_timestamp_prefix(texts[-1])
+                if "PIPELINE_RECEIPT:" in last_text:
+                    lowered = last_text.lower()
+                    if "action=blocked" in lowered:
+                        status_code = "blocked"
+                        detail = "最近结构化回执显示任务被阻塞"
+                        state_reason = "当前代理已明确报告 blocked"
+                    elif "action=completed" in lowered:
+                        status_code = "completed"
+                        detail = "最近结构化回执显示当前阶段已完成"
+                        state_reason = "当前代理已明确报告 completed"
+                    elif "action=started" in lowered:
+                        status_code = "processing"
+                        detail = "最近结构化回执显示当前阶段已经开始处理"
+                        state_reason = "当前代理已明确报告 started"
+                    else:
+                        status_code = "observed"
+                        detail = _shorten(last_text, 160)
+                        state_reason = "最近会话记录包含结构化阶段回执"
+                    break
+                if last_text == "ANNOUNCE_SKIP":
+                    status_code = "waiting_downstream"
+                    detail = "当前阶段已继续下发，等待后续代理回执"
+                    state_reason = "当前代理已把任务继续交给下游处理"
+                    break
+                if last_text == "NO_REPLY":
+                    status_code = "silent_waiting"
+                    detail = "当前代理收到内部更新，但当前无需立刻对外回复"
+                    state_reason = "当前代理在等待内部链路继续推进"
+                    break
+                if role == "assistant":
+                    status_code = "processing"
+                    detail = _shorten(last_text, 160) or "最近会话显示代理正在处理"
+                    state_reason = "最近一条可见回复来自代理本身"
+                    break
+                if role == "user":
+                    status_code = "processing"
+                    detail = _shorten(last_text, 160) or "最近收到新的任务输入"
+                    state_reason = "最近会话显示代理刚收到新任务或补充要求"
+                    break
+        return {
+            "status_code": status_code,
+            "state_label": self._status_label(status_code),
+            "state_reason": state_reason,
+            "detail": detail,
+            "task_title": title or task_hint or session_path.stem,
+            "task_hint": task_hint,
+            "recent_context": recent_context,
+            "context_preview": " | ".join(recent_context[-3:]),
+            "has_full_context": bool(recent_context),
+        }
 
     def _load_agent_sessions(self, env_home: Path, legacy: Any, catalog: Dict[str, Any], *, recent_limit: int = 5) -> Dict[str, Dict[str, Any]]:
         agents_dir = env_home / "agents"
@@ -790,33 +1045,56 @@ class DataCollector:
             recent_files = files[:recent_limit]
             recent_sessions = []
             for path in recent_files:
-                summary = legacy.summarize_agent_session(path, agent_id, catalog.get(agent_id, {}))
-                if not summary:
-                    continue
+                try:
+                    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-60:]
+                    entries = []
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except Exception:
+                            continue
+                        if isinstance(record, dict):
+                            entries.append(record)
+                except Exception:
+                    entries = []
+                summary = self._summarize_session_entries(entries, path) if entries else {}
                 recent_sessions.append(
                     {
-                        "session_file": summary.get("session_file") or path.name,
-                        "updated_at": int(summary.get("updated_at") or 0),
-                        "updated_label": summary.get("updated_label") or "-",
-                        "state_label": summary.get("state_label") or "活动中",
+                        "session_file": path.name,
+                        "updated_at": int(path.stat().st_mtime),
+                        "updated_label": datetime.fromtimestamp(int(path.stat().st_mtime)).strftime("%m-%d %H:%M:%S"),
+                        "status_code": summary.get("status_code") or "idle",
+                        "state_label": summary.get("state_label") or "待机",
+                        "state_reason": summary.get("state_reason") or "",
                         "detail": summary.get("detail") or "",
                         "task_hint": summary.get("task_hint") or "",
+                        "task_title": summary.get("task_title") or "",
+                        "recent_context": summary.get("recent_context") or [],
+                        "context_preview": summary.get("context_preview") or "",
+                        "has_full_context": bool(summary.get("has_full_context")),
                     }
                 )
+            latest_session = recent_sessions[0] if recent_sessions else {}
             payload[agent_id] = {
                 "agent_id": agent_id,
                 "display_name": (catalog.get(agent_id) or {}).get("name") or agent_id,
                 "emoji": (catalog.get(agent_id) or {}).get("emoji") or "",
-                "updated_at": recent_sessions[0]["updated_at"] if recent_sessions else 0,
-                "updated_label": recent_sessions[0]["updated_label"] if recent_sessions else "-",
-                "state_label": recent_sessions[0]["state_label"] if recent_sessions else "待机",
-                "detail": recent_sessions[0]["detail"] if recent_sessions else "暂无最近会话",
-                "task_hint": recent_sessions[0]["task_hint"] if recent_sessions else "",
+                "updated_at": latest_session.get("updated_at") or 0,
+                "updated_label": latest_session.get("updated_label") or "-",
+                "status_code": latest_session.get("status_code") or "idle",
+                "state_label": latest_session.get("state_label") or "待机",
+                "state_reason": latest_session.get("state_reason") or "最近没有新的代理动作",
+                "detail": latest_session.get("detail") or "暂无最近会话",
+                "task_hint": latest_session.get("task_hint") or "",
+                "task_title": latest_session.get("task_title") or "",
                 "sessions": len(files),
                 "recent_sessions": recent_sessions,
                 "is_active": False,
                 "activity_source": "session",
-                "activity_excerpt": recent_sessions[0]["detail"] if recent_sessions else "",
+                "activity_excerpt": latest_session.get("context_preview") or latest_session.get("detail") or "",
             }
         return payload
 
@@ -837,7 +1115,15 @@ class DataCollector:
             for agent_id, item in sessions_by_agent.items():
                 log_signal = log_activity.get(agent_id) or {}
                 updated_at = max(int(item.get("updated_at") or 0), int(log_signal.get("updated_at") or 0))
-                is_active = bool(updated_at and (now_ts - updated_at) <= max(60, active_window))
+                preferred_status = str(log_signal.get("status_code") or item.get("status_code") or "idle")
+                status_source_ts = int(log_signal.get("updated_at") or 0)
+                if status_source_ts < int(item.get("updated_at") or 0):
+                    preferred_status = str(item.get("status_code") or preferred_status)
+                is_active = bool(
+                    preferred_status == "processing"
+                    and updated_at
+                    and (now_ts - updated_at) <= max(60, active_window)
+                )
                 merged_item = {
                     **item,
                     "updated_at": updated_at,
@@ -846,7 +1132,17 @@ class DataCollector:
                         if int(log_signal.get("updated_at") or 0) >= int(item.get("updated_at") or 0)
                         else item.get("updated_label")
                     ) or "-",
-                    "state_label": log_signal.get("state_label") or item.get("state_label") or ("活动中" if is_active else "待机"),
+                    "status_code": preferred_status,
+                    "state_label": (
+                        log_signal.get("state_label")
+                        if int(log_signal.get("updated_at") or 0) >= int(item.get("updated_at") or 0)
+                        else item.get("state_label")
+                    ) or self._status_label(preferred_status),
+                    "state_reason": (
+                        log_signal.get("state_reason")
+                        if int(log_signal.get("updated_at") or 0) >= int(item.get("updated_at") or 0)
+                        else item.get("state_reason")
+                    ) or "",
                     "detail": log_signal.get("detail") or item.get("detail") or "",
                     "activity_source": log_signal.get("activity_source") or item.get("activity_source") or "session",
                     "activity_excerpt": log_signal.get("activity_excerpt") or item.get("activity_excerpt") or "",
@@ -862,10 +1158,10 @@ class DataCollector:
                 )
             )
             return {
-                "active_count": len([item for item in merged if item.get("is_active")]),
+                "active_count": len([item for item in merged if item.get("is_processing")]),
                 "recent_sessions": sum(1 for item in merged if item.get("recent_sessions")),
                 "agents": merged,
-                "active_agent_id": next((item.get("id") for item in merged if item.get("is_active")), None),
+                "active_agent_id": next((item.get("id") for item in merged if item.get("is_processing")), None),
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as exc:
@@ -1120,6 +1416,47 @@ class DataCollector:
             "environment": env_id,
             "old_pid": old_pid,
             "new_pid": new_pid,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def emergency_recover(self) -> Dict[str, Any]:
+        legacy = _legacy_dashboard()
+        config = legacy.load_config()
+        if not config.get('ENABLE_SNAPSHOT_RECOVERY', True):
+            return {
+                "success": False,
+                "message": "当前已禁用 snapshot recovery。请先开启 ENABLE_SNAPSHOT_RECOVERY=true。",
+                "timestamp": datetime.now().isoformat(),
+            }
+        snapshot_dir = legacy.SNAPSHOTS.restore_latest_snapshot()
+        if snapshot_dir is None:
+            versions = legacy.load_versions()
+            known_good = dict(versions.get("known_good") or {})
+            target = str(known_good.get("describe") or known_good.get("commit") or "")
+            return {
+                "success": False,
+                "message": "没有可恢复的配置快照",
+                "rollback_guidance": {
+                    "config_snapshot_first": True,
+                    "code_rollback_manual": True,
+                    "target": target,
+                },
+                "timestamp": datetime.now().isoformat(),
+            }
+        success, message = legacy.restore_snapshot_and_restart(snapshot_dir.name)
+        versions = legacy.load_versions()
+        known_good = dict(versions.get("known_good") or {})
+        target = str(known_good.get("describe") or known_good.get("commit") or "")
+        self.invalidate_cache()
+        return {
+            "success": success,
+            "message": message if success else f"恢复失败: {message}",
+            "snapshot": snapshot_dir.name,
+            "rollback_guidance": {
+                "config_snapshot_first": True,
+                "code_rollback_manual": True,
+                "target": target,
+            },
             "timestamp": datetime.now().isoformat(),
         }
 

@@ -1,0 +1,15 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "5ce778a990e17a6e",
+  "task_id": "5ce778a990e17a6e",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773854700000,
+  "summary": "已接手处理 Interactive Card。",
+  "deliverable": {
+    "resolution": "interactive_card_rebind",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

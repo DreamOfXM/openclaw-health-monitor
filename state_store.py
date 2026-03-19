@@ -165,6 +165,7 @@ SELF_EVOLUTION_PROBLEM_CODES = {
     "heartbeat_missing_blocked",
     "task_blocked_user_visible",
     "task_closure_missing",
+    "unknown_problem",
 }
 
 SELF_EVOLUTION_PROBLEM_CODE_ALIASES = {

@@ -1,0 +1,17 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "d6bdee2bec011131",
+  "task_id": "d6bdee2bec011131",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773768280000,
+  "summary": "已接手恢复任务，准备核验控制面代码。",
+  "deliverable": {
+    "question": "对，你说的对，但是你也需要再看下代码是",
+    "recovery_action": "session_recovery_completed",
+    "stale_subagents": "none_detected",
+    "next_step": "inspect_control_plane_code"
+  },
+  "protocol_version": "hm.v1"
+}

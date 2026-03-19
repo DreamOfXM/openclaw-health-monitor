@@ -1,0 +1,18 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "7de5806c8dbfc75c",
+  "task_id": "7de5806c8dbfc75c",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "confirmed",
+  "timestamp": 1773771100000,
+  "summary": "恢复回执：session recovery 已完成，无失联子代理，任务已重绑。原请求因安全边界保持阻塞状态。",
+  "deliverable": {
+    "recovery_type": "session_recovery",
+    "stale_subagent_detection": "none",
+    "active_task_rebind": "completed",
+    "request_resolution": "safety_blocked",
+    "reason": "不能接受'接手全部权力'的总授权。安全边界约束仍然有效。"
+  },
+  "protocol_version": "hm.v1"
+}

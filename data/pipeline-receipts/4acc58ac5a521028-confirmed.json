@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "4acc58ac5a521028",
+  "task_id": "4acc58ac5a521028",
+  "agent": "main",
+  "phase": "execution",
+  "status": "confirmed",
+  "timestamp": 1773803200000,
+  "summary": "已接手处理“不要打补丁，要有一个总的长久解决方案”这一既有任务。",
+  "deliverable": {
+    "question": "不要打补丁，要有一个总的长久解决方案",
+    "intent": "request_systemic_solution",
+    "active_task_rebind": "guardian"
+  },
+  "protocol_version": "hm.v1"
+}

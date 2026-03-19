@@ -280,6 +280,19 @@ class TestFlaskRoutes(unittest.TestCase):
         self.assertTrue(payload['success'])
         self.assertEqual(payload['data']['environment'], 'primary')
 
+    def test_emergency_recover_route_returns_structured_payload(self):
+        with mock.patch('routes.environments.get_collector') as get_collector:
+            get_collector.return_value.emergency_recover.return_value = {
+                'success': False,
+                'message': '没有可恢复的配置快照',
+                'rollback_guidance': {'target': 'v2026.3.11'},
+            }
+            response = self.client.post('/api/v2/environments/emergency-recover', json={})
+        self.assertEqual(response.status_code, 500)
+        payload = response.get_json()
+        self.assertFalse(payload['success'])
+        self.assertEqual(payload['data']['rollback_guidance']['target'], 'v2026.3.11')
+
     def test_switch_route_rejects_missing_environment(self):
         with mock.patch('routes.environments.get_collector') as get_collector:
             response = self.client.post('/api/v2/environments/switch', json={})

@@ -359,27 +359,31 @@ function updateAgentsGrid(agents) {
     
     const html = agents.map(agent => {
         const emoji = agent.emoji || '🤖';
-        const stateLabel = agent.state_label || '活动中';
-        const taskHint = agent.task_hint || '';
+        const stateLabel = agent.state_label || '待机';
+        const stateReason = agent.state_reason || '';
+        const taskTitle = agent.task_title || agent.task_hint || '';
         const detail = agent.detail || '';
         const selected = agent.id === selectedAgentId;
+        const activityClass = agent.is_processing ? 'processing' : '';
+        const statusTone = agent.is_processing ? 'success' : (agent.status_code === 'blocked' ? 'danger' : 'secondary');
         
         return `
-            <div class="agent-card ${agent.is_active ? 'active' : ''} ${selected ? 'selected' : ''}" data-agent-id="${agent.id}">
+            <div class="agent-card ${activityClass} ${selected ? 'selected' : ''}" data-agent-id="${agent.id}">
                 <div class="agent-header">
                     <div class="agent-identity">
                         <span class="agent-emoji">${emoji}</span>
                         <span class="agent-name">${agent.name || agent.id}</span>
                     </div>
-                    <span class="agent-status badge badge-${agent.is_active ? 'success' : 'secondary'}">
-                        ${agent.is_active ? '活跃' : '空闲'}
+                    <span class="agent-status badge badge-${statusTone}">
+                        ${agent.is_processing ? '处理中' : '非处理中'}
                     </span>
                 </div>
                 <div class="agent-body">
                     <div class="agent-state">
                         <span class="state-label">${stateLabel}</span>
                     </div>
-                    ${taskHint ? `<div class="agent-task"><span class="task-label">任务:</span> ${taskHint}</div>` : ''}
+                    ${stateReason ? `<div class="agent-state-reason">${stateReason}</div>` : ''}
+                    ${taskTitle ? `<div class="agent-task"><span class="task-label">任务:</span> ${taskTitle}</div>` : ''}
                     ${detail ? `<div class="agent-detail">${detail}</div>` : ''}
                     <div class="agent-meta">
                         <span class="meta-item">
@@ -405,7 +409,7 @@ function updateAgentsGrid(agents) {
     }).join('');
     
     container.innerHTML = html;
-    const activeCard = container.querySelector('.agent-card.active');
+    const activeCard = container.querySelector('.agent-card.processing');
     if (activeCard) {
         activeCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
@@ -426,15 +430,16 @@ function renderSelectedAgentDetail(data) {
         <div class="agent-detail-header">
             <div>
                 <div class="agent-detail-title">${agent.emoji || '🤖'} ${agent.name || agent.id}</div>
-                <div class="agent-detail-subtitle">${agent.is_active ? '当前活跃' : '当前待机'} · ${agent.last_activity_label || '--'}</div>
+                <div class="agent-detail-subtitle">${agent.is_processing ? '当前正在处理' : '当前未在处理'} · ${agent.last_activity_label || '--'}</div>
             </div>
-            <div class="agent-detail-badge ${agent.is_active ? 'is-active' : ''}">
+            <div class="agent-detail-badge ${agent.is_processing ? 'is-active' : ''}">
                 ${agent.activity_source === 'gateway_log' ? '日志驱动' : '会话驱动'}
             </div>
         </div>
         <div class="agent-detail-summary">
-            <div><strong>状态：</strong>${agent.state_label || '活动中'}</div>
-            <div><strong>任务提示：</strong>${agent.task_hint || '暂无'}</div>
+            <div><strong>当前状态：</strong>${agent.state_label || '待机'}</div>
+            <div><strong>状态依据：</strong>${agent.state_reason || '暂无可解释依据'}</div>
+            <div><strong>当前任务：</strong>${agent.task_title || agent.task_hint || '暂无可靠任务标题'}</div>
             <div class="signal-text" title="${agent.activity_excerpt || agent.detail || ''}"><strong>最近信号：</strong>${agent.activity_excerpt || agent.detail || '暂无'}</div>
             <div><strong>历史会话：</strong>${agent.sessions || 0}</div>
         </div>
@@ -448,9 +453,18 @@ function renderSelectedAgentDetail(data) {
                     <span class="session-file">${session.session_file}</span>
                     <span class="session-updated">${session.updated_label || '--'}</span>
                 </div>
-                <div class="agent-session-state">${session.state_label || '活动中'}</div>
-                ${session.task_hint ? `<div class="agent-session-task">任务: ${session.task_hint}</div>` : ''}
+                <div class="agent-session-state">${session.state_label || '待机'}</div>
+                ${session.state_reason ? `<div class="agent-session-reason">判断依据: ${session.state_reason}</div>` : ''}
+                ${session.task_title || session.task_hint ? `<div class="agent-session-task">任务: ${session.task_title || session.task_hint}</div>` : ''}
                 ${session.detail ? `<div class="agent-session-detail">${session.detail}</div>` : ''}
+                ${(session.recent_context || []).length ? `
+                    <details class="agent-session-context">
+                        <summary>查看会话详情</summary>
+                        <div class="agent-session-context-lines">
+                            ${(session.recent_context || []).map(line => `<div class="context-line">${escapeHtml(line)}</div>`).join('')}
+                        </div>
+                    </details>
+                ` : ''}
             </div>
         `).join('');
 
@@ -515,15 +529,25 @@ function renderSessionsView(data) {
                         <span class="session-count">${agent.sessions || 0} 会话</span>
                     </div>
                     <div class="session-info">
-                        <span class="info-item">状态: ${agent.state_label || '活动中'}</span>
+                        <span class="info-item">状态: ${agent.state_label || '待机'}</span>
                         <span class="info-item">最后活动: ${agent.last_activity_label || '--'}</span>
                     </div>
-                    ${agent.task_hint ? `<div class="session-task">任务: ${agent.task_hint}</div>` : ''}
+                    ${agent.task_title || agent.task_hint ? `<div class="session-task">任务: ${agent.task_title || agent.task_hint}</div>` : ''}
                 </div>
             `).join('')}
         </div>
     `;
     listContainer.innerHTML = listHtml;
+}
+
+function escapeHtml(value) {
+    const text = String(value || '');
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 /**

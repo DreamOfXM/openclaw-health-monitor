@@ -1,0 +1,12 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "291acbb91a3d5b88",
+  "task_id": "291acbb91a3d5b88",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "confirmed",
+  "timestamp": 1773852901000,
+  "summary": "已再次执行 Phase 2 quoted-message recovery / stale subagent detection / active task rebind；未发现失联子代理，Phase 2 已维持重绑到既有系统级长期方案任务。",
+  "deliverable": {"recovery_action": "phase2_rebind_completed","active_task_rebind": "4acc58ac5a521028","stale_subagent_detection": "none_detected","note": "恢复回执补发，不重复 final。"},
+  "protocol_version": "hm.v1"
+}

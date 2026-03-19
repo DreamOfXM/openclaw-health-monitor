@@ -1,0 +1,16 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "blocked",
+  "timestamp": 1773792000000,
+  "summary": "Guardian recovery loop diagnostic: receipts are being written repeatedly but recovery requests continue. This indicates a systemic issue in receipt detection, not missing receipt generation.",
+  "deliverable": {
+    "diagnostic": "Repeated recovery requests for task_id=7de5806c8dbfc75c and task_id=d6bdee2bec011131 despite multiple receipts written.",
+    "symptom": "Guardian reports missing receipts even though recovery receipts exist.",
+    "suggested_root_cause": "Health monitor / Guardian not detecting written receipt files or expecting a different event format.",
+    "tasks_affected": ["7de5806c8dbfc75c", "d6bdee2bec011131"],
+    "note": "This is a system diagnostic receipt to document the recurring failure mode."
+  },
+  "protocol_version": "hm.v1"
+}

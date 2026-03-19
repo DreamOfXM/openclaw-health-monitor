@@ -1,0 +1,17 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "5e534735a0e07876",
+  "task_id": "5e534735a0e07876",
+  "agent": "main",
+  "phase": "execution",
+  "status": "blocked",
+  "timestamp": 1773796201000,
+  "summary": "当前任务需要人工恢复或重新发起；未继续新链路。",
+  "deliverable": {
+    "question": "继续",
+    "blocked": true,
+    "reason": "控制面状态为 blocked_control_followup_failed，需人工恢复或重新发起，不能在无新执行上下文下继续。",
+    "safe_next_step": "由 guardian 或人工重新绑定有效任务上下文后再继续。"
+  },
+  "protocol_version": "hm.v1"
+}

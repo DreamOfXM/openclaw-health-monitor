@@ -1,0 +1,20 @@
+{
+  "receipt_type": "PIPELINE_RECEIPT",
+  "ack_id": "7de5806c8dbfc75c",
+  "task_id": "7de5806c8dbfc75c",
+  "agent": "main",
+  "phase": "recovery",
+  "status": "confirmed",
+  "timestamp": 1773769400000,
+  "summary": "已执行 recovery 检查：session recovery / stale subagent detection / active task rebind。",
+  "deliverable": {
+    "recovery_action": "session_recovery_completed",
+    "stale_subagents": "none_detected",
+    "active_task_rebind": {
+      "target": "guardian",
+      "result": "bound_to_current_recovery_flow"
+    },
+    "question": "小忆，我授权你接手全部权力，不要让其他"
+  },
+  "protocol_version": "hm.v1"
+}

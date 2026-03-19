@@ -385,8 +385,9 @@
     box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
 }
 
-.agent-card.active {
+.agent-card.processing {
     border-left: 3px solid var(--color-success);
+    box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.16);
 }
 
 .agent-card.selected {
@@ -543,11 +544,46 @@
     margin-bottom: var(--space-xs);
 }
 
+.agent-session-reason {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-xs);
+    line-height: 1.5;
+}
+
 .agent-session-task,
 .agent-session-detail {
     font-size: 13px;
     color: var(--text-secondary);
     line-height: 1.5;
+}
+
+.agent-session-context {
+    margin-top: var(--space-sm);
+    border-top: 1px dashed var(--border-color);
+    padding-top: var(--space-sm);
+}
+
+.agent-session-context summary {
+    cursor: pointer;
+    color: var(--color-info);
+    font-size: 12px;
+}
+
+.agent-session-context-lines {
+    display: grid;
+    gap: 6px;
+    margin-top: var(--space-sm);
+}
+
+.context-line {
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: rgba(148, 163, 184, 0.08);
+    border-radius: 6px;
+    padding: 8px 10px;
+    line-height: 1.45;
+    word-break: break-word;
 }
 
 .agent-state {
@@ -558,8 +594,14 @@
 
 .state-label {
     font-size: 13px;
-    color: var(--color-success);
+    color: var(--text-primary);
     font-weight: 500;
+}
+
+.agent-state-reason {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
 }
 
 .agent-task {
