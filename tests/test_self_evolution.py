@@ -133,7 +133,7 @@ class SelfEvolutionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 record_learning(
                     store,
-                    problem_code="unknown_problem",
+                    problem_code="not_a_real_problem_code",
                     title="未知",
                     summary="不应该被吞掉",
                 )

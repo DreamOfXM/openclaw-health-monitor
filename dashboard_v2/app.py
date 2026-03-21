@@ -6,6 +6,7 @@ import time
 import threading
 from functools import lru_cache
 from datetime import datetime
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
@@ -15,6 +16,7 @@ for path in (BASE_DIR, PROJECT_ROOT):
         sys.path.insert(0, path)
 
 from flask import Flask, render_template, jsonify, Response, stream_with_context
+from heartbeat_guardrail import TaskWatcher
 from routes import (
     health_bp,
     metrics_bp,
@@ -25,6 +27,7 @@ from routes import (
     learnings_bp,
     heartbeat_bp,
 )
+from state_store import MonitorStateStore
 from services.websocket_manager import get_ws_manager
 from services.health_score import calculate_health_score, get_calculator
 
@@ -78,7 +81,13 @@ def create_app():
     @app.route('/heartbeat')
     def heartbeat():
         """心跳监控视图"""
-        return render_template('heartbeat.html')
+        store = MonitorStateStore(Path(PROJECT_ROOT))
+        watcher = TaskWatcher(store)
+        return render_template(
+            'heartbeat.html',
+            initial_heartbeats=watcher.get_recent_heartbeats(10),
+            initial_blocked_tasks=store.list_tasks(statuses=["blocked"], limit=10),
+        )
     
     @app.route('/api/v2/status')
     def api_status():

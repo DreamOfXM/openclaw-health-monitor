@@ -644,12 +644,12 @@ class TaskWatcher:
             "tasks": self.check_all_tasks(),
             "control_plane": self.store.summarize_control_plane(),
             "heartbeats": {
-                "recent": self._get_recent_heartbeats(10),
+                "recent": self.get_recent_heartbeats(10),
             },
         }
-    
-    def _get_recent_heartbeats(self, limit: int = 10) -> list[dict[str, Any]]:
-        """获取最近的心跳"""
+
+    def get_recent_heartbeats(self, limit: int = 10) -> list[dict[str, Any]]:
+        """获取最近的心跳。"""
         with self.store._connection() as conn:
             cursor = conn.execute("""
                 SELECT * FROM heartbeats 

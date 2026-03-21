@@ -280,6 +280,7 @@ def generate_candidate_rule(
 def adopt_rule(
     rule: dict[str, Any],
     base_dir: Path,
+    workspace_dir: Path = None,
     *,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -288,7 +289,8 @@ def adopt_rule(
     
     Args:
         rule: 候选规则
-        base_dir: 基础目录
+        base_dir: 基础目录（用于配置文件）
+        workspace_dir: 工作区目录（用于 AGENTS.md）
         dry_run: 是否只模拟运行
     
     Returns:
@@ -314,13 +316,19 @@ def adopt_rule(
         return result
     
     if rule_type == "constraint":
-        # 写入 AGENTS.md
-        agents_md_path = base_dir / "AGENTS.md"
+        # 写入 AGENTS.md（使用 workspace_dir）
+        target_dir = workspace_dir if workspace_dir else base_dir
+        agents_md_path = target_dir / "AGENTS.md"
         if agents_md_path.exists():
             existing = agents_md_path.read_text(encoding="utf-8")
-            # 检查是否已存在
-            if rule.get("rule_id") in existing:
+            # 检查是否已存在相同问题类型的约束
+            # 从 rule_id 中提取问题类型（如 GUARDIAN_CRASH, MISSING_PIPELINE_RECEIPT）
+            rule_id = rule.get("rule_id", "")
+            problem_type = rule_id.split("-")[1] if "-" in rule_id else rule_id
+            # 检查是否已有相同问题类型的 AUTO- 约束
+            if f"### AUTO-{problem_type}" in existing or f"AUTO-{problem_type}" in existing:
                 result["status"] = "already_exists"
+                result["reason"] = f"约束类型 {problem_type} 已存在，跳过重复生成"
                 return result
             # 追加到文件末尾
             new_content = existing.rstrip() + "\n\n" + rule_content + "\n"
@@ -455,6 +463,7 @@ def scan_system_health(base_dir: Path) -> list[dict[str, Any]]:
 def run_evolution_cycle(
     store,
     base_dir: Path,
+    workspace_dir: Path = None,
     *,
     recurrence_threshold: int = 5,
     dry_run: bool = False,
@@ -472,6 +481,7 @@ def run_evolution_cycle(
     Args:
         store: 状态存储
         base_dir: 基础目录
+        workspace_dir: 工作区目录（用于 AGENTS.md）
         recurrence_threshold: 重复次数阈值
         dry_run: 是否只模拟运行
     
@@ -499,7 +509,7 @@ def run_evolution_cycle(
         result["scanned_count"] += 1
         if rule:
             result["rules_generated"] += 1
-            adopt_result = adopt_rule(rule, base_dir, dry_run=dry_run)
+            adopt_result = adopt_rule(rule, base_dir, workspace_dir, dry_run=dry_run)
             if adopt_result.get("status") in ["adopted", "dry_run", "already_exists"]:
                 result["rules_adopted"] += 1
                 if not dry_run:
@@ -558,7 +568,7 @@ def run_evolution_cycle(
         result["rules_generated"] += 1
         
         # 3. 采纳规则
-        adopt_result = adopt_rule(rule, base_dir, dry_run=dry_run)
+        adopt_result = adopt_rule(rule, base_dir, workspace_dir, dry_run=dry_run)
         
         if adopt_result.get("status") in ["adopted", "dry_run"]:
             result["rules_adopted"] += 1
@@ -653,6 +663,7 @@ if __name__ == "__main__":
         # 运行进化周期
         result = run_evolution_cycle(
             store,
+            base_dir,
             workspace_dir,
             recurrence_threshold=args.recurrence_threshold,
             dry_run=args.dry_run,

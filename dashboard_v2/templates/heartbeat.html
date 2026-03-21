@@ -341,14 +341,29 @@
                 </table>
             </div>
 
-            <!-- 超时任务 -->
+            <!-- 阻塞任务 -->
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">⚠️ 超时任务</span>
-                    <span id="timeout-count" class="status-badge status-degraded">0</span>
+                    <span class="card-title">⚠️ 阻塞任务</span>
+                    <span id="blocked-count" class="status-badge status-degraded">0</span>
                 </div>
-                <div id="timeout-task-list" class="task-list">
-                    <div class="empty-state">暂无超时任务</div>
+                <div id="blocked-task-list" class="task-list">
+                    {% if initial_blocked_tasks %}
+                        {% for task in initial_blocked_tasks %}
+                        <div class="task-item">
+                            <div class="task-info">
+                                <div class="task-id">任务：{{ task.task_id or '--' }}</div>
+                                <div class="task-phase">状态：{{ task.status or '--' }}</div>
+                                <div class="task-phase">原因：{{ task.blocked_reason or '--' }}</div>
+                            </div>
+                            <div class="task-progress">
+                                <span>{{ task.updated_at or '--' }}</span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                    <div class="empty-state">暂无阻塞任务</div>
+                    {% endif %}
                 </div>
             </div>
 
@@ -358,7 +373,26 @@
                     <span class="card-title">💓 最近任务监督心跳</span>
                 </div>
                 <div id="heartbeat-list" class="task-list">
+                    {% if initial_heartbeats %}
+                        {% for h in initial_heartbeats %}
+                        <div class="task-item">
+                            <div class="task-info">
+                                <div class="task-id">任务：{{ h.task_id or '--' }}</div>
+                                <div class="task-phase">阶段：{{ h.phase or '--' }}</div>
+                                <div class="task-phase">会话：{{ h.session_key or '--' }}</div>
+                                <div class="task-phase">最后心跳：{{ h.timestamp_ms or '--' }}</div>
+                            </div>
+                            <div class="task-progress">
+                                <span>{{ h.progress or 0 }}%</span>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: {{ h.progress or 0 }}%"></div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
                     <div class="empty-state">暂无任务监督心跳记录。这里展示的是健康守护助手 TaskWatcher 的任务心跳，不是 OpenClaw 自身的运行时 heartbeat。</div>
+                    {% endif %}
                 </div>
             </div>
 
@@ -437,8 +471,8 @@
                     badge.textContent = result.health_status === 'healthy' ? '健康' : '降级';
                     badge.className = 'status-badge ' + (result.health_status === 'healthy' ? 'status-healthy' : 'status-degraded');
                     
-                    // 更新超时任务列表
-                    updateTimeoutTasks(result.timeout_tasks || []);
+                    // 更新阻塞任务列表
+                    updateBlockedTasks(result.blocked_tasks || []);
                 }
             } catch (error) {
                 console.error('加载状态失败:', error);
@@ -477,6 +511,38 @@
         }
         
         // 加载最近任务监督心跳
+        function formatHeartbeatPhase(phase) {
+            const mapping = {
+                planning: '规划阶段',
+                implementation: '实现阶段',
+                testing: '测试阶段',
+                verification: '校验阶段',
+                calculation: '计算阶段',
+                risk_assessment: '风险评估',
+                idle: '空闲',
+            };
+            return mapping[phase] || phase || '--';
+        }
+
+        function formatHeartbeatSession(sessionKey) {
+            const raw = String(sessionKey || '--');
+            const parts = raw.split(':');
+            if (parts.length < 2) return raw;
+            const agent = parts[1] || 'unknown';
+            const channel = parts[2] || 'session';
+            const channelLabel = channel === 'feishu'
+                ? '飞书直连'
+                : channel === 'main'
+                    ? '主会话'
+                    : channel;
+            return `${agent} / ${channelLabel}`;
+        }
+
+        function formatHeartbeatTime(timestampMs) {
+            if (!timestampMs) return '--';
+            return UI.formatDateTime(new Date(timestampMs).toISOString());
+        }
+
         async function loadHeartbeats() {
             try {
                 const response = await fetch('/api/v2/heartbeat/heartbeats?limit=10');
@@ -492,8 +558,10 @@
                         container.innerHTML = heartbeats.map(h => `
                             <div class="task-item">
                                 <div class="task-info">
-                                    <div class="task-id">${h.task_id || '--'}</div>
-                                    <div class="task-phase">${h.phase || '--'} | ${h.session_key || '--'}</div>
+                                    <div class="task-id">任务：${h.task_id || '--'}</div>
+                                    <div class="task-phase">阶段：${formatHeartbeatPhase(h.phase)}</div>
+                                    <div class="task-phase">会话：${formatHeartbeatSession(h.session_key)}</div>
+                                    <div class="task-phase">最后心跳：${formatHeartbeatTime(h.timestamp_ms)}</div>
                                 </div>
                                 <div class="task-progress">
                                     <span>${h.progress || 0}%</span>
@@ -619,22 +687,22 @@
             }
         }
         
-        // 更新超时任务列表
-        function updateTimeoutTasks(tasks) {
-            const container = document.getElementById('timeout-task-list');
-            const countBadge = document.getElementById('timeout-count');
+        // 更新阻塞任务列表
+        function updateBlockedTasks(tasks) {
+            const container = document.getElementById('blocked-task-list');
+            const countBadge = document.getElementById('blocked-count');
             
             countBadge.textContent = tasks.length;
             countBadge.className = 'status-badge ' + (tasks.length > 0 ? 'status-degraded' : 'status-healthy');
             
             if (tasks.length === 0) {
-                container.innerHTML = '<div class="empty-state">暂无超时任务</div>';
+                container.innerHTML = '<div class="empty-state">暂无阻塞任务</div>';
             } else {
                 container.innerHTML = tasks.map(t => `
                     <div class="task-item">
                         <div class="task-info">
-                            <div class="task-id">${t.task_id}</div>
-                            <div class="task-phase">${t.phase} | 超时 ${t.timeout_seconds}秒</div>
+                            <div class="task-id">${t.task_id || '--'}</div>
+                            <div class="task-phase">状态：${t.status || '--'} | 原因：${t.blocked_reason || '--'}</div>
                         </div>
                         <button class="btn-recover" onclick="recoverTask('${t.task_id}')">恢复</button>
                     </div>

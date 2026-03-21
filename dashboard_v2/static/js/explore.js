@@ -364,8 +364,11 @@ function updateAgentsGrid(agents) {
         const taskTitle = agent.task_title || agent.task_hint || '';
         const detail = agent.detail || '';
         const selected = agent.id === selectedAgentId;
-        const activityClass = agent.is_processing ? 'processing' : '';
-        const statusTone = agent.is_processing ? 'success' : (agent.status_code === 'blocked' ? 'danger' : 'secondary');
+        const activityClass = agent.is_active ? 'processing' : '';
+        const statusTone = agent.is_active ? 'success' : (agent.status_code === 'blocked' ? 'danger' : 'secondary');
+        const statusText = agent.is_active
+            ? '当前活跃'
+            : (agent.is_processing ? '历史处理中' : '非处理中');
         
         return `
             <div class="agent-card ${activityClass} ${selected ? 'selected' : ''}" data-agent-id="${agent.id}">
@@ -375,7 +378,7 @@ function updateAgentsGrid(agents) {
                         <span class="agent-name">${agent.name || agent.id}</span>
                     </div>
                     <span class="agent-status badge badge-${statusTone}">
-                        ${agent.is_processing ? '处理中' : '非处理中'}
+                        ${statusText}
                     </span>
                 </div>
                 <div class="agent-body">
@@ -430,9 +433,9 @@ function renderSelectedAgentDetail(data) {
         <div class="agent-detail-header">
             <div>
                 <div class="agent-detail-title">${agent.emoji || '🤖'} ${agent.name || agent.id}</div>
-                <div class="agent-detail-subtitle">${agent.is_processing ? '当前正在处理' : '当前未在处理'} · ${agent.last_activity_label || '--'}</div>
+                <div class="agent-detail-subtitle">${agent.is_active ? '当前正在处理' : (agent.is_processing ? '当前未活跃（最近状态为处理中）' : '当前未在处理')} · ${agent.last_activity_label || '--'}</div>
             </div>
-            <div class="agent-detail-badge ${agent.is_processing ? 'is-active' : ''}">
+            <div class="agent-detail-badge ${agent.is_active ? 'is-active' : ''}">
                 ${agent.activity_source === 'gateway_log' ? '日志驱动' : '会话驱动'}
             </div>
         </div>

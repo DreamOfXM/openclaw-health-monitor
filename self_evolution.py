@@ -388,6 +388,41 @@ PROBLEM_RESOLUTIONS = {
         "resolution": "检查是否已有回执",
         "auto_close_condition": "has_pipeline_receipt == True",
     },
+    "task_execution_stalled": {
+        "description": "任务执行长时间无进展",
+        "resolution": "检查任务是否重新推进、补发进度或显式阻塞说明",
+        "auto_close_condition": "progress_resumed == True or control_state == 'completed_verified'",
+    },
+    "gateway_unhealthy": {
+        "description": "OpenClaw 网关或通道运行异常",
+        "resolution": "检查 gateway 健康状态与通道恢复情况",
+        "auto_close_condition": "gateway_healthy == True",
+    },
+    "model_timeout": {
+        "description": "模型请求超时",
+        "resolution": "检查 fallback 是否成功或后续请求是否恢复",
+        "auto_close_condition": "recent_model_timeout == False",
+    },
+    "failover_exhausted": {
+        "description": "模型 failover 已耗尽",
+        "resolution": "检查是否已经恢复正常回复或给出失败通知",
+        "auto_close_condition": "fallback_path_restored == True",
+    },
+    "channel_inflight_stuck": {
+        "description": "消息通道 in-flight 锁卡住或重投异常",
+        "resolution": "检查 in-flight 是否释放且重投可补偿",
+        "auto_close_condition": "channel_inflight_ok == True",
+    },
+    "purity_gate_failed": {
+        "description": "主闭环纯净度门禁失败",
+        "resolution": "检查 shadow-state 与因果链问题是否已经消除",
+        "auto_close_condition": "purity_gate_ok == True",
+    },
+    "run_tracking_warning": {
+        "description": "运行状态追踪异常",
+        "resolution": "检查 run pointer、step 状态与控制链是否恢复一致",
+        "auto_close_condition": "run_tracking_ok == True",
+    },
     "watchdog_signal": {
         "description": "看门狗发现重复异常",
         "resolution": "检查异常是否已解决，如果已解决则关闭",

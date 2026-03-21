@@ -2,9 +2,13 @@
 
 ## 今天发现的问题
 1. 缺少回执
+2. runtime_observation:unknown_problem
+3. runtime_observation:unknown_problem
+4. runtime_observation:unknown_problem
+5. runtime_observation:task_execution_stalled
 
 ## 今日汇总
-- 新记录问题: 1
+- 新记录问题: 11
 - 重新打开: 0
 - 复发事件: 0
 - 新采纳规则: 0

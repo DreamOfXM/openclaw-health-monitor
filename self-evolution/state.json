@@ -1,146 +1,73 @@
 {
-  "last_reflection_at": 1773931005,
+  "last_reflection_at": 1774085493,
   "pending_learnings": [
     "f3862fc8181275ffce0c95d8",
-    "8b715ca8b6ccb37a038b46b5",
-    "92f5f4d90758d69c5ed44aac",
-    "3f01e92713fa94c70cf4407c",
-    "e9be8b2be2e5a30a4114f5b7",
-    "sev-fb8c0e00373f17c2",
-    "b84725dde43b0e1f2a7cb078",
-    "a74969be17513ee24146384e"
+    "guardian-crash-healthcheck",
+    "042a48d6e0c9c760d6303512",
+    "sev-fb8c0e00373f17c2"
   ],
   "verified_learnings": [
-    "sev-8abcb484e60dba6d",
-    "sev-6ce0ee37368ddb0a",
-    "9092a9c5484d6b0f12813086",
-    "12d20e4d86cc76c8f6356a49",
-    "sev-e4f883a10d437083",
-    "sev-d749b5bf01932a88",
-    "sev-048c9631bda39d1f"
+    "3f01e92713fa94c70cf4407c"
   ],
   "recurrent_issues": [
     "missing_pipeline_receipt",
-    "missing_pipeline_receipt",
-    "missing_pipeline_receipt",
     "task_closure_missing",
-    "task_closure_missing",
-    "task_closure_missing",
-    "unknown_problem",
-    "unknown_problem",
-    "task_closure_missing",
-    "task_closure_missing",
-    "followup_pending_without_main_recovery",
-    "missing_pipeline_receipt"
+    "model_timeout",
+    "task_closure_missing"
   ],
   "lifecycle_view": {
     "pending": [
       "f3862fc8181275ffce0c95d8",
-      "8b715ca8b6ccb37a038b46b5",
-      "92f5f4d90758d69c5ed44aac",
-      "3f01e92713fa94c70cf4407c",
-      "e9be8b2be2e5a30a4114f5b7",
-      "sev-fb8c0e00373f17c2",
-      "b84725dde43b0e1f2a7cb078",
-      "a74969be17513ee24146384e"
+      "guardian-crash-healthcheck",
+      "042a48d6e0c9c760d6303512",
+      "sev-fb8c0e00373f17c2"
     ],
-    "adopted": [
-      "8b715ca8b6ccb37a038b46b5"
-    ],
+    "adopted": [],
     "verified": [
-      "sev-8abcb484e60dba6d",
-      "sev-6ce0ee37368ddb0a",
-      "9092a9c5484d6b0f12813086",
-      "12d20e4d86cc76c8f6356a49",
-      "sev-e4f883a10d437083",
-      "sev-d749b5bf01932a88",
-      "sev-048c9631bda39d1f"
+      "3f01e92713fa94c70cf4407c"
     ],
     "closed": [],
     "reopened": [
-      "f3862fc8181275ffce0c95d8",
-      "3f01e92713fa94c70cf4407c",
-      "b84725dde43b0e1f2a7cb078"
+      "f3862fc8181275ffce0c95d8"
     ],
     "recurrence": [
       {
         "learning_key": "f3862fc8181275ffce0c95d8",
         "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 33861
-      },
-      {
-        "learning_key": "8b715ca8b6ccb37a038b46b5",
-        "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 582
-      },
-      {
-        "learning_key": "92f5f4d90758d69c5ed44aac",
-        "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 125
+        "recurrence_count": 30921
       },
       {
         "learning_key": "3f01e92713fa94c70cf4407c",
         "problem_code": "task_closure_missing",
-        "recurrence_count": 1516
+        "recurrence_count": 56
       },
       {
-        "learning_key": "sev-8abcb484e60dba6d",
+        "learning_key": "042a48d6e0c9c760d6303512",
+        "problem_code": "model_timeout",
+        "recurrence_count": 41
+      },
+      {
+        "learning_key": "sev-fb8c0e00373f17c2",
         "problem_code": "task_closure_missing",
-        "recurrence_count": 16
-      },
-      {
-        "learning_key": "sev-6ce0ee37368ddb0a",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 26
-      },
-      {
-        "learning_key": "9092a9c5484d6b0f12813086",
-        "problem_code": "unknown_problem",
-        "recurrence_count": 35
-      },
-      {
-        "learning_key": "12d20e4d86cc76c8f6356a49",
-        "problem_code": "unknown_problem",
-        "recurrence_count": 1206
-      },
-      {
-        "learning_key": "sev-e4f883a10d437083",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 665
-      },
-      {
-        "learning_key": "sev-d749b5bf01932a88",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 616
-      },
-      {
-        "learning_key": "sev-048c9631bda39d1f",
-        "problem_code": "followup_pending_without_main_recovery",
-        "recurrence_count": 723
-      },
-      {
-        "learning_key": "b84725dde43b0e1f2a7cb078",
-        "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 1
+        "recurrence_count": 3
       }
     ]
   },
   "daily_report": {
-    "date": "2026-03-19",
-    "generated_at": 1773932483,
+    "date": "2026-03-21",
+    "generated_at": 1774086765,
     "issues_found": 0,
     "issues_reopened": 1,
-    "recurrence_events": 999,
+    "recurrence_events": 998,
     "rules_added": 0,
     "candidate_rules": 0,
-    "issues_fixed": 0,
+    "issues_fixed": 1,
     "closed": 0,
-    "pending_verification": 4,
+    "pending_verification": 1,
     "recurrent_issues": {
-      "missing_pipeline_receipt": 1,
-      "task_closure_missing": 616,
-      "unknown_problem": 1206,
-      "followup_pending_without_main_recovery": 723
+      "missing_pipeline_receipt": 30921,
+      "task_closure_missing": 3,
+      "model_timeout": 41
     },
     "top_learnings": [
       {
@@ -148,85 +75,50 @@
         "title": "control_observation:missing_pipeline_receipt",
         "state": "reopened",
         "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 33861
+        "recurrence_count": 30921
       },
       {
-        "learning_key": "8b715ca8b6ccb37a038b46b5",
-        "title": "control_observation:missing_pipeline_receipt",
-        "state": "adopted",
-        "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 582
-      },
-      {
-        "learning_key": "92f5f4d90758d69c5ed44aac",
-        "title": "control_observation:missing_pipeline_receipt",
+        "learning_key": "guardian-crash-healthcheck",
+        "title": "guardian_crash",
         "state": "recorded",
-        "problem_code": "missing_pipeline_receipt",
-        "recurrence_count": 125
+        "problem_code": "guardian_crash",
+        "recurrence_count": 0
       },
       {
         "learning_key": "3f01e92713fa94c70cf4407c",
         "title": "control_observation:task_closure_missing",
-        "state": "reopened",
+        "state": "verified",
         "problem_code": "task_closure_missing",
-        "recurrence_count": 1516
+        "recurrence_count": 56
       },
       {
-        "learning_key": "e9be8b2be2e5a30a4114f5b7",
-        "title": "control_observation:task_closure_missing",
+        "learning_key": "042a48d6e0c9c760d6303512",
+        "title": "runtime_observation:model_timeout",
         "state": "recorded",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 0
+        "problem_code": "model_timeout",
+        "recurrence_count": 41
       },
       {
         "learning_key": "sev-fb8c0e00373f17c2",
         "title": "watchdog_observation:task_closure_missing",
         "state": "recorded",
         "problem_code": "task_closure_missing",
-        "recurrence_count": 0
-      },
-      {
-        "learning_key": "sev-8abcb484e60dba6d",
-        "title": "看门狗发现重复异常",
-        "state": "verified",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 16
-      },
-      {
-        "learning_key": "sev-6ce0ee37368ddb0a",
-        "title": "看门狗发现重复异常",
-        "state": "verified",
-        "problem_code": "task_closure_missing",
-        "recurrence_count": 26
-      },
-      {
-        "learning_key": "9092a9c5484d6b0f12813086",
-        "title": "任务因缺少结构化回执而阻塞",
-        "state": "verified",
-        "problem_code": "unknown_problem",
-        "recurrence_count": 35
-      },
-      {
-        "learning_key": "12d20e4d86cc76c8f6356a49",
-        "title": "任务因缺少结构化回执而阻塞",
-        "state": "verified",
-        "problem_code": "unknown_problem",
-        "recurrence_count": 1206
+        "recurrence_count": 3
       }
     ]
   },
   "summary": {
-    "recorded": 4,
+    "recorded": 3,
     "candidate_rule": 0,
-    "adopted": 1,
-    "verified": 7,
+    "adopted": 0,
+    "verified": 1,
     "closed": 0,
-    "reopened": 3,
-    "pending": 8,
-    "reviewed": 7,
+    "reopened": 1,
+    "pending": 4,
+    "reviewed": 1,
     "promoted": 0,
-    "pending_total": 8,
-    "total": 15
+    "pending_total": 4,
+    "total": 5
   },
-  "generated_at": 1773932483
+  "generated_at": 1774086765
 }

@@ -155,6 +155,7 @@ SELF_EVOLUTION_PROBLEM_CODES = {
     "missing_pipeline_receipt",
     "wrong_task_binding",
     "no_reply_after_commit",
+    "task_execution_stalled",
     "delivery_failed_without_notice",
     "late_result_not_adopted",
     "followup_misbound",
@@ -166,6 +167,12 @@ SELF_EVOLUTION_PROBLEM_CODES = {
     "task_blocked_user_visible",
     "task_closure_missing",
     "guardian_crash",
+    "gateway_unhealthy",
+    "model_timeout",
+    "failover_exhausted",
+    "channel_inflight_stuck",
+    "purity_gate_failed",
+    "run_tracking_warning",
     "tool_interrupted_no_reply",
     "unknown_problem",
 }
@@ -174,6 +181,13 @@ SELF_EVOLUTION_PROBLEM_CODE_ALIASES = {
     "watchdog_signal": "task_closure_missing",
     "binding_mismatch": "wrong_task_binding",
     "heartbeat_missing": "heartbeat_missing_soft",
+    "dispatch_stuck": "task_execution_stalled",
+    "stage_stuck": "task_execution_stalled",
+    "stalled_reply": "task_execution_stalled",
+    "gateway_ws_closed": "gateway_unhealthy",
+    "main_closure_purity_gate_failed": "purity_gate_failed",
+    "llm_request_timed_out": "model_timeout",
+    "inflight_skipped": "channel_inflight_stuck",
 }
 
 DEFAULT_DURATION_PROFILES = {

@@ -21,6 +21,7 @@
 - restart-runtime-status.json: 最近重启链路摘要与最后成功/失败结果
 - restart-events.json: 最近重启事件时间线
 - watchdog-recovery-status.json: watchdog 异常识别、分型、调度统计
+- watchdog-recovery-incidents.json: watchdog 最小 incident 输出与冻结证据
 - watchdog-recovery-hints.json: watchdog 最近生成/派发的结构化提示
 - openclaw-version.json: 当前运行代码版本、commit、分支与 upstream 偏移
 - openclaw-recovery-profile.json: 当前版本 / known good / 回退提示

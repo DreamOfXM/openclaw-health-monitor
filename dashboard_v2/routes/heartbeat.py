@@ -25,7 +25,7 @@ def get_watcher():
     """获取 TaskWatcher 单例"""
     global _store, _watcher
     if _store is None:
-        _store = MonitorStateStore(Path(__file__).parent.parent.parent / "data")
+        _store = MonitorStateStore(Path(__file__).parent.parent.parent)
     if _watcher is None:
         _watcher = TaskWatcher(_store)
     return _watcher
@@ -171,7 +171,7 @@ def get_heartbeats():
     try:
         limit = request.args.get('limit', 20, type=int)
         watcher = get_watcher()
-        heartbeats = watcher.heartbeat_monitor._get_recent_heartbeats(limit)
+        heartbeats = watcher.get_recent_heartbeats(limit)
         
         return jsonify({
             'success': True,
