@@ -589,6 +589,17 @@ class RecoveryWatchdog:
         )
         return decision
 
+    def _resolve_target_session_key(self, item: dict[str, Any], target_agent: str) -> str:
+        session_key = str(item.get("session_key") or "").strip()
+        if target_agent == "main" and session_key:
+            return session_key
+        if session_key:
+            parts = session_key.split(":")
+            if len(parts) >= 2:
+                parts[1] = target_agent
+                return ":".join(parts)
+        return f"agent:{target_agent}:main"
+
     def _dispatch_candidate(
         self, spec: dict[str, Any], item: dict[str, Any]
     ) -> dict[str, Any]:
@@ -638,7 +649,7 @@ class RecoveryWatchdog:
             return {"status": "watchdog_exhausted", "attempts": attempts}
         if not bool(self.config.get("ENABLE_RECOVERY_WATCHDOG_DISPATCH", True)):
             return {"status": "dry_run", "attempts": attempts}
-        target_session_key = f"agent:{target_agent}:main"
+        target_session_key = self._resolve_target_session_key(item, target_agent)
         message = self._build_hint_message(item, target_session_key)
         code_root_value = (
             spec.get("code") or self.config.get("OPENCLAW_CODE") or str(self.base_dir)
@@ -761,6 +772,13 @@ class RecoveryWatchdog:
             "command": cmd,
         }
 
+    @staticmethod
+    def _infer_channel_from_session_key(session_key: str) -> str:
+        parts = str(session_key or "").split(":")
+        if len(parts) >= 4 and parts[2]:
+            return parts[2]
+        return "feishu"
+
     @classmethod
     def _dispatch_via_openclaw(
         cls, code_root: Path, target_session_key: str, message: str
@@ -768,6 +786,7 @@ class RecoveryWatchdog:
         lookup = cls._lookup_session_id_via_openclaw(code_root, target_session_key)
         if not lookup.get("ok"):
             return {"ok": False, "phase": "lookup_session", **lookup}
+        channel = cls._infer_channel_from_session_key(target_session_key)
         cmd = [
             "node",
             "openclaw.mjs",
@@ -775,7 +794,7 @@ class RecoveryWatchdog:
             "--session-id",
             str(lookup.get("session_id") or ""),
             "--channel",
-            "feishu",
+            channel,
             "--message",
             message,
             "--timeout",

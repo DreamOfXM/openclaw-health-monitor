@@ -75,7 +75,7 @@ class RecoveryWatchdogTests(unittest.TestCase):
             )
 
             self.assertEqual(result["dispatched_count"], 1)
-            self.assertEqual(dispatched[0][0], "agent:main:main")
+            self.assertEqual(dispatched[0][0], "agent:main:feishu:direct:user")
             self.assertIn("WATCHDOG_RECOVERY_HINT", dispatched[0][1])
             self.assertEqual(
                 result["items"][0]["incident_type"], "completed_not_delivered"
@@ -597,6 +597,16 @@ class RecoveryWatchdogTests(unittest.TestCase):
             self.assertEqual(incident["status"], "open")
             self.assertIn("runtime_health_snapshot", incident["evidence"])
 
+    def test_resolve_target_session_key_prefers_original_main_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            watchdog = RecoveryWatchdog(base_dir=base, store=store, config={})
+            target = watchdog._resolve_target_session_key(
+                {"session_key": "agent:main:dingtalk:direct:user-1"}, "main"
+            )
+            self.assertEqual(target, "agent:main:dingtalk:direct:user-1")
+
     def test_dispatch_via_openclaw_uses_session_id_and_preserves_watchdog_hint_payload(
         self,
     ):
@@ -659,6 +669,8 @@ class RecoveryWatchdogTests(unittest.TestCase):
             calls[1][0:5],
             ["node", "openclaw.mjs", "agent", "--session-id", "session-main-123"],
         )
+        self.assertIn("--channel", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--channel") + 1], "feishu")
         self.assertIn("--message", calls[1])
         sent_message = calls[1][calls[1].index("--message") + 1]
         self.assertIn("WATCHDOG_RECOVERY_HINT", sent_message)
