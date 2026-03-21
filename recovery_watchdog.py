@@ -691,10 +691,16 @@ class RecoveryWatchdog:
             "hint_message": item.get("hint_message"),
             "evidence": item.get("evidence") or {},
         }
+        incident_type = str(item.get("incident_type") or item.get("anomaly_type") or "unknown")
+        blocking_clause = (
+            "If incident_type == blocked_not_delivered, you must produce a user-visible blocked explanation in this same recovery path unless delivery is already confirmed. "
+            "Do not stop at internal acknowledgement, and do not leave the task in blocked-but-silent state. "
+        )
         return (
             "Internal watchdog recovery hint. This is a control-plane pushback, not a user request. "
             "You must re-evaluate the active task and make exactly one adjudication: accept_repair, observe_only, dismiss, or need_more_evidence. "
             "If you accept_repair, do the smallest safe action: retry delivery, resume execution, or send a user-visible blocked explanation. "
+            + blocking_clause +
             "Do not leave this hint as pending bookkeeping only, and do not claim closure until a real reply reached the user. "
             "If the task is already truly closed and delivered, reply ONLY with NO_REPLY.\n\n"
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
