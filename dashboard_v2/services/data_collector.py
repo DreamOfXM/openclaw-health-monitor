@@ -2,6 +2,7 @@
 数据收集服务
 为 dashboard_v2 统一适配后端兼容层的真实数据。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -200,7 +201,12 @@ def _classify_log_signal(detail: str) -> tuple[str, str]:
         return "idle", "没有新的运行信号"
     if "blocked" in text or "failed" in text:
         return "blocked", "最近运行信号显示代理被阻塞"
-    if "dispatching to agent" in text or "spawn" in text or "execut" in text or "toolcall" in text:
+    if (
+        "dispatching to agent" in text
+        or "spawn" in text
+        or "execut" in text
+        or "toolcall" in text
+    ):
         return "processing", "最近日志显示代理正在执行或派发任务"
     if "dispatch complete" in text or "announce_skip" in text:
         return "waiting_downstream", "最近日志显示任务已继续下发，正在等待后续结果"
@@ -256,7 +262,9 @@ class DataCollector:
     def _shared_state(self, name: str, default: Any) -> Any:
         return _read_json_file(SHARED_STATE_DIR / name, default)
 
-    def _shared_state_fresh(self, name: str, default: Any, *, max_age_seconds: int) -> Any:
+    def _shared_state_fresh(
+        self, name: str, default: Any, *, max_age_seconds: int
+    ) -> Any:
         payload = self._shared_state(name, default)
         if not isinstance(payload, dict):
             return default
@@ -299,8 +307,14 @@ class DataCollector:
         task_registry = self._shared_state("task-registry-snapshot.json", {})
         learning_runtime = self._shared_state("learning-runtime-status.json", {})
         control_plane = self._shared_state("control-plane-summary.json", {})
-        main_closure_purity_gate = self._shared_state("main-closure-purity-gate.json", {})
-        task_summary = (task_registry or {}).get("summary") if isinstance(task_registry, dict) else {}
+        main_closure_purity_gate = self._shared_state(
+            "main-closure-purity-gate.json", {}
+        )
+        task_summary = (
+            (task_registry or {}).get("summary")
+            if isinstance(task_registry, dict)
+            else {}
+        )
         learning_freshness = 0
         if isinstance(learning_runtime, dict):
             learning_freshness = int(
@@ -318,7 +332,9 @@ class DataCollector:
                 error_categories.append("protocol_violations")
             if int(tasks.get("blocked") or 0) > 0:
                 error_categories.append("blocked_tasks")
-        if isinstance(main_closure_purity_gate, dict) and not bool(main_closure_purity_gate.get("ok", True)):
+        if isinstance(main_closure_purity_gate, dict) and not bool(
+            main_closure_purity_gate.get("ok", True)
+        ):
             error_categories.append("main_closure_purity_gate_failed")
         return {
             "environment": {
@@ -349,8 +365,14 @@ class DataCollector:
         memory_percent = 0.0
         memory_used_gb = 0.0
         memory_total_gb = 0.0
-        runtime_health = self._shared_state_fresh("runtime-health.json", {}, max_age_seconds=20)
-        runtime_metrics = (runtime_health or {}).get("metrics") if isinstance(runtime_health, dict) else {}
+        runtime_health = self._shared_state_fresh(
+            "runtime-health.json", {}, max_age_seconds=20
+        )
+        runtime_metrics = (
+            (runtime_health or {}).get("metrics")
+            if isinstance(runtime_health, dict)
+            else {}
+        )
         if isinstance(runtime_metrics, dict) and runtime_metrics:
             cpu_percent = _coerce_number(runtime_metrics.get("cpu"))
             memory_used_gb = _coerce_number(runtime_metrics.get("mem_used"))
@@ -368,8 +390,8 @@ class DataCollector:
                 cpu_percent = psutil.cpu_percent(interval=None)
                 memory = psutil.virtual_memory()
                 memory_percent = memory.percent
-                memory_used_gb = memory.used / (1024 ** 3)
-                memory_total_gb = memory.total / (1024 ** 3)
+                memory_used_gb = memory.used / (1024**3)
+                memory_total_gb = memory.total / (1024**3)
             except Exception:
                 try:
                     legacy_metrics = _legacy_dashboard().get_system_metrics()
@@ -382,7 +404,11 @@ class DataCollector:
                     pass
 
         gateway_pid = None
-        gateway_healthy = bool(runtime_health.get("gateway_healthy")) if isinstance(runtime_health, dict) else False
+        gateway_healthy = (
+            bool(runtime_health.get("gateway_healthy"))
+            if isinstance(runtime_health, dict)
+            else False
+        )
         sessions = 0
         guardian_pid = None
         try:
@@ -394,10 +420,18 @@ class DataCollector:
             gateway_pid = (gateway or {}).get("pid")
             guardian_pid = (guardian or {}).get("pid")
             if not gateway_healthy:
-                gateway_healthy = bool(legacy.check_gateway_health_for_env(selected_env))
+                gateway_healthy = bool(
+                    legacy.check_gateway_health_for_env(selected_env)
+                )
             task_registry = self._shared_state("task-registry-snapshot.json", {})
-            summary = (task_registry or {}).get("summary") if isinstance(task_registry, dict) else {}
-            sessions = int(summary.get("running", 0) or 0) + int(summary.get("background", 0) or 0)
+            summary = (
+                (task_registry or {}).get("summary")
+                if isinstance(task_registry, dict)
+                else {}
+            )
+            sessions = int(summary.get("running", 0) or 0) + int(
+                summary.get("background", 0) or 0
+            )
         except Exception:
             pass
 
@@ -456,17 +490,33 @@ class DataCollector:
             active_env = context["active_env"]
             selected_env = context["selected_env"]
             runtime_binding = context.get("binding") or {}
-            runtime_health = self._shared_state_fresh("runtime-health.json", {}, max_age_seconds=20)
+            runtime_health = self._shared_state_fresh(
+                "runtime-health.json", {}, max_age_seconds=20
+            )
             bootstrap_status = self._shared_state("bootstrap-status.json", {})
             watcher_summary = self._shared_state("watcher-summary.json", {})
-            restart_runtime_status = self._shared_state("restart-runtime-status.json", {})
+            restart_runtime_status = self._shared_state(
+                "restart-runtime-status.json", {}
+            )
             openclaw_version = self._shared_state("openclaw-version.json", {})
             recovery_profile = self._shared_state("openclaw-recovery-profile.json", {})
-            watchdog_recovery_status = self._shared_state("watchdog-recovery-status.json", {})
-            watchdog_recovery_hints = self._shared_state("watchdog-recovery-hints.json", [])
+            watchdog_recovery_status = self._shared_state(
+                "watchdog-recovery-status.json", {}
+            )
+            watchdog_recovery_incidents = self._shared_state(
+                "watchdog-recovery-incidents.json", []
+            )
+            watchdog_recovery_hints = self._shared_state(
+                "watchdog-recovery-hints.json", []
+            )
 
-            if not isinstance(bootstrap_status, dict) or str(bootstrap_status.get("env_id") or active_env) != active_env:
-                bootstrap_status = _runtime_value(legacy, f"bootstrap_status:{active_env}", {}) or {}
+            if (
+                not isinstance(bootstrap_status, dict)
+                or str(bootstrap_status.get("env_id") or active_env) != active_env
+            ):
+                bootstrap_status = (
+                    _runtime_value(legacy, f"bootstrap_status:{active_env}", {}) or {}
+                )
 
             context_readiness = {}
             if isinstance(bootstrap_status, dict):
@@ -476,7 +526,9 @@ class DataCollector:
                 if isinstance(baseline, dict):
                     bootstrap_snapshot = baseline.get("bootstrap_status") or {}
                     if isinstance(bootstrap_snapshot, dict):
-                        context_readiness = bootstrap_snapshot.get("context_readiness") or {}
+                        context_readiness = (
+                            bootstrap_snapshot.get("context_readiness") or {}
+                        )
 
             gateway_process = None
             listener_pid = None
@@ -486,8 +538,15 @@ class DataCollector:
             except Exception:
                 gateway_process = None
 
-            runtime_matches = isinstance(runtime_health, dict) and str(runtime_health.get("env_id") or active_env) == active_env
-            running = bool(runtime_health.get("gateway_running")) if runtime_matches else False
+            runtime_matches = (
+                isinstance(runtime_health, dict)
+                and str(runtime_health.get("env_id") or active_env) == active_env
+            )
+            running = (
+                bool(runtime_health.get("gateway_running"))
+                if runtime_matches
+                else False
+            )
             if listener_pid:
                 running = True
 
@@ -497,21 +556,34 @@ class DataCollector:
                 try:
                     healthy = bool(legacy.check_gateway_health_for_env(selected_env))
                 except Exception:
-                    healthy = bool(runtime_health.get("gateway_healthy")) if runtime_matches else False
+                    healthy = (
+                        bool(runtime_health.get("gateway_healthy"))
+                        if runtime_matches
+                        else False
+                    )
 
             try:
                 control_ui_ready = bool(legacy.env_has_control_ui_assets(selected_env))
             except Exception:
                 control_ui_ready = False
 
-            channel_readiness = _runtime_value(legacy, f"channel_readiness:{active_env}", {}) or {}
-            expected_config_path = str(Path(str(selected_env.get("home") or "")) / "openclaw.json")
+            channel_readiness = (
+                _runtime_value(legacy, f"channel_readiness:{active_env}", {}) or {}
+            )
+            expected_config_path = str(
+                Path(str(selected_env.get("home") or "")) / "openclaw.json"
+            )
             if not isinstance(channel_readiness, dict):
                 channel_readiness = {}
-            checked_at = int(channel_readiness.get("checked_at") or 0) if isinstance(channel_readiness, dict) else 0
+            checked_at = (
+                int(channel_readiness.get("checked_at") or 0)
+                if isinstance(channel_readiness, dict)
+                else 0
+            )
             if (
                 not channel_readiness
-                or str(channel_readiness.get("config_path") or "") != expected_config_path
+                or str(channel_readiness.get("config_path") or "")
+                != expected_config_path
                 or checked_at <= 0
                 or (int(time.time()) - checked_at) > 120
             ):
@@ -521,7 +593,8 @@ class DataCollector:
                 {
                     "id": active_env,
                     "name": selected_env.get("name") or "OpenClaw",
-                    "description": selected_env.get("description") or "当前唯一运行环境",
+                    "description": selected_env.get("description")
+                    or "当前唯一运行环境",
                     "active": True,
                     "running": running,
                     "healthy": healthy,
@@ -533,8 +606,12 @@ class DataCollector:
                     "listener_pid": listener_pid,
                     "token_prefix": "",
                     "control_ui_ready": control_ui_ready,
-                    "dashboard_url": legacy.env_dashboard_url(selected_env) if hasattr(legacy, "env_dashboard_url") else "",
-                    "dashboard_open_link": legacy.env_open_link(selected_env) if hasattr(legacy, "env_open_link") and running and control_ui_ready else "",
+                    "dashboard_url": legacy.env_dashboard_url(selected_env)
+                    if hasattr(legacy, "env_dashboard_url")
+                    else "",
+                    "dashboard_open_link": legacy.env_open_link(selected_env)
+                    if hasattr(legacy, "env_open_link") and running and control_ui_ready
+                    else "",
                     "auto_update_enabled": False,
                     "auto_update_expected": False,
                     "auto_update_installed": False,
@@ -573,8 +650,14 @@ class DataCollector:
                 "context_readiness": context_readiness,
                 "config_drift": {
                     "mode": "merge_missing",
-                    "applied": (bootstrap_status.get("config_merge") or {}).get("applied") or [],
-                    "preserved": (bootstrap_status.get("config_merge") or {}).get("preserved") or [],
+                    "applied": (bootstrap_status.get("config_merge") or {}).get(
+                        "applied"
+                    )
+                    or [],
+                    "preserved": (bootstrap_status.get("config_merge") or {}).get(
+                        "preserved"
+                    )
+                    or [],
                     "status": context_readiness.get("status") or "unknown",
                 },
                 "watcher_summary": watcher_summary,
@@ -582,6 +665,7 @@ class DataCollector:
                 "version_info": openclaw_version,
                 "recovery_profile": recovery_profile,
                 "watchdog_recovery_status": watchdog_recovery_status,
+                "watchdog_recovery_incidents": watchdog_recovery_incidents,
                 "watchdog_recovery_hints": watchdog_recovery_hints,
                 "binding_audit": binding_audit,
                 "environment_integrity": environment_integrity,
@@ -597,12 +681,18 @@ class DataCollector:
                 "state_path": None,
                 "bootstrap_status": {},
                 "context_readiness": {"status": "not_ready", "headline": str(exc)},
-                "config_drift": {"mode": "merge_missing", "applied": [], "preserved": [], "status": "error"},
+                "config_drift": {
+                    "mode": "merge_missing",
+                    "applied": [],
+                    "preserved": [],
+                    "status": "error",
+                },
                 "watcher_summary": {},
                 "restart_runtime_status": {},
                 "version_info": {},
                 "recovery_profile": {},
                 "watchdog_recovery_status": {},
+                "watchdog_recovery_incidents": [],
                 "watchdog_recovery_hints": [],
                 "binding_audit": {},
                 "environment_integrity": [],
@@ -619,7 +709,15 @@ class DataCollector:
 
     def _normalize_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         control = task.get("control") or {}
-        if not control and any(key in task for key in ("control_state", "approved_summary", "next_action", "claim_level")):
+        if not control and any(
+            key in task
+            for key in (
+                "control_state",
+                "approved_summary",
+                "next_action",
+                "claim_level",
+            )
+        ):
             control = {
                 "control_state": task.get("control_state") or "",
                 "approved_summary": task.get("approved_summary") or "",
@@ -634,26 +732,53 @@ class DataCollector:
                 "protocol": task.get("protocol") or {},
                 "pipeline_recovery": task.get("pipeline_recovery") or {},
             }
-        latest_receipt = task.get("latest_receipt") or (control.get("latest_receipt") if isinstance(control, dict) else {}) or {}
+        latest_receipt = (
+            task.get("latest_receipt")
+            or (control.get("latest_receipt") if isinstance(control, dict) else {})
+            or {}
+        )
         task_id = str(task.get("task_id") or "")
         root_task = task.get("current_root_task") or task.get("root_task") or {}
         current_workflow = task.get("current_workflow_run") or {}
         current_finalizer = task.get("current_finalizer") or {}
         current_delivery = task.get("current_delivery_attempt") or {}
         current_followups = list(task.get("current_followups") or [])
-        question = str(task.get("question") or task.get("last_user_message") or task_id or "未命名任务").strip()
+        question = str(
+            task.get("question")
+            or task.get("last_user_message")
+            or task_id
+            or "未命名任务"
+        ).strip()
         raw_status = str(task.get("status") or "unknown")
         status = raw_status
         control_state = str(control.get("control_state") or "")
-        workflow_state = str(current_workflow.get("current_state") or root_task.get("workflow_state") or "")
+        workflow_state = str(
+            current_workflow.get("current_state")
+            or root_task.get("workflow_state")
+            or ""
+        )
         blocked_reason = str(task.get("blocked_reason") or "")
         if control_state.startswith("blocked") or blocked_reason:
             status = "blocked"
-        elif workflow_state in {"blocked", "delivery_failed", "dlq", "failed", "cancelled"}:
+        elif workflow_state in {
+            "blocked",
+            "delivery_failed",
+            "dlq",
+            "failed",
+            "cancelled",
+        }:
             status = "blocked"
         elif workflow_state == "delivered":
             status = "completed"
-        elif workflow_state in {"accepted", "routed", "queued", "started", "completed", "delivery_pending", "ambiguous_success"}:
+        elif workflow_state in {
+            "accepted",
+            "routed",
+            "queued",
+            "started",
+            "completed",
+            "delivery_pending",
+            "ambiguous_success",
+        }:
             status = "running"
         elif raw_status == "background":
             status = "running"
@@ -669,7 +794,9 @@ class DataCollector:
             "name": question,
             "question": question,
             "created": _iso_from_timestamp(task.get("created_at")),
-            "updated": _iso_from_timestamp(task.get("updated_at") or task.get("last_progress_at")),
+            "updated": _iso_from_timestamp(
+                task.get("updated_at") or task.get("last_progress_at")
+            ),
             "completed": _iso_from_timestamp(task.get("completed_at")),
             "backgrounded": _iso_from_timestamp(task.get("backgrounded_at")),
             "agent": latest_receipt.get("agent") or control.get("next_actor") or "-",
@@ -683,7 +810,10 @@ class DataCollector:
                 "finalization_state": root_task.get("finalization_state") or "",
                 "final_status": root_task.get("final_status") or "",
                 "delivery_state": root_task.get("delivery_state") or "",
-                "delivery_confirmation_level": root_task.get("delivery_confirmation_level") or "",
+                "delivery_confirmation_level": root_task.get(
+                    "delivery_confirmation_level"
+                )
+                or "",
                 "open_followup_count": int(root_task.get("open_followup_count") or 0),
                 "followup_types": list(root_task.get("followup_types") or []),
             },
@@ -698,10 +828,12 @@ class DataCollector:
                 "decision_state": current_finalizer.get("decision_state") or "",
                 "final_status": current_finalizer.get("final_status") or "",
                 "delivery_state": current_finalizer.get("delivery_state") or "",
-                "user_visible_summary": current_finalizer.get("user_visible_summary") or "",
+                "user_visible_summary": current_finalizer.get("user_visible_summary")
+                or "",
             },
             "current_delivery_attempt": {
-                "delivery_attempt_id": current_delivery.get("delivery_attempt_id") or "",
+                "delivery_attempt_id": current_delivery.get("delivery_attempt_id")
+                or "",
                 "current_state": current_delivery.get("current_state") or "",
                 "confirmation_level": current_delivery.get("confirmation_level") or "",
                 "channel": current_delivery.get("channel") or "",
@@ -732,10 +864,18 @@ class DataCollector:
                 "next_action": control.get("next_action") or "",
                 "next_actor": control.get("next_actor") or "",
                 "claim_level": control.get("claim_level") or "",
-                "user_visible_progress": task.get("user_visible_progress") or control.get("user_visible_progress") or "",
-                "followup_stage": task.get("followup_stage") or control.get("followup_stage") or "",
-                "heartbeat_age_seconds": task.get("heartbeat_age_seconds") if task.get("heartbeat_age_seconds") is not None else control.get("heartbeat_age_seconds"),
-                "heartbeat_ok": task.get("heartbeat_ok") if task.get("heartbeat_ok") is not None else control.get("heartbeat_ok"),
+                "user_visible_progress": task.get("user_visible_progress")
+                or control.get("user_visible_progress")
+                or "",
+                "followup_stage": task.get("followup_stage")
+                or control.get("followup_stage")
+                or "",
+                "heartbeat_age_seconds": task.get("heartbeat_age_seconds")
+                if task.get("heartbeat_age_seconds") is not None
+                else control.get("heartbeat_age_seconds"),
+                "heartbeat_ok": task.get("heartbeat_ok")
+                if task.get("heartbeat_ok") is not None
+                else control.get("heartbeat_ok"),
                 "timing": task.get("timing") or control.get("timing") or {},
             },
             "session_key": task.get("session_key") or "",
@@ -744,13 +884,23 @@ class DataCollector:
 
     def _fetch_task_data(self) -> Dict[str, Any]:
         try:
-            current_facts = _read_json_file(PROJECT_ROOT / "data" / "current-task-facts.json", {})
+            current_facts = _read_json_file(
+                PROJECT_ROOT / "data" / "current-task-facts.json", {}
+            )
             payload = self._shared_state("task-registry-snapshot.json", {})
             main_closure = self._shared_state("main-closure-runtime-status.json", {})
-            has_current_facts = isinstance(current_facts, dict) and isinstance(current_facts.get("current_task"), dict)
-            if not isinstance(payload, dict) or (not payload.get("summary") and not has_current_facts):
+            has_current_facts = isinstance(current_facts, dict) and isinstance(
+                current_facts.get("current_task"), dict
+            )
+            if not isinstance(payload, dict) or (
+                not payload.get("summary") and not has_current_facts
+            ):
                 payload = _legacy_dashboard().get_task_registry_payload(limit=120)
-            closure_roots = list((main_closure or {}).get("roots") or []) if isinstance(main_closure, dict) else []
+            closure_roots = (
+                list((main_closure or {}).get("roots") or [])
+                if isinstance(main_closure, dict)
+                else []
+            )
             closure_by_session = {
                 str(item.get("session_key") or ""): item
                 for item in closure_roots
@@ -762,28 +912,46 @@ class DataCollector:
                 if session_key and session_key in closure_by_session:
                     item["root_task"] = closure_by_session[session_key]
             raw_tasks.sort(
-                key=lambda item: int(item.get("updated_at") or item.get("last_progress_at") or item.get("created_at") or 0),
+                key=lambda item: int(
+                    item.get("updated_at")
+                    or item.get("last_progress_at")
+                    or item.get("created_at")
+                    or 0
+                ),
                 reverse=True,
             )
             tasks = [self._normalize_task(item) for item in raw_tasks[:50]]
             current = payload.get("current")
             summary = payload.get("summary") or {}
-            if (not isinstance(current, dict) or not current) and isinstance(current_facts, dict):
+            if (not isinstance(current, dict) or not current) and isinstance(
+                current_facts, dict
+            ):
                 current = current_facts.get("current_task") or None
-            current_root = current_facts.get("current_root_task") if isinstance(current_facts, dict) else None
+            current_root = (
+                current_facts.get("current_root_task")
+                if isinstance(current_facts, dict)
+                else None
+            )
             if not current and isinstance(current_root, dict):
                 current = next(
                     (
                         item
                         for item in raw_tasks
-                        if str(((item.get("root_task") or {}).get("root_task_id") or "")) == str(current_root.get("root_task_id") or "")
+                        if str(
+                            ((item.get("root_task") or {}).get("root_task_id") or "")
+                        )
+                        == str(current_root.get("root_task_id") or "")
                     ),
                     None,
                 )
             if isinstance(current, dict) and isinstance(current_facts, dict):
                 if isinstance(current_root, dict):
                     current["current_root_task"] = current_root
-                for key in ("current_workflow_run", "current_finalizer", "current_delivery_attempt"):
+                for key in (
+                    "current_workflow_run",
+                    "current_finalizer",
+                    "current_delivery_attempt",
+                ):
                     value = current_facts.get(key)
                     if isinstance(value, dict):
                         current[key] = value
@@ -794,12 +962,22 @@ class DataCollector:
                 "blocked_count": int(summary.get("blocked", 0) or 0),
                 "total_count": int(summary.get("total", 0) or 0),
                 "running_count": int(summary.get("running", 0) or 0),
-                "current": self._normalize_task(current) if isinstance(current, dict) else None,
+                "current": self._normalize_task(current)
+                if isinstance(current, dict)
+                else None,
                 "tasks": tasks,
                 "summary": summary,
                 "control_queue": list(payload.get("control_queue") or [])[:20],
-                "current_root_task": current_root if isinstance(current_root, dict) else None,
-                "session_resolution": payload.get("session_resolution") or (current_facts.get("session_resolution") if isinstance(current_facts, dict) else {}) or {},
+                "current_root_task": current_root
+                if isinstance(current_root, dict)
+                else None,
+                "session_resolution": payload.get("session_resolution")
+                or (
+                    current_facts.get("session_resolution")
+                    if isinstance(current_facts, dict)
+                    else {}
+                )
+                or {},
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as exc:
@@ -828,11 +1006,13 @@ class DataCollector:
         updated_at = int(item.get("updated_at") or 0)
         status_code = str(item.get("status_code") or "idle")
         is_processing = status_code == "processing"
+        is_active = bool(item.get("is_active", False))
         return {
             "id": item.get("agent_id"),
             "name": item.get("display_name") or item.get("agent_id"),
             "emoji": item.get("emoji") or "",
-            "is_active": bool(item.get("is_active", False)),
+            "is_active": is_active,
+            # Deprecated compatibility field. UI/highlight logic should use is_active.
             "is_processing": is_processing,
             "last_activity": _iso_from_timestamp(updated_at),
             "last_activity_label": item.get("updated_label") or "-",
@@ -848,12 +1028,16 @@ class DataCollector:
             "activity_excerpt": item.get("activity_excerpt") or "",
         }
 
-    def _load_agent_log_activity(self, env_home: Path, *, lookback_seconds: int) -> Dict[str, Dict[str, Any]]:
+    def _load_agent_log_activity(
+        self, env_home: Path, *, lookback_seconds: int
+    ) -> Dict[str, Dict[str, Any]]:
         log_path = env_home / "logs" / "gateway.log"
         if not log_path.exists():
             return {}
         try:
-            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-1800:]
+            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[
+                -1800:
+            ]
         except Exception:
             return {}
         cutoff = int(time.time()) - max(60, lookback_seconds)
@@ -872,7 +1056,9 @@ class DataCollector:
             status_code, state_reason = _classify_log_signal(detail)
             signals[agent_id] = {
                 "updated_at": ts or int(log_path.stat().st_mtime),
-                "updated_label": datetime.fromtimestamp(ts or int(log_path.stat().st_mtime)).strftime("%m-%d %H:%M:%S"),
+                "updated_label": datetime.fromtimestamp(
+                    ts or int(log_path.stat().st_mtime)
+                ).strftime("%m-%d %H:%M:%S"),
                 "status_code": status_code,
                 "state_label": self._status_label(status_code),
                 "state_reason": state_reason,
@@ -893,7 +1079,9 @@ class DataCollector:
             "idle": "待机",
         }.get(status_code, "待机")
 
-    def _summarize_session_entries(self, entries: list[dict], session_path: Path) -> Dict[str, Any]:
+    def _summarize_session_entries(
+        self, entries: list[dict], session_path: Path
+    ) -> Dict[str, Any]:
         title = ""
         context_lines: list[str] = []
         status_code = "idle"
@@ -944,7 +1132,11 @@ class DataCollector:
                     downstream = str(args.get("agentId") or "").strip()
                     label = _shorten(str(args.get("label") or ""), 80)
                     suffix = f"：{label}" if label else ""
-                    detail = f"已把任务派发给下游代理 {downstream}{suffix}" if downstream else "已把任务继续派发给下游代理"
+                    detail = (
+                        f"已把任务派发给下游代理 {downstream}{suffix}"
+                        if downstream
+                        else "已把任务继续派发给下游代理"
+                    )
                     status_code = "waiting_downstream"
                     state_reason = "当前代理已经把工作下发，正在等待下游回执"
                     return {
@@ -1027,12 +1219,21 @@ class DataCollector:
             "has_full_context": bool(recent_context),
         }
 
-    def _load_agent_sessions(self, env_home: Path, legacy: Any, catalog: Dict[str, Any], *, recent_limit: int = 5) -> Dict[str, Dict[str, Any]]:
+    def _load_agent_sessions(
+        self,
+        env_home: Path,
+        legacy: Any,
+        catalog: Dict[str, Any],
+        *,
+        recent_limit: int = 5,
+    ) -> Dict[str, Dict[str, Any]]:
         agents_dir = env_home / "agents"
         payload: Dict[str, Dict[str, Any]] = {}
         known_ids = set(catalog.keys())
         if agents_dir.exists():
-            known_ids.update(item.name for item in agents_dir.iterdir() if item.is_dir())
+            known_ids.update(
+                item.name for item in agents_dir.iterdir() if item.is_dir()
+            )
         for agent_id in sorted(known_ids):
             sessions_dir = agents_dir / agent_id / "sessions"
             files = []
@@ -1046,7 +1247,9 @@ class DataCollector:
             recent_sessions = []
             for path in recent_files:
                 try:
-                    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-60:]
+                    lines = path.read_text(
+                        encoding="utf-8", errors="ignore"
+                    ).splitlines()[-60:]
                     entries = []
                     for line in lines:
                         line = line.strip()
@@ -1060,12 +1263,16 @@ class DataCollector:
                             entries.append(record)
                 except Exception:
                     entries = []
-                summary = self._summarize_session_entries(entries, path) if entries else {}
+                summary = (
+                    self._summarize_session_entries(entries, path) if entries else {}
+                )
                 recent_sessions.append(
                     {
                         "session_file": path.name,
                         "updated_at": int(path.stat().st_mtime),
-                        "updated_label": datetime.fromtimestamp(int(path.stat().st_mtime)).strftime("%m-%d %H:%M:%S"),
+                        "updated_label": datetime.fromtimestamp(
+                            int(path.stat().st_mtime)
+                        ).strftime("%m-%d %H:%M:%S"),
                         "status_code": summary.get("status_code") or "idle",
                         "state_label": summary.get("state_label") or "待机",
                         "state_reason": summary.get("state_reason") or "",
@@ -1086,7 +1293,8 @@ class DataCollector:
                 "updated_label": latest_session.get("updated_label") or "-",
                 "status_code": latest_session.get("status_code") or "idle",
                 "state_label": latest_session.get("state_label") or "待机",
-                "state_reason": latest_session.get("state_reason") or "最近没有新的代理动作",
+                "state_reason": latest_session.get("state_reason")
+                or "最近没有新的代理动作",
                 "detail": latest_session.get("detail") or "暂无最近会话",
                 "task_hint": latest_session.get("task_hint") or "",
                 "task_title": latest_session.get("task_title") or "",
@@ -1094,7 +1302,9 @@ class DataCollector:
                 "recent_sessions": recent_sessions,
                 "is_active": False,
                 "activity_source": "session",
-                "activity_excerpt": latest_session.get("context_preview") or latest_session.get("detail") or "",
+                "activity_excerpt": latest_session.get("context_preview")
+                or latest_session.get("detail")
+                or "",
             }
         return payload
 
@@ -1107,15 +1317,26 @@ class DataCollector:
             env_home = Path(str(selected_env.get("home") or Path.home() / ".openclaw"))
             catalog = legacy.load_agent_catalog(selected_env)
             lookback_seconds = int(config.get("AGENT_ACTIVITY_LOOKBACK_SECONDS", 1800))
-            active_window = int(config.get("AGENT_ACTIVITY_ACTIVE_WINDOW_SECONDS", min(lookback_seconds, 900)))
+            active_window = int(
+                config.get(
+                    "AGENT_ACTIVITY_ACTIVE_WINDOW_SECONDS", min(lookback_seconds, 900)
+                )
+            )
             sessions_by_agent = self._load_agent_sessions(env_home, legacy, catalog)
-            log_activity = self._load_agent_log_activity(env_home, lookback_seconds=lookback_seconds)
+            log_activity = self._load_agent_log_activity(
+                env_home, lookback_seconds=lookback_seconds
+            )
             now_ts = int(time.time())
             merged: list[Dict[str, Any]] = []
             for agent_id, item in sessions_by_agent.items():
                 log_signal = log_activity.get(agent_id) or {}
-                updated_at = max(int(item.get("updated_at") or 0), int(log_signal.get("updated_at") or 0))
-                preferred_status = str(log_signal.get("status_code") or item.get("status_code") or "idle")
+                updated_at = max(
+                    int(item.get("updated_at") or 0),
+                    int(log_signal.get("updated_at") or 0),
+                )
+                preferred_status = str(
+                    log_signal.get("status_code") or item.get("status_code") or "idle"
+                )
                 status_source_ts = int(log_signal.get("updated_at") or 0)
                 if status_source_ts < int(item.get("updated_at") or 0):
                     preferred_status = str(item.get("status_code") or preferred_status)
@@ -1129,23 +1350,33 @@ class DataCollector:
                     "updated_at": updated_at,
                     "updated_label": (
                         log_signal.get("updated_label")
-                        if int(log_signal.get("updated_at") or 0) >= int(item.get("updated_at") or 0)
+                        if int(log_signal.get("updated_at") or 0)
+                        >= int(item.get("updated_at") or 0)
                         else item.get("updated_label")
-                    ) or "-",
+                    )
+                    or "-",
                     "status_code": preferred_status,
                     "state_label": (
                         log_signal.get("state_label")
-                        if int(log_signal.get("updated_at") or 0) >= int(item.get("updated_at") or 0)
+                        if int(log_signal.get("updated_at") or 0)
+                        >= int(item.get("updated_at") or 0)
                         else item.get("state_label")
-                    ) or self._status_label(preferred_status),
+                    )
+                    or self._status_label(preferred_status),
                     "state_reason": (
                         log_signal.get("state_reason")
-                        if int(log_signal.get("updated_at") or 0) >= int(item.get("updated_at") or 0)
+                        if int(log_signal.get("updated_at") or 0)
+                        >= int(item.get("updated_at") or 0)
                         else item.get("state_reason")
-                    ) or "",
+                    )
+                    or "",
                     "detail": log_signal.get("detail") or item.get("detail") or "",
-                    "activity_source": log_signal.get("activity_source") or item.get("activity_source") or "session",
-                    "activity_excerpt": log_signal.get("activity_excerpt") or item.get("activity_excerpt") or "",
+                    "activity_source": log_signal.get("activity_source")
+                    or item.get("activity_source")
+                    or "session",
+                    "activity_excerpt": log_signal.get("activity_excerpt")
+                    or item.get("activity_excerpt")
+                    or "",
                     "is_active": is_active,
                 }
                 merged.append(self._normalize_agent(merged_item))
@@ -1153,15 +1384,23 @@ class DataCollector:
             merged.sort(
                 key=lambda item: (
                     0 if item.get("is_active") else 1,
-                    -(int(datetime.fromisoformat(item["last_activity"]).timestamp()) if item.get("last_activity") else 0),
+                    -(
+                        int(datetime.fromisoformat(item["last_activity"]).timestamp())
+                        if item.get("last_activity")
+                        else 0
+                    ),
                     item.get("name") or item.get("id") or "",
                 )
             )
             return {
-                "active_count": len([item for item in merged if item.get("is_processing")]),
-                "recent_sessions": sum(1 for item in merged if item.get("recent_sessions")),
+                "active_count": len([item for item in merged if item.get("is_active")]),
+                "recent_sessions": sum(
+                    1 for item in merged if item.get("recent_sessions")
+                ),
                 "agents": merged,
-                "active_agent_id": next((item.get("id") for item in merged if item.get("is_processing")), None),
+                "active_agent_id": next(
+                    (item.get("id") for item in merged if item.get("is_active")), None
+                ),
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as exc:
@@ -1182,7 +1421,12 @@ class DataCollector:
         )
 
     def _normalize_learning(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        ts = int(item.get("updated_at") or item.get("created_at") or item.get("last_seen_at") or 0)
+        ts = int(
+            item.get("updated_at")
+            or item.get("created_at")
+            or item.get("last_seen_at")
+            or 0
+        )
         category = str(item.get("category") or "misc")
         title = str(item.get("title") or item.get("summary") or "未命名 learning")
         description = str(item.get("detail") or item.get("action") or "")
@@ -1190,7 +1434,9 @@ class DataCollector:
         internal_control = self._is_internal_control_learning(item)
         if internal_control:
             capability_title = "任务闭环保护规则"
-            capability_summary = self._summarize_internal_control_learning(title, description)
+            capability_summary = self._summarize_internal_control_learning(
+                title, description
+            )
             audience = "internal"
         else:
             capability_title = title
@@ -1252,18 +1498,43 @@ class DataCollector:
     def _fetch_learning_data(self) -> Dict[str, Any]:
         try:
             payload = _legacy_dashboard().get_learning_center_payload(limit=20)
-            raw_items = [self._normalize_learning(item) for item in (payload.get("learnings") or [])]
-            reflections = [self._normalize_reflection(item) for item in (payload.get("reflections") or [])]
-            visible_items = [item for item in raw_items if not item.get("internal_control")]
-            internal_items = [item for item in raw_items if item.get("internal_control")]
-            promoted = [item for item in visible_items if item.get("status") == "promoted"]
-            internal_promoted = [item for item in internal_items if item.get("status") == "promoted"]
+            raw_items = [
+                self._normalize_learning(item)
+                for item in (payload.get("learnings") or [])
+            ]
+            reflections = [
+                self._normalize_reflection(item)
+                for item in (payload.get("reflections") or [])
+            ]
+            visible_items = [
+                item for item in raw_items if not item.get("internal_control")
+            ]
+            internal_items = [
+                item for item in raw_items if item.get("internal_control")
+            ]
+            promoted = [
+                item for item in visible_items if item.get("status") == "promoted"
+            ]
+            internal_promoted = [
+                item for item in internal_items if item.get("status") == "promoted"
+            ]
             latest_ts = max(
                 [
                     value
                     for value in [
-                        *(int(entry.get("updated_at") or entry.get("created_at") or entry.get("last_seen_at") or 0) for entry in (payload.get("learnings") or [])),
-                        *(int(entry.get("created_at") or 0) for entry in (payload.get("reflections") or [])),
+                        *(
+                            int(
+                                entry.get("updated_at")
+                                or entry.get("created_at")
+                                or entry.get("last_seen_at")
+                                or 0
+                            )
+                            for entry in (payload.get("learnings") or [])
+                        ),
+                        *(
+                            int(entry.get("created_at") or 0)
+                            for entry in (payload.get("reflections") or [])
+                        ),
                     ]
                     if value > 0
                 ]
@@ -1271,7 +1542,9 @@ class DataCollector:
             )
             is_fresh = False
             if latest_ts > 0:
-                is_fresh = (datetime.now() - datetime.fromtimestamp(latest_ts)).total_seconds() < 86400
+                is_fresh = (
+                    datetime.now() - datetime.fromtimestamp(latest_ts)
+                ).total_seconds() < 86400
             return {
                 "is_fresh": is_fresh,
                 "last_update": _iso_from_timestamp(latest_ts),
@@ -1319,7 +1592,9 @@ class DataCollector:
         time_text = item.get("time") or ""
         if date_text and time_text:
             try:
-                timestamp = datetime.fromisoformat(f"{date_text}T{time_text}").isoformat()
+                timestamp = datetime.fromisoformat(
+                    f"{date_text}T{time_text}"
+                ).isoformat()
             except Exception:
                 timestamp = None
         details = item.get("details") or {}
@@ -1334,7 +1609,10 @@ class DataCollector:
     def _fetch_events_data(self, limit: int = 20) -> list:
         try:
             legacy = _legacy_dashboard()
-            return [self._normalize_event(item) for item in legacy.get_recent_anomalies(limit=limit, days=7)]
+            return [
+                self._normalize_event(item)
+                for item in legacy.get_recent_anomalies(limit=limit, days=7)
+            ]
         except Exception:
             return []
 
@@ -1348,16 +1626,20 @@ class DataCollector:
             "timestamp": datetime.now().isoformat(),
         }
 
-    def get_snapshots(self, *, limit: int = 20, offset: int = 0, force_refresh: bool = False) -> Dict[str, Any]:
+    def get_snapshots(
+        self, *, limit: int = 20, offset: int = 0, force_refresh: bool = False
+    ) -> Dict[str, Any]:
         return self._get_cached_or_fetch(
             f"snapshots:{limit}:{offset}",
             lambda: self._fetch_snapshot_data(limit=limit, offset=offset),
             force_refresh,
         )
 
-    def _fetch_snapshot_data(self, *, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+    def _fetch_snapshot_data(
+        self, *, limit: int = 20, offset: int = 0
+    ) -> Dict[str, Any]:
         snapshots = _legacy_dashboard().list_snapshots(limit=max(limit + offset, 20))
-        page = snapshots[offset:offset + limit]
+        page = snapshots[offset : offset + limit]
         return {
             "count": len(snapshots),
             "limit": limit,
@@ -1408,7 +1690,9 @@ class DataCollector:
 
     def restart_environment(self) -> Dict[str, Any]:
         legacy = _legacy_dashboard()
-        success, message, old_pid, new_pid, env_id = legacy.restart_active_openclaw_environment()
+        success, message, old_pid, new_pid, env_id = (
+            legacy.restart_active_openclaw_environment()
+        )
         self.invalidate_cache()
         return {
             "success": success,
@@ -1422,7 +1706,7 @@ class DataCollector:
     def emergency_recover(self) -> Dict[str, Any]:
         legacy = _legacy_dashboard()
         config = legacy.load_config()
-        if not config.get('ENABLE_SNAPSHOT_RECOVERY', True):
+        if not config.get("ENABLE_SNAPSHOT_RECOVERY", True):
             return {
                 "success": False,
                 "message": "当前已禁用 snapshot recovery。请先开启 ENABLE_SNAPSHOT_RECOVERY=true。",

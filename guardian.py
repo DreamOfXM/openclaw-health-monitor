@@ -31,8 +31,17 @@ from monitor_config import (
 )
 from snapshot_manager import SnapshotManager
 from state_store import MonitorStateStore
-from version_tracker import build_recovery_profile, collect_version_record, load_versions_file, update_versions_file
-from task_contracts import infer_task_contract, load_task_contract_catalog, normalize_pipeline_receipt
+from version_tracker import (
+    build_recovery_profile,
+    collect_version_record,
+    load_versions_file,
+    update_versions_file,
+)
+from task_contracts import (
+    infer_task_contract,
+    load_task_contract_catalog,
+    normalize_pipeline_receipt,
+)
 from bootstrap_evolution import (
     CONTEXT_LIFECYCLE_BASELINE,
     derive_watcher_task_id,
@@ -129,7 +138,9 @@ def commit_active_binding(env_id: str) -> None:
     if env_id != "primary":
         return
     try:
-        binding = write_active_binding(BASE_DIR, CONFIG, env_id, switch_state="committed")
+        binding = write_active_binding(
+            BASE_DIR, CONFIG, env_id, switch_state="committed"
+        )
     except Exception:
         binding = {"expected": {}, "binding_version": 1}
         pass
@@ -154,7 +165,10 @@ def commit_active_binding(env_id: str) -> None:
                 "source": "guardian.commit",
                 "env_id": env_id,
                 "status": "committed",
-                "details": {"gateway_port": spec["port"], "gateway_label": spec["gateway_label"]},
+                "details": {
+                    "gateway_port": spec["port"],
+                    "gateway_label": spec["gateway_label"],
+                },
                 "timestamp_iso": datetime.now().isoformat(),
             },
             limit=200,
@@ -162,7 +176,11 @@ def commit_active_binding(env_id: str) -> None:
         shared_dir = BASE_DIR / "data" / "shared-state"
         shared_dir.mkdir(parents=True, exist_ok=True)
         (shared_dir / "binding-audit-events.json").write_text(
-            json.dumps(STORE.load_runtime_value("binding_audit_events", []), ensure_ascii=False, indent=2),
+            json.dumps(
+                STORE.load_runtime_value("binding_audit_events", []),
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
     except Exception:
@@ -198,7 +216,9 @@ def all_env_specs() -> dict[str, dict[str, Any]]:
 
 
 def snapshot_targets() -> list[tuple[str, SnapshotManager]]:
-    primary_home = Path(str(CONFIG.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
+    primary_home = Path(
+        str(CONFIG.get("OPENCLAW_HOME", str(Path.home() / ".openclaw")))
+    )
     return [
         ("primary", SnapshotManager(BASE_DIR, primary_home)),
     ]
@@ -208,8 +228,16 @@ def current_gateway_log() -> Path:
     return current_env_spec()["home"] / "logs" / "gateway.log"
 
 
-def record_version_state(spec: dict[str, Any], *, reason: str, status: str = "observed", mark_known_good: bool = False) -> dict[str, Any]:
-    code_root = Path(str(spec.get("code") or CONFIG.get("OPENCLAW_CODE") or OPENCLAW_CODE))
+def record_version_state(
+    spec: dict[str, Any],
+    *,
+    reason: str,
+    status: str = "observed",
+    mark_known_good: bool = False,
+) -> dict[str, Any]:
+    code_root = Path(
+        str(spec.get("code") or CONFIG.get("OPENCLAW_CODE") or OPENCLAW_CODE)
+    )
     payload = update_versions_file(
         VERSIONS_FILE,
         collect_version_record(
@@ -220,8 +248,12 @@ def record_version_state(spec: dict[str, Any], *, reason: str, status: str = "ob
         ),
         mark_known_good=mark_known_good,
     )
-    STORE.save_runtime_value(f"openclaw_version:{spec['id']}", payload.get("current") or {})
-    STORE.save_runtime_value(f"openclaw_recovery_profile:{spec['id']}", build_recovery_profile(payload))
+    STORE.save_runtime_value(
+        f"openclaw_version:{spec['id']}", payload.get("current") or {}
+    )
+    STORE.save_runtime_value(
+        f"openclaw_recovery_profile:{spec['id']}", build_recovery_profile(payload)
+    )
     return payload
 
 
@@ -232,7 +264,10 @@ def ensure_openclaw_bootstrap(spec: dict[str, Any] | None = None) -> dict[str, A
     status = ensure_bootstrap_workspace(
         home=home,
         env_id=env_id,
-        write_missing=bool(CONFIG.get("ENABLE_BOOTSTRAP_INIT", True) and CONFIG.get("BOOTSTRAP_WRITE_MISSING", True)),
+        write_missing=bool(
+            CONFIG.get("ENABLE_BOOTSTRAP_INIT", True)
+            and CONFIG.get("BOOTSTRAP_WRITE_MISSING", True)
+        ),
     )
     STORE.save_runtime_value(f"bootstrap_status:{env_id}", status)
     return status
@@ -252,22 +287,42 @@ def _walk_watcher_payload(payload: Any, *, depth: int = 0) -> list[dict[str, Any
     return nodes
 
 
-
 def _extract_watcher_receipt(payload: dict[str, Any]) -> dict[str, str] | None:
     for node in _walk_watcher_payload(payload):
         for key in ("receipt", "pipeline_receipt"):
             value = node.get(key)
             if isinstance(value, dict):
-                receipt = normalize_pipeline_receipt(value, timestamp=str(node.get("timestamp") or payload.get("timestamp") or payload.get("completed_at") or ""))
+                receipt = normalize_pipeline_receipt(
+                    value,
+                    timestamp=str(
+                        node.get("timestamp")
+                        or payload.get("timestamp")
+                        or payload.get("completed_at")
+                        or ""
+                    ),
+                )
                 if receipt:
                     return receipt
         receipt = normalize_pipeline_receipt(
             node,
-            timestamp=str(node.get("timestamp") or payload.get("timestamp") or payload.get("completed_at") or ""),
+            timestamp=str(
+                node.get("timestamp")
+                or payload.get("timestamp")
+                or payload.get("completed_at")
+                or ""
+            ),
         )
         if receipt:
             return receipt
-        for text_key in ("text", "message", "content", "body", "detail", "error", "result"):
+        for text_key in (
+            "text",
+            "message",
+            "content",
+            "body",
+            "detail",
+            "error",
+            "result",
+        ):
             value = node.get(text_key)
             if not isinstance(value, str) or "PIPELINE_RECEIPT:" not in value:
                 continue
@@ -277,11 +332,20 @@ def _extract_watcher_receipt(payload: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-
-def _find_watcher_task_by_question_hint(payload: dict[str, Any], *, env_id: str) -> dict[str, Any] | None:
+def _find_watcher_task_by_question_hint(
+    payload: dict[str, Any], *, env_id: str
+) -> dict[str, Any] | None:
     hints: list[str] = []
     for node in _walk_watcher_payload(payload):
-        for key in ("question", "task_question", "last_user_message", "title", "prompt", "request", "intent_text"):
+        for key in (
+            "question",
+            "task_question",
+            "last_user_message",
+            "title",
+            "prompt",
+            "request",
+            "intent_text",
+        ):
             value = node.get(key)
             if isinstance(value, str):
                 normalized = normalize_task_question(value)
@@ -289,7 +353,11 @@ def _find_watcher_task_by_question_hint(payload: dict[str, Any], *, env_id: str)
                     hints.append(normalized)
     if not hints:
         return None
-    active_tasks = [task for task in STORE.list_active_tasks(limit=20) if str(task.get("env_id") or env_id) == env_id]
+    active_tasks = [
+        task
+        for task in STORE.list_active_tasks(limit=20)
+        if str(task.get("env_id") or env_id) == env_id
+    ]
     if len(active_tasks) != 1:
         return None
     task = active_tasks[0]
@@ -298,20 +366,30 @@ def _find_watcher_task_by_question_hint(payload: dict[str, Any], *, env_id: str)
     for hint in hints:
         if hint in {question, last_user_message}:
             return task
-        if len(hint) >= 8 and (hint in question or hint in last_user_message or question in hint or last_user_message in hint):
+        if len(hint) >= 8 and (
+            hint in question
+            or hint in last_user_message
+            or question in hint
+            or last_user_message in hint
+        ):
             return task
     return None
 
 
-
-def _resolve_watcher_receipt_task(receipt: dict[str, str], payload: dict[str, Any], *, env_id: str) -> dict[str, Any] | None:
-    receipt_task_id = str(receipt.get("task_id") or payload.get("task_id") or "").strip()
+def _resolve_watcher_receipt_task(
+    receipt: dict[str, str], payload: dict[str, Any], *, env_id: str
+) -> dict[str, Any] | None:
+    receipt_task_id = str(
+        receipt.get("task_id") or payload.get("task_id") or ""
+    ).strip()
     if receipt_task_id:
         task = STORE.get_task(receipt_task_id)
         if task and str(task.get("env_id") or env_id) == env_id:
             return task
     for node in _walk_watcher_payload(payload):
-        session_key = str(node.get("session_key") or receipt.get("session_key") or "").strip()
+        session_key = str(
+            node.get("session_key") or receipt.get("session_key") or ""
+        ).strip()
         if not session_key:
             continue
         task = STORE.get_latest_task_for_session(session_key)
@@ -320,8 +398,13 @@ def _resolve_watcher_receipt_task(receipt: dict[str, str], payload: dict[str, An
     return _find_watcher_task_by_question_hint(payload, env_id=env_id)
 
 
-
-def _watcher_receipt_event_payload(receipt: dict[str, str], normalized_payload: dict[str, Any], *, status: str, stage_label: str) -> dict[str, Any]:
+def _watcher_receipt_event_payload(
+    receipt: dict[str, str],
+    normalized_payload: dict[str, Any],
+    *,
+    status: str,
+    stage_label: str,
+) -> dict[str, Any]:
     return {
         "receipt": receipt,
         "status": status,
@@ -330,8 +413,9 @@ def _watcher_receipt_event_payload(receipt: dict[str, str], normalized_payload: 
     }
 
 
-
-def _bridge_watcher_receipt(payload: dict[str, Any], *, env_id: str, watcher_task_id: str, source_file: Path) -> str:
+def _bridge_watcher_receipt(
+    payload: dict[str, Any], *, env_id: str, watcher_task_id: str, source_file: Path
+) -> str:
     receipt = _extract_watcher_receipt(payload)
     if not receipt:
         return "ignored"
@@ -340,15 +424,25 @@ def _bridge_watcher_receipt(payload: dict[str, Any], *, env_id: str, watcher_tas
         return "observed_unbound"
     task_for_validation = dict(task)
     if str(task.get("status") or "") == "completed":
-        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
-        if not core.get("is_terminal") and str(core.get("finalization_state") or "") != "finalized":
+        core = STORE.get_core_closure_snapshot_for_task(
+            task["task_id"], allow_legacy_projection=False
+        )
+        if (
+            not core.get("is_terminal")
+            and str(core.get("finalization_state") or "") != "finalized"
+        ):
             task_for_validation["status"] = "running"
     accepted, normalized_payload, violations = validate_protocol_event(
         task_for_validation,
         "pipeline_receipt",
         {
             "receipt": receipt,
-            "timestamp": str(receipt.get("timestamp") or payload.get("timestamp") or payload.get("completed_at") or ""),
+            "timestamp": str(
+                receipt.get("timestamp")
+                or payload.get("timestamp")
+                or payload.get("completed_at")
+                or ""
+            ),
         },
     )
     for violation in violations:
@@ -375,7 +469,9 @@ def _bridge_watcher_receipt(payload: dict[str, Any], *, env_id: str, watcher_tas
             status = "running"
         if blocked_reason == "missing_pipeline_receipt":
             blocked_reason = ""
-    stage_label = f"{phase}:{action}".strip(":") or str(task.get("current_stage") or "处理中")
+    stage_label = f"{phase}:{action}".strip(":") or str(
+        task.get("current_stage") or "处理中"
+    )
     event_payload = _watcher_receipt_event_payload(
         receipt,
         normalized_payload,
@@ -396,11 +492,16 @@ def _bridge_watcher_receipt(payload: dict[str, Any], *, env_id: str, watcher_tas
     return "bridged"
 
 
-
-def sync_shared_context_watcher_tasks(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+def sync_shared_context_watcher_tasks(
+    spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = spec or current_env_spec()
     env_id = str(target.get("id") or "primary")
-    monitor_dir = Path(str(target.get("home") or Path.home() / ".openclaw")) / "shared-context" / "monitor-tasks"
+    monitor_dir = (
+        Path(str(target.get("home") or Path.home() / ".openclaw"))
+        / "shared-context"
+        / "monitor-tasks"
+    )
     tasks_file = monitor_dir / "tasks.jsonl"
     dlq_file = monitor_dir / "dlq.jsonl"
     imported = 0
@@ -423,20 +524,35 @@ def sync_shared_context_watcher_tasks(spec: dict[str, Any] | None = None) -> dic
                 {
                     "watcher_task_id": watcher_task_id,
                     "env_id": env_id,
-                    "source_agent": payload.get("source_agent") or payload.get("agent") or "",
-                    "target_agent": payload.get("target_agent") or payload.get("callback_agent") or "",
+                    "source_agent": payload.get("source_agent")
+                    or payload.get("agent")
+                    or "",
+                    "target_agent": payload.get("target_agent")
+                    or payload.get("callback_agent")
+                    or "",
                     "intent": payload.get("intent") or payload.get("type") or "",
-                    "current_state": payload.get("current_state") or payload.get("state") or ("dlq" if in_dlq else "registered"),
+                    "current_state": payload.get("current_state")
+                    or payload.get("state")
+                    or ("dlq" if in_dlq else "registered"),
                     "completed_at": payload.get("completed_at") or 0,
                     "delivered_at": payload.get("delivered_at") or 0,
-                    "last_checked_at": payload.get("last_checked_at") or payload.get("checked_at") or 0,
-                    "error_count": payload.get("error_count") or payload.get("attempts") or 0,
+                    "last_checked_at": payload.get("last_checked_at")
+                    or payload.get("checked_at")
+                    or 0,
+                    "error_count": payload.get("error_count")
+                    or payload.get("attempts")
+                    or 0,
                     "in_dlq": in_dlq or bool(payload.get("in_dlq")),
                     "payload": payload,
                 }
             )
             imported += 1
-            outcome = _bridge_watcher_receipt(payload, env_id=env_id, watcher_task_id=watcher_task_id, source_file=path)
+            outcome = _bridge_watcher_receipt(
+                payload,
+                env_id=env_id,
+                watcher_task_id=watcher_task_id,
+                source_file=path,
+            )
             receipt_bridge[outcome] = receipt_bridge.get(outcome, 0) + 1
 
     process_file(tasks_file, in_dlq=False)
@@ -473,7 +589,9 @@ def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_learning_supervision_summary(
+    spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = spec or current_env_spec()
     env_id = str(target.get("id") or "primary")
     home = Path(str(target.get("home") or Path.home() / ".openclaw"))
@@ -486,11 +604,15 @@ def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> di
         "reflection_runs": learnings_dir / "reflection-runs.jsonl",
         "reuse_evidence": learnings_dir / "reuse-evidence.jsonl",
     }
-    artifact_records = {name: _read_jsonl_records(path) for name, path in artifact_files.items()}
+    artifact_records = {
+        name: _read_jsonl_records(path) for name, path in artifact_files.items()
+    }
     existing = {name for name, path in artifact_files.items() if path.exists()}
     required = {"pending", "promoted", "discarded", "reflection_runs"}
     projected_learnings = STORE.list_learning_view(limit=200)
-    legacy_learnings = [item for item in projected_learnings if item.get("env_id") == env_id]
+    legacy_learnings = [
+        item for item in projected_learnings if item.get("env_id") == env_id
+    ]
     legacy_reflections = STORE.list_reflection_runs(limit=50)
     artifact_status = "missing"
     if required.issubset(existing):
@@ -506,7 +628,9 @@ def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> di
             learning_records.extend(artifact_records.get(bucket, []))
     else:
         learning_records = legacy_learnings
-    reflection_records = artifact_records.get("reflection_runs", []) or legacy_reflections
+    reflection_records = (
+        artifact_records.get("reflection_runs", []) or legacy_reflections
+    )
     reuse_records = artifact_records.get("reuse_evidence", [])
 
     def latest_value(records: list[dict[str, Any]], *keys: str) -> int:
@@ -523,8 +647,18 @@ def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> di
     latest_reflection_at = latest_value(reflection_records, "finished_at", "created_at")
     memory_path = home / "MEMORY.md"
     memory_updated_at = int(memory_path.stat().st_mtime) if memory_path.exists() else 0
-    recent_window = [item for item in learning_records if int(item.get("updated_at") or item.get("created_at") or 0) >= now - 7 * 86400]
-    previous_window = [item for item in learning_records if now - 14 * 86400 <= int(item.get("updated_at") or item.get("created_at") or 0) < now - 7 * 86400]
+    recent_window = [
+        item
+        for item in learning_records
+        if int(item.get("updated_at") or item.get("created_at") or 0) >= now - 7 * 86400
+    ]
+    previous_window = [
+        item
+        for item in learning_records
+        if now - 14 * 86400
+        <= int(item.get("updated_at") or item.get("created_at") or 0)
+        < now - 7 * 86400
+    ]
     if not recent_window and not previous_window:
         repeat_error_trend = "insufficient_data"
     elif len(recent_window) < len(previous_window):
@@ -535,14 +669,25 @@ def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> di
         repeat_error_trend = "flat"
 
     def pick_run(run_type: str) -> dict[str, Any] | None:
-        return next((item for item in reflection_records if str(item.get("run_type") or "") == run_type), None)
+        return next(
+            (
+                item
+                for item in reflection_records
+                if str(item.get("run_type") or "") == run_type
+            ),
+            None,
+        )
 
     def pick_status(item: dict[str, Any] | None) -> str:
         if not item:
             return "missing"
-        return str(item.get("status") or (item.get("summary") or {}).get("status") or "unknown")
+        return str(
+            item.get("status") or (item.get("summary") or {}).get("status") or "unknown"
+        )
 
-    daily_reflection = pick_run("daily-reflection") or (reflection_records[0] if reflection_records else None)
+    daily_reflection = pick_run("daily-reflection") or (
+        reflection_records[0] if reflection_records else None
+    )
     memory_maintenance = pick_run("memory-maintenance")
     team_rollup = pick_run("team-rollup")
 
@@ -550,24 +695,59 @@ def build_learning_supervision_summary(spec: dict[str, Any] | None = None) -> di
         "generated_at": now,
         "env_id": env_id,
         "artifact_status": artifact_status,
-        "learning_freshness": max(now - latest_learning_at, 0) if latest_learning_at else None,
-        "reflection_freshness": max(now - latest_reflection_at, 0) if latest_reflection_at else None,
-        "memory_freshness": max(now - memory_updated_at, 0) if memory_updated_at else None,
-        "promoted_items_count": sum(1 for item in learning_records if str(item.get("status") or "") == "promoted"),
-        "promoted_items_24h": sum(1 for item in learning_records if str(item.get("status") or "") == "promoted" and int(item.get("updated_at") or item.get("created_at") or 0) >= now - 86400),
+        "learning_freshness": max(now - latest_learning_at, 0)
+        if latest_learning_at
+        else None,
+        "reflection_freshness": max(now - latest_reflection_at, 0)
+        if latest_reflection_at
+        else None,
+        "memory_freshness": max(now - memory_updated_at, 0)
+        if memory_updated_at
+        else None,
+        "promoted_items_count": sum(
+            1
+            for item in learning_records
+            if str(item.get("status") or "") == "promoted"
+        ),
+        "promoted_items_24h": sum(
+            1
+            for item in learning_records
+            if str(item.get("status") or "") == "promoted"
+            and int(item.get("updated_at") or item.get("created_at") or 0)
+            >= now - 86400
+        ),
         "reuse_evidence_count": len(reuse_records),
-        "reuse_evidence_7d": sum(1 for item in reuse_records if int(item.get("updated_at") or item.get("created_at") or 0) >= now - 7 * 86400),
+        "reuse_evidence_7d": sum(
+            1
+            for item in reuse_records
+            if int(item.get("updated_at") or item.get("created_at") or 0)
+            >= now - 7 * 86400
+        ),
         "repeat_error_trend": repeat_error_trend,
-        "last_daily_reflection_at": int((daily_reflection or {}).get("finished_at") or (daily_reflection or {}).get("created_at") or 0),
-        "last_memory_maintenance_at": int((memory_maintenance or {}).get("finished_at") or (memory_maintenance or {}).get("created_at") or 0),
-        "last_team_rollup_at": int((team_rollup or {}).get("finished_at") or (team_rollup or {}).get("created_at") or 0),
+        "last_daily_reflection_at": int(
+            (daily_reflection or {}).get("finished_at")
+            or (daily_reflection or {}).get("created_at")
+            or 0
+        ),
+        "last_memory_maintenance_at": int(
+            (memory_maintenance or {}).get("finished_at")
+            or (memory_maintenance or {}).get("created_at")
+            or 0
+        ),
+        "last_team_rollup_at": int(
+            (team_rollup or {}).get("finished_at")
+            or (team_rollup or {}).get("created_at")
+            or 0
+        ),
         "daily_reflection_status": pick_status(daily_reflection),
         "memory_maintenance_status": pick_status(memory_maintenance),
         "team_rollup_status": pick_status(team_rollup),
     }
 
 
-def build_self_check_supervision_summary(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_self_check_supervision_summary(
+    spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = spec or current_env_spec()
     env_id = str(target.get("id") or "primary")
     home = Path(str(target.get("home") or Path.home() / ".openclaw"))
@@ -581,7 +761,11 @@ def build_self_check_supervision_summary(spec: dict[str, Any] | None = None) -> 
     if runtime_status_path.exists():
         try:
             runtime_status = json.loads(runtime_status_path.read_text(encoding="utf-8"))
-            runtime_status_valid = isinstance(runtime_status, dict) and bool(runtime_status.get("last_self_check_at")) and bool(runtime_status.get("self_check_status"))
+            runtime_status_valid = (
+                isinstance(runtime_status, dict)
+                and bool(runtime_status.get("last_self_check_at"))
+                and bool(runtime_status.get("self_check_status"))
+            )
         except Exception:
             runtime_status = {}
     if not runtime_status:
@@ -605,41 +789,64 @@ def build_self_check_supervision_summary(spec: dict[str, Any] | None = None) -> 
     if events_path.exists():
         try:
             events_payload = json.loads(events_path.read_text(encoding="utf-8"))
-            events_valid = isinstance(events_payload, dict) and isinstance(events_payload.get("events") or [], list)
+            events_valid = isinstance(events_payload, dict) and isinstance(
+                events_payload.get("events") or [], list
+            )
         except Exception:
             events_payload = {}
     if not events_payload:
-        events_payload = STORE.load_runtime_value(f"self_check_events:{env_id}", {"env_id": env_id, "events": []})
+        events_payload = STORE.load_runtime_value(
+            f"self_check_events:{env_id}", {"env_id": env_id, "events": []}
+        )
 
     last_self_check_at = int(runtime_status.get("last_self_check_at") or 0)
     last_self_recovery_at = int(runtime_status.get("last_self_recovery_at") or 0)
     recent_events = list(events_payload.get("events") or [])[:20]
-    if runtime_status_path.exists() and events_path.exists() and runtime_status_valid and events_valid:
+    if (
+        runtime_status_path.exists()
+        and events_path.exists()
+        and runtime_status_valid
+        and events_valid
+    ):
         artifact_status = "ready"
     elif runtime_status_path.exists() or events_path.exists():
         artifact_status = "invalid"
     else:
-        artifact_status = str(runtime_status.get("self_check_artifact_status") or "missing")
+        artifact_status = str(
+            runtime_status.get("self_check_artifact_status") or "missing"
+        )
 
     return {
         "generated_at": now,
         "env_id": env_id,
         "self_check_artifact_status": artifact_status,
-        "self_check_freshness": max(now - last_self_check_at, 0) if last_self_check_at else None,
+        "self_check_freshness": max(now - last_self_check_at, 0)
+        if last_self_check_at
+        else None,
         "last_self_check_at": last_self_check_at,
         "self_check_status": str(runtime_status.get("self_check_status") or "missing"),
-        "last_self_recovery_freshness": max(now - last_self_recovery_at, 0) if last_self_recovery_at else None,
+        "last_self_recovery_freshness": max(now - last_self_recovery_at, 0)
+        if last_self_recovery_at
+        else None,
         "last_self_recovery_at": last_self_recovery_at,
-        "last_self_recovery_result": str(runtime_status.get("last_self_recovery_result") or ""),
+        "last_self_recovery_result": str(
+            runtime_status.get("last_self_recovery_result") or ""
+        ),
         "delivery_retry_count": int(runtime_status.get("delivery_retry_count") or 0),
-        "completed_not_delivered_count": int(runtime_status.get("completed_not_delivered_count") or 0),
+        "completed_not_delivered_count": int(
+            runtime_status.get("completed_not_delivered_count") or 0
+        ),
         "stale_subagent_count": int(runtime_status.get("stale_subagent_count") or 0),
-        "recent_event_types": [str(item.get("event_type") or "unknown") for item in recent_events[:5]],
+        "recent_event_types": [
+            str(item.get("event_type") or "unknown") for item in recent_events[:5]
+        ],
         "events": recent_events,
     }
 
 
-def build_main_closure_supervision_summary(spec: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_main_closure_supervision_summary(
+    spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = spec or current_env_spec()
     env_id = str(target.get("id") or "primary")
     home = Path(str(target.get("home") or Path.home() / ".openclaw"))
@@ -653,7 +860,10 @@ def build_main_closure_supervision_summary(spec: dict[str, Any] | None = None) -
     if runtime_status_path.exists():
         try:
             runtime_status = json.loads(runtime_status_path.read_text(encoding="utf-8"))
-            runtime_status_valid = isinstance(runtime_status, dict) and bool(runtime_status.get("foreground_root_task_id") or runtime_status.get("generated_at"))
+            runtime_status_valid = isinstance(runtime_status, dict) and bool(
+                runtime_status.get("foreground_root_task_id")
+                or runtime_status.get("generated_at")
+            )
         except Exception:
             runtime_status = {}
     if not runtime_status:
@@ -668,46 +878,73 @@ def build_main_closure_supervision_summary(spec: dict[str, Any] | None = None) -
     if events_path.exists():
         try:
             events_payload = json.loads(events_path.read_text(encoding="utf-8"))
-            events_valid = isinstance(events_payload, dict) and isinstance(events_payload.get("events") or [], list)
+            events_valid = isinstance(events_payload, dict) and isinstance(
+                events_payload.get("events") or [], list
+            )
         except Exception:
             events_payload = {}
     if not events_payload:
         closure_summary = STORE.summarize_main_closure(limit_roots=20, limit_events=50)
-        events_payload = {"env_id": env_id, "events": closure_summary.get("events") or []}
+        events_payload = {
+            "env_id": env_id,
+            "events": closure_summary.get("events") or [],
+        }
 
-    if runtime_status_path.exists() and events_path.exists() and runtime_status_valid and events_valid:
+    if (
+        runtime_status_path.exists()
+        and events_path.exists()
+        and runtime_status_valid
+        and events_valid
+    ):
         artifact_status = "ready"
     elif runtime_status_path.exists() or events_path.exists():
         artifact_status = "invalid"
     else:
-        artifact_status = str(runtime_status.get("main_closure_artifact_status") or "missing")
+        artifact_status = str(
+            runtime_status.get("main_closure_artifact_status") or "missing"
+        )
 
     recent_events = list(events_payload.get("events") or [])[:20]
     return {
         "generated_at": now,
         "env_id": env_id,
         "main_closure_artifact_status": artifact_status,
-        "foreground_root_task_id": str(runtime_status.get("foreground_root_task_id") or ""),
+        "foreground_root_task_id": str(
+            runtime_status.get("foreground_root_task_id") or ""
+        ),
         "active_root_count": int(runtime_status.get("active_root_count") or 0),
         "background_root_count": int(runtime_status.get("background_root_count") or 0),
-        "adoption_pending_count": int(runtime_status.get("adoption_pending_count") or 0),
-        "finalization_pending_count": int(runtime_status.get("finalization_pending_count") or 0),
+        "adoption_pending_count": int(
+            runtime_status.get("adoption_pending_count") or 0
+        ),
+        "finalization_pending_count": int(
+            runtime_status.get("finalization_pending_count") or 0
+        ),
         "delivery_failed_count": int(runtime_status.get("delivery_failed_count") or 0),
         "late_result_count": int(runtime_status.get("late_result_count") or 0),
         "binding_source_counts": runtime_status.get("binding_source_counts") or {},
-        "recent_event_types": [str(item.get("event_type") or "unknown") for item in recent_events[:5]],
+        "recent_event_types": [
+            str(item.get("event_type") or "unknown") for item in recent_events[:5]
+        ],
         "roots": list(runtime_status.get("roots") or [])[:10],
         "finalizers": list(runtime_status.get("finalizers") or [])[:10],
         "delivery_attempts": list(runtime_status.get("delivery_attempts") or [])[:10],
         "followups": list(runtime_status.get("followups") or [])[:20],
         "purity_metrics": runtime_status.get("purity_metrics") or {},
-        "purity_gate_ok": bool((runtime_status.get("purity_metrics") or {}).get("purity_gate_ok", True)),
-        "purity_gate_reasons": list((runtime_status.get("purity_metrics") or {}).get("purity_gate_reasons") or []),
+        "purity_gate_ok": bool(
+            (runtime_status.get("purity_metrics") or {}).get("purity_gate_ok", True)
+        ),
+        "purity_gate_reasons": list(
+            (runtime_status.get("purity_metrics") or {}).get("purity_gate_reasons")
+            or []
+        ),
         "events": recent_events,
     }
 
 
-def should_delegate_learning_ownership_to_openclaw(spec: dict[str, Any] | None = None) -> bool:
+def should_delegate_learning_ownership_to_openclaw(
+    spec: dict[str, Any] | None = None,
+) -> bool:
     summary = build_learning_supervision_summary(spec)
     return str(summary.get("artifact_status") or "") in {"ready", "partial"}
 
@@ -795,15 +1032,15 @@ def get_process_info(name: str) -> Optional[Dict]:
     code, stdout, _ = run_cmd(f'ps aux | grep -i "{name}" | grep -v grep')
     if code != 0 or not stdout:
         return None
-    
+
     lines = stdout.strip().split("\n")
     if not lines:
         return None
-    
+
     parts = lines[0].split()
     if len(parts) < 11:
         return None
-    
+
     return {
         "pid": int(parts[1]),
         "cpu": float(parts[2]),
@@ -833,7 +1070,9 @@ def check_gateway_health() -> bool:
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{spec['port']}/health")
             with urllib.request.urlopen(req, timeout=5) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+                payload = json.loads(
+                    response.read().decode("utf-8", errors="ignore") or "{}"
+                )
             if bool(payload.get("ok")):
                 return True
         except Exception:
@@ -853,14 +1092,18 @@ def get_system_metrics() -> Dict:
     cpu = 0.0
     mem_used = 0
     mem_total = 32
-    
+
     code, stdout, _ = run_cmd("top -l 1 -n 0")
     if code == 0:
         for line in stdout.split("\n"):
             if "CPU usage" in line:
                 try:
-                    user = float([x for x in line.split() if "user" in x][0].replace("%user", ""))
-                    system = float([x for x in line.split() if "sys" in x][0].replace("%sys", ""))
+                    user = float(
+                        [x for x in line.split() if "user" in x][0].replace("%user", "")
+                    )
+                    system = float(
+                        [x for x in line.split() if "sys" in x][0].replace("%sys", "")
+                    )
                     cpu = user + system
                 except:
                     pass
@@ -871,10 +1114,12 @@ def get_system_metrics() -> Dict:
                         if "G" in p and "used" in p:
                             mem_used = int(p.replace("G", "").replace("used", ""))
                         if "G" in p and "unused" in p:
-                            mem_total = mem_used + int(p.replace("G", "").replace("unused", ""))
+                            mem_total = mem_used + int(
+                                p.replace("G", "").replace("unused", "")
+                            )
                 except:
                     pass
-    
+
     return {"cpu": round(cpu, 1), "mem_used": mem_used, "mem_total": mem_total}
 
 
@@ -882,17 +1127,17 @@ def analyze_slow_sessions() -> List[Dict]:
     """分析慢会话"""
     if not GATEWAY_LOG.exists():
         return []
-    
+
     slow_threshold = CONFIG.get("SLOW_RESPONSE_THRESHOLD", 30)
     sessions = []
     now = time.time()
-    
+
     try:
         with open(GATEWAY_LOG) as f:
             lines = f.readlines()[-2000:]  # 最近2000行
-        
+
         dispatch_time = {}
-        
+
         for line in lines:
             if "dispatching to agent" in line.lower():
                 try:
@@ -909,23 +1154,29 @@ def analyze_slow_sessions() -> List[Dict]:
                     if "dispatch" in dispatch_time:
                         duration = ts - dispatch_time["dispatch"]
                         if duration > slow_threshold:
-                            sessions.append({
-                                "time": ts_str,
-                                "duration": int(duration),
-                                "reason": "LLM响应慢" if duration > 60 else "处理耗时"
-                            })
+                            sessions.append(
+                                {
+                                    "time": ts_str,
+                                    "duration": int(duration),
+                                    "reason": "LLM响应慢"
+                                    if duration > 60
+                                    else "处理耗时",
+                                }
+                            )
                         dispatch_time = {}
                 except:
                     pass
     except Exception as e:
         log(f"分析慢会话失败: {e}")
-    
+
     return sessions[-10:]  # 返回最近10个
 
 
 def resolve_runtime_gateway_log() -> Path:
     """Return the most recent runtime log file."""
-    candidates = sorted(TMP_OPENCLAW_LOG_DIR.glob("openclaw-*.log"), key=lambda p: p.stat().st_mtime)
+    candidates = sorted(
+        TMP_OPENCLAW_LOG_DIR.glob("openclaw-*.log"), key=lambda p: p.stat().st_mtime
+    )
     if candidates:
         return candidates[-1]
     return current_gateway_log()
@@ -1153,7 +1404,10 @@ def is_visible_completion_message(line: str) -> bool:
 
     return bool(
         ("已完成" in text or "完成了" in text or "搞定了" in text or "结束了" in text)
-        and any(marker in text for marker in ("主人", "你可以", "可直接", "已回复给主人", "已经回复给主人"))
+        and any(
+            marker in text
+            for marker in ("主人", "你可以", "可直接", "已回复给主人", "已经回复给主人")
+        )
     )
 
 
@@ -1203,7 +1457,11 @@ def classify_guardian_followup_error(output: str) -> str:
     text = (output or "").lower()
     if "session file locked" in text or ".jsonl.lock" in text:
         return "session_lock"
-    if "oauth token refresh failed" in text or "re-authenticate" in text or "(auth)" in text:
+    if (
+        "oauth token refresh failed" in text
+        or "re-authenticate" in text
+        or "(auth)" in text
+    ):
         return "model_auth"
     if "model_not_found" in text or "404 page not found" in text:
         return "model_unavailable"
@@ -1272,7 +1530,10 @@ def build_control_plane_followup(
         "manual_or_session_recovery": "当前任务需要人工恢复或重新发起，请不要再口头宣称链路正在推进。",
         "await_receipt_after_recovery": "守护系统已发起恢复，请等待新的结构化回执，不要重复播报 final。",
         "require_receipt_or_block": "请立即补发结构化 PIPELINE_RECEIPT；若链路未真正继续，请明确阻塞原因。",
-    }.get(next_action, "请立即补发结构化 PIPELINE_RECEIPT；若链路未真正继续，请明确阻塞原因。")
+    }.get(
+        next_action,
+        "请立即补发结构化 PIPELINE_RECEIPT；若链路未真正继续，请明确阻塞原因。",
+    )
 
     return (
         "GUARDIAN_TASK_CONTROL: 这不是用户新需求。"
@@ -1341,16 +1602,25 @@ def validate_protocol_event(
     violations: list[dict[str, Any]] = []
     task_status = str(task.get("status") or "")
     task_id = str(task.get("task_id") or "")
-    core = STORE.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False) if task_id else {}
-    terminal = bool(core.get("is_terminal")) or str(core.get("finalization_state") or "") == "finalized"
+    core = (
+        STORE.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+        if task_id
+        else {}
+    )
+    terminal = (
+        bool(core.get("is_terminal"))
+        or str(core.get("finalization_state") or "") == "finalized"
+    )
     if not terminal:
-        terminal = task_status == "completed" or STORE.has_task_event(task_id, "visible_completion")
+        terminal = task_status == "completed" or STORE.has_task_event(
+            task_id, "visible_completion"
+        )
 
     if event_type == "pipeline_receipt":
         receipt = dict(normalized.get("receipt") or {})
         if not receipt.get("ack_id"):
             receipt["ack_id"] = hashlib.sha1(
-                f"{task_id}|{receipt.get('agent','')}|{receipt.get('phase','')}|{receipt.get('action','')}|{normalized.get('timestamp','')}".encode(
+                f"{task_id}|{receipt.get('agent', '')}|{receipt.get('phase', '')}|{receipt.get('action', '')}|{normalized.get('timestamp', '')}".encode(
                     "utf-8", errors="ignore"
                 )
             ).hexdigest()[:16]
@@ -1358,7 +1628,10 @@ def validate_protocol_event(
                 {
                     "violation_kind": "missing_ack_id_autofilled",
                     "ack_id": receipt["ack_id"],
-                    "payload": {"receipt": receipt, "timestamp": normalized.get("timestamp", "")},
+                    "payload": {
+                        "receipt": receipt,
+                        "timestamp": normalized.get("timestamp", ""),
+                    },
                     "rejected": False,
                 }
             )
@@ -1368,7 +1641,10 @@ def validate_protocol_event(
                 {
                     "violation_kind": "illegal_terminal_override",
                     "ack_id": str(receipt.get("ack_id") or ""),
-                    "payload": {"receipt": receipt, "timestamp": normalized.get("timestamp", "")},
+                    "payload": {
+                        "receipt": receipt,
+                        "timestamp": normalized.get("timestamp", ""),
+                    },
                     "rejected": True,
                 }
             )
@@ -1474,11 +1750,32 @@ def write_task_registry_snapshot() -> None:
         "total": len(restart_events),
         "recent": recent_restart_events,
         "last": recent_restart_events[-1] if recent_restart_events else None,
-        "last_success": next((item for item in reversed(recent_restart_events) if item.get("status") == "succeeded"), None),
-        "last_failure": next((item for item in reversed(recent_restart_events) if item.get("status") == "failed"), None),
+        "last_success": next(
+            (
+                item
+                for item in reversed(recent_restart_events)
+                if item.get("status") == "succeeded"
+            ),
+            None,
+        ),
+        "last_failure": next(
+            (
+                item
+                for item in reversed(recent_restart_events)
+                if item.get("status") == "failed"
+            ),
+            None,
+        ),
     }
-    watchdog_recovery_status = STORE.load_runtime_value(f"watchdog_recovery_status:{env_id}", {})
-    watchdog_recovery_hints = STORE.load_runtime_value(f"watchdog_recovery_hints:{env_id}", [])
+    watchdog_recovery_status = STORE.load_runtime_value(
+        f"watchdog_recovery_status:{env_id}", {}
+    )
+    watchdog_recovery_hints = STORE.load_runtime_value(
+        f"watchdog_recovery_hints:{env_id}", []
+    )
+    watchdog_recovery_incidents = STORE.load_runtime_value(
+        f"watchdog_recovery_incidents:{env_id}", []
+    )
     current = STORE.get_current_task(env_id=env_id)
     tasks = STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100)))
     filtered = [task for task in tasks if task.get("env_id") == env_id]
@@ -1491,9 +1788,13 @@ def write_task_registry_snapshot() -> None:
         if question == "未知任务":
             question = STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
         if last_user_message == "未知任务":
-            last_user_message = STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
+            last_user_message = (
+                STORE.get_task_question_candidate(task["task_id"]) or "未知任务"
+            )
         control = STORE.derive_task_control_state(task["task_id"])
-        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
+        core = STORE.get_core_closure_snapshot_for_task(
+            task["task_id"], allow_legacy_projection=False
+        )
         return {
             **task,
             "question": question,
@@ -1510,14 +1811,19 @@ def write_task_registry_snapshot() -> None:
                 "finalization_state": core.get("finalization_state") or "",
                 "final_status": core.get("final_status") or "",
                 "delivery_state": core.get("delivery_state") or "",
-                "delivery_confirmation_level": core.get("delivery_confirmation_level") or "",
+                "delivery_confirmation_level": core.get("delivery_confirmation_level")
+                or "",
                 "needs_followup": bool(core.get("needs_followup")),
-                "truth_level": "core_projection" if core.get("has_core_projection") else "derived",
+                "truth_level": "core_projection"
+                if core.get("has_core_projection")
+                else "derived",
             },
         }
 
     current_payload = enrich_task(current)
-    tasks_payload = [task for task in (enrich_task(item) for item in filtered[:20]) if task]
+    tasks_payload = [
+        task for task in (enrich_task(item) for item in filtered[:20]) if task
+    ]
     payload = {
         "generated_at": int(time.time()),
         "env_id": env_id,
@@ -1526,9 +1832,13 @@ def write_task_registry_snapshot() -> None:
         "tasks": tasks_payload,
         "session_resolution": None,
     }
-    facts_current = payload.get("current") or (tasks_payload[0] if tasks_payload else None)
+    facts_current = payload.get("current") or (
+        tasks_payload[0] if tasks_payload else None
+    )
     session_resolution = (
-        STORE.derive_session_resolution(str((facts_current or {}).get("session_key") or ""))
+        STORE.derive_session_resolution(
+            str((facts_current or {}).get("session_key") or "")
+        )
         if facts_current and facts_current.get("session_key")
         else None
     )
@@ -1542,10 +1852,13 @@ def write_task_registry_snapshot() -> None:
             "task_id": facts_current.get("task_id") if facts_current else None,
             "question": facts_current.get("question") if facts_current else None,
             "status": facts_current.get("status") if facts_current else None,
-            "current_stage": facts_current.get("current_stage") if facts_current else None,
+            "current_stage": facts_current.get("current_stage")
+            if facts_current
+            else None,
             # 核心事实：execution_state, delivery_state, next_action
             "execution_state": control_data.get("control_state") or "unknown",
-            "delivery_state": control_data.get("protocol", {}).get("final") or "missing",
+            "delivery_state": control_data.get("protocol", {}).get("final")
+            or "missing",
             "next_action": control_data.get("next_action") or "none",
             "next_actor": control_data.get("next_actor") or "",
             "is_closed": control_data.get("control_state") == "completed_verified",
@@ -1559,11 +1872,19 @@ def write_task_registry_snapshot() -> None:
         "session_resolution": session_resolution,
     }
     if facts_current:
-        facts_payload["current_root_task"] = (facts_current.get("root_task") or None)
-        facts_payload["current_workflow_run"] = (facts_current.get("current_workflow_run") or None)
-        facts_payload["current_finalizer"] = (facts_current.get("current_finalizer") or None)
-        facts_payload["current_delivery_attempt"] = (facts_current.get("current_delivery_attempt") or None)
-        facts_payload["current_followups"] = list((facts_current.get("current_followups") or []))
+        facts_payload["current_root_task"] = facts_current.get("root_task") or None
+        facts_payload["current_workflow_run"] = (
+            facts_current.get("current_workflow_run") or None
+        )
+        facts_payload["current_finalizer"] = (
+            facts_current.get("current_finalizer") or None
+        )
+        facts_payload["current_delivery_attempt"] = (
+            facts_current.get("current_delivery_attempt") or None
+        )
+        facts_payload["current_followups"] = list(
+            (facts_current.get("current_followups") or [])
+        )
     main_closure_supervision = {
         "generated_at": payload["generated_at"],
         "env_id": env_id,
@@ -1579,7 +1900,9 @@ def write_task_registry_snapshot() -> None:
     }
     if not lightweight_export:
         main_closure_supervision = build_main_closure_supervision_summary(current_spec)
-        foreground_root_id = str(main_closure_supervision.get("foreground_root_task_id") or "")
+        foreground_root_id = str(
+            main_closure_supervision.get("foreground_root_task_id") or ""
+        )
         current_root = next(
             (
                 item
@@ -1593,31 +1916,50 @@ def write_task_registry_snapshot() -> None:
                 (
                     item
                     for item in tasks_payload
-                    if str(((item.get("root_task") or {}).get("root_task_id") or "")) == foreground_root_id
+                    if str(((item.get("root_task") or {}).get("root_task_id") or ""))
+                    == foreground_root_id
                 ),
                 None,
             )
             if matching_task:
                 payload["current"] = matching_task
-        facts_current = payload.get("current") or (tasks_payload[0] if tasks_payload else None)
+        facts_current = payload.get("current") or (
+            tasks_payload[0] if tasks_payload else None
+        )
         session_resolution = (
-            STORE.derive_session_resolution(str((facts_current or {}).get("session_key") or ""))
+            STORE.derive_session_resolution(
+                str((facts_current or {}).get("session_key") or "")
+            )
             if facts_current and facts_current.get("session_key")
             else None
         )
         payload["session_resolution"] = session_resolution
         facts_payload["current_root_task"] = current_root
         if current_root:
-            current_workflow_run_id = str(current_root.get("current_workflow_run_id") or "")
+            current_workflow_run_id = str(
+                current_root.get("current_workflow_run_id") or ""
+            )
             if current_workflow_run_id:
-                facts_payload["current_workflow_run"] = STORE.get_workflow_run(current_workflow_run_id)
+                facts_payload["current_workflow_run"] = STORE.get_workflow_run(
+                    current_workflow_run_id
+                )
             root_task_id = str(current_root.get("root_task_id") or "")
             if root_task_id:
-                facts_payload["current_followups"] = STORE.list_followups(root_task_id=root_task_id, limit=20)
-                finalizers = STORE.list_finalizer_records(root_task_id=root_task_id, limit=5)
-                deliveries = STORE.list_delivery_attempts(root_task_id=root_task_id, limit=10)
-                facts_payload["current_finalizer"] = finalizers[0] if finalizers else None
-                facts_payload["current_delivery_attempt"] = deliveries[0] if deliveries else None
+                facts_payload["current_followups"] = STORE.list_followups(
+                    root_task_id=root_task_id, limit=20
+                )
+                finalizers = STORE.list_finalizer_records(
+                    root_task_id=root_task_id, limit=5
+                )
+                deliveries = STORE.list_delivery_attempts(
+                    root_task_id=root_task_id, limit=10
+                )
+                facts_payload["current_finalizer"] = (
+                    finalizers[0] if finalizers else None
+                )
+                facts_payload["current_delivery_attempt"] = (
+                    deliveries[0] if deliveries else None
+                )
     data_dir = BASE_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "task-registry-summary.json").write_text(
@@ -1646,7 +1988,9 @@ def write_task_registry_snapshot() -> None:
         "gateway_running": gateway_running,
         "gateway_healthy": gateway_healthy,
     }
-    version_payload = record_version_state(current_spec, reason="guardian_snapshot", status="observed")
+    version_payload = record_version_state(
+        current_spec, reason="guardian_snapshot", status="observed"
+    )
     recovery_profile = build_recovery_profile(version_payload)
     learning_backlog = {
         "generated_at": int(time.time()),
@@ -1658,8 +2002,12 @@ def write_task_registry_snapshot() -> None:
     self_check_supervision = build_self_check_supervision_summary(current_spec)
     promotion_policy = {
         "generated_at": int(time.time()),
-        "reflection_interval_seconds": int(CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600)),
-        "learning_promotion_threshold": int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3)),
+        "reflection_interval_seconds": int(
+            CONFIG.get("REFLECTION_INTERVAL_SECONDS", 3600)
+        ),
+        "learning_promotion_threshold": int(
+            CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3)
+        ),
         "daily_review_expected": True,
         "rules": [
             "同类 learning 发生次数达到阈值后自动进入 promoted。",
@@ -1700,11 +2048,19 @@ def write_task_registry_snapshot() -> None:
             {
                 "generated_at": learning_supervision.get("generated_at"),
                 "env_id": learning_supervision.get("env_id"),
-                "last_daily_reflection_at": learning_supervision.get("last_daily_reflection_at"),
-                "last_memory_maintenance_at": learning_supervision.get("last_memory_maintenance_at"),
+                "last_daily_reflection_at": learning_supervision.get(
+                    "last_daily_reflection_at"
+                ),
+                "last_memory_maintenance_at": learning_supervision.get(
+                    "last_memory_maintenance_at"
+                ),
                 "last_team_rollup_at": learning_supervision.get("last_team_rollup_at"),
-                "daily_reflection_status": learning_supervision.get("daily_reflection_status"),
-                "memory_maintenance_status": learning_supervision.get("memory_maintenance_status"),
+                "daily_reflection_status": learning_supervision.get(
+                    "daily_reflection_status"
+                ),
+                "memory_maintenance_status": learning_supervision.get(
+                    "memory_maintenance_status"
+                ),
                 "team_rollup_status": learning_supervision.get("team_rollup_status"),
             },
             ensure_ascii=False,
@@ -1718,7 +2074,9 @@ def write_task_registry_snapshot() -> None:
                 "generated_at": learning_supervision.get("generated_at"),
                 "env_id": learning_supervision.get("env_id"),
                 "freshness_seconds": learning_supervision.get("memory_freshness"),
-                "status": "fresh" if (learning_supervision.get("memory_freshness") or 10**9) < 86400 else "stale",
+                "status": "fresh"
+                if (learning_supervision.get("memory_freshness") or 10**9) < 86400
+                else "stale",
             },
             ensure_ascii=False,
             indent=2,
@@ -1838,6 +2196,10 @@ def write_task_registry_snapshot() -> None:
         json.dumps(watchdog_recovery_hints, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    (shared_dir / "watchdog-recovery-incidents.json").write_text(
+        json.dumps(watchdog_recovery_incidents, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (shared_dir / "openclaw-version.json").write_text(
         json.dumps(version_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1869,6 +2231,7 @@ def write_task_registry_snapshot() -> None:
         "- restart-runtime-status.json: 最近重启链路摘要与最后成功/失败结果\n"
         "- restart-events.json: 最近重启事件时间线\n"
         "- watchdog-recovery-status.json: watchdog 异常识别、分型、调度统计\n"
+        "- watchdog-recovery-incidents.json: watchdog 最小 incident 输出与冻结证据\n"
         "- watchdog-recovery-hints.json: watchdog 最近生成/派发的结构化提示\n"
         "- openclaw-version.json: 当前运行代码版本、commit、分支与 upstream 偏移\n"
         "- openclaw-recovery-profile.json: 当前版本 / known good / 回退提示\n",
@@ -1893,9 +2256,17 @@ def write_task_registry_snapshot() -> None:
                 ensure_ascii=False,
             )
         ]
-    (monitor_dir / "tasks.jsonl").write_text(("\n".join(tasks_lines) + ("\n" if tasks_lines else "")), encoding="utf-8")
-    dlq_lines = [json.dumps(item, ensure_ascii=False) for item in watcher_items if item.get("in_dlq")]
-    (monitor_dir / "dlq.jsonl").write_text(("\n".join(dlq_lines) + ("\n" if dlq_lines else "")), encoding="utf-8")
+    (monitor_dir / "tasks.jsonl").write_text(
+        ("\n".join(tasks_lines) + ("\n" if tasks_lines else "")), encoding="utf-8"
+    )
+    dlq_lines = [
+        json.dumps(item, ensure_ascii=False)
+        for item in watcher_items
+        if item.get("in_dlq")
+    ]
+    (monitor_dir / "dlq.jsonl").write_text(
+        ("\n".join(dlq_lines) + ("\n" if dlq_lines else "")), encoding="utf-8"
+    )
     # Transitional export only: these files keep the current dashboard/shared-
     # state views working during migration, but canonical learning artifacts
     # should move to OpenClaw-owned generation.
@@ -1914,23 +2285,40 @@ def write_task_registry_snapshot() -> None:
         for item in learnings
         if str(item.get("lifecycle_state") or "") in {"verified", "closed"}
     ]
-    feature_lines = [f"- {item.get('title')}: {item.get('detail')}" for item in learnings if str(item.get("category")) == "feature_request"]
-    errors_body = "# Errors\n\n" + ("\n".join(errors_lines) if errors_lines else "- 暂无待处理错误模式\n")
+    feature_lines = [
+        f"- {item.get('title')}: {item.get('detail')}"
+        for item in learnings
+        if str(item.get("category")) == "feature_request"
+    ]
+    errors_body = "# Errors\n\n" + (
+        "\n".join(errors_lines) if errors_lines else "- 暂无待处理错误模式\n"
+    )
     learnings_body = render_learnings_markdown(STORE, limit=200)
-    feature_body = "# Feature Requests\n\n" + ("\n".join(feature_lines) if feature_lines else "- 暂无 feature requests\n")
+    feature_body = "# Feature Requests\n\n" + (
+        "\n".join(feature_lines) if feature_lines else "- 暂无 feature requests\n"
+    )
     (learnings_dir / "ERRORS.md").write_text(errors_body, encoding="utf-8")
     (learnings_dir / "LEARNINGS.md").write_text(learnings_body, encoding="utf-8")
     (learnings_dir / "FEATURE_REQUESTS.md").write_text(feature_body, encoding="utf-8")
     (env_learnings_dir / "ERRORS.md").write_text(errors_body, encoding="utf-8")
     (env_learnings_dir / "LEARNINGS.md").write_text(learnings_body, encoding="utf-8")
-    (env_learnings_dir / "FEATURE_REQUESTS.md").write_text(feature_body, encoding="utf-8")
+    (env_learnings_dir / "FEATURE_REQUESTS.md").write_text(
+        feature_body, encoding="utf-8"
+    )
     write_state_snapshot(BASE_DIR, STORE)
     memory_dir = BASE_DIR / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     env_memory_dir = env_home / "memory"
     env_memory_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
-    memory_body = "# Daily Memory\n\n" + json.dumps({"reflection_runs": learning_backlog["reflections"][:5], "summary": learning_backlog["summary"]}, ensure_ascii=False, indent=2)
+    memory_body = "# Daily Memory\n\n" + json.dumps(
+        {
+            "reflection_runs": learning_backlog["reflections"][:5],
+            "summary": learning_backlog["summary"],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
     (memory_dir / f"{today}.md").write_text(memory_body + "\n", encoding="utf-8")
     (env_memory_dir / f"{today}.md").write_text(memory_body + "\n", encoding="utf-8")
     memory_index = (
@@ -1947,6 +2335,119 @@ def write_task_registry_snapshot() -> None:
 def derive_learning_key(*parts: str) -> str:
     joined = "|".join(part.strip() for part in parts if part is not None)
     return hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
+def detect_runtime_problem_code(anomaly: dict[str, Any]) -> str:
+    anomaly_type = str(anomaly.get("type") or "").strip()
+    if anomaly_type == "no_reply":
+        return "no_reply_after_commit"
+    if anomaly_type in {"dispatch_stuck", "stage_stuck", "stalled_reply"}:
+        return "task_execution_stalled"
+    if anomaly_type == "gateway_ws_closed":
+        return "gateway_unhealthy"
+    if anomaly_type == "main_closure_purity_gate_failed":
+        return "purity_gate_failed"
+    if anomaly_type == "model_timeout":
+        return "model_timeout"
+    if anomaly_type == "failover_exhausted":
+        return "failover_exhausted"
+    if anomaly_type == "channel_inflight_stuck":
+        return "channel_inflight_stuck"
+    if anomaly_type == "run_tracking_warning":
+        return "run_tracking_warning"
+    return "unknown_problem"
+
+
+def capture_runtime_anomaly_learnings(
+    anomalies: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
+        return []
+    env_id = current_env_spec()["id"]
+    captured: list[dict[str, Any]] = []
+    for anomaly in anomalies:
+        problem_code = detect_runtime_problem_code(anomaly)
+        details = dict(anomaly.get("details") or {})
+        question = str(details.get("question") or "").strip()
+        task_id = str(details.get("task_id") or "")
+        title = f"runtime_observation:{problem_code}"
+        summary = (
+            f"type={str(anomaly.get('type') or '-').strip()};"
+            f"message={str(anomaly.get('message') or '-').strip()};"
+            f"question={question or '-'}"
+        )
+        scope = question or task_id or env_id
+        learning_key = derive_learning_key("runtime", env_id, problem_code, scope)
+        learning = record_learning(
+            STORE,
+            learning_key=learning_key,
+            problem_code=problem_code,
+            title=title,
+            summary=summary,
+            evidence={
+                "anomaly": anomaly,
+                "env_id": env_id,
+            },
+            root_task_id=task_id,
+            actor="guardian",
+        )
+        captured.append(learning)
+    return captured
+
+
+def capture_task_execution_learnings(
+    *, now: int | None = None, stale_after: int | None = None
+) -> list[dict[str, Any]]:
+    if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
+        return []
+    env_id = current_env_spec()["id"]
+    current_ts = int(now or time.time())
+    stale_seconds = int(stale_after or CONFIG.get("GUARDIAN_STALE_TASK_MAX_AGE", 3600))
+    captured: list[dict[str, Any]] = []
+    for task in STORE.list_active_tasks(limit=200):
+        task_id = str(task.get("task_id") or "")
+        if not task_id:
+            continue
+        status = str(task.get("status") or "").strip().lower()
+        if status in {"completed", "closed", "cancelled", "failed", "blocked"}:
+            continue
+        last_activity = max(
+            int(task.get("last_progress_at") or 0),
+            int(task.get("updated_at") or 0),
+            int(task.get("started_at") or 0),
+            int(task.get("created_at") or 0),
+        )
+        if not last_activity or current_ts - last_activity < stale_seconds:
+            continue
+        question = str(
+            task.get("question") or task.get("last_user_message") or "未知任务"
+        )
+        current_stage = str(task.get("current_stage") or "").strip()
+        learning_key = derive_learning_key(
+            "task", env_id, "task_execution_stalled", task_id
+        )
+        learning = record_learning(
+            STORE,
+            learning_key=learning_key,
+            problem_code="task_execution_stalled",
+            title="task_execution:stalled",
+            summary=(
+                f"task={task_id};status={status or '-'};"
+                f"stage={current_stage or '-'};idle={current_ts - last_activity}"
+            ),
+            evidence={
+                "task_id": task_id,
+                "question": question,
+                "status": status,
+                "current_stage": current_stage,
+                "idle_seconds": current_ts - last_activity,
+                "env_id": env_id,
+            },
+            root_task_id=task_id,
+            actor="guardian",
+        )
+        captured.append(learning)
+    return captured
 
 
 def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
@@ -1971,10 +2472,31 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
         blocked_reason = str(outcome.get("blocked_reason") or "").strip()
         control_state = str(outcome.get("control_state") or "").strip()
         task = STORE.get_task(task_id) or {}
-        problem_code = blocked_reason if blocked_reason in {"missing_pipeline_receipt", "wrong_task_binding", "no_reply_after_commit", "delivery_failed_without_notice", "late_result_not_adopted", "followup_misbound", "followup_pending_without_main_recovery", "received_only_requires_main_followup", "heartbeat_missing_soft", "heartbeat_missing_hard", "heartbeat_missing_blocked", "task_blocked_user_visible", "task_closure_missing"} else "task_closure_missing"
+        problem_code = (
+            blocked_reason
+            if blocked_reason
+            in {
+                "missing_pipeline_receipt",
+                "wrong_task_binding",
+                "no_reply_after_commit",
+                "delivery_failed_without_notice",
+                "late_result_not_adopted",
+                "followup_misbound",
+                "followup_pending_without_main_recovery",
+                "received_only_requires_main_followup",
+                "heartbeat_missing_soft",
+                "heartbeat_missing_hard",
+                "heartbeat_missing_blocked",
+                "task_blocked_user_visible",
+                "task_closure_missing",
+            }
+            else "task_closure_missing"
+        )
         title = f"control_observation:{problem_code}"
         detail = f"task={task_id};control_state={control_state or '-'};action={action};blocked_reason={blocked_reason or '-'}"
-        learning_key = derive_learning_key("control", env_id, control_state, problem_code)
+        learning_key = derive_learning_key(
+            "control", env_id, control_state, problem_code
+        )
         learning = record_learning(
             STORE,
             learning_key=learning_key,
@@ -1983,7 +2505,9 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
             summary=detail,
             evidence={
                 "task_id": task_id,
-                "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                "question": task.get("question")
+                or task.get("last_user_message")
+                or "未知任务",
                 "control_state": control_state,
                 "blocked_reason": blocked_reason,
                 "action": action,
@@ -1997,7 +2521,7 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
 
 def promote_learning_to_memory(learning: dict[str, Any]) -> None:
     """将 promoted learning 写入 MEMORY.md 和 memory/YYYY-MM-DD.md
-    
+
     自我学习进化闭环的核心函数：
     - 自动沉淀学习结果到 MEMORY.md
     - 自动生成每日反思记录
@@ -2007,24 +2531,26 @@ def promote_learning_to_memory(learning: dict[str, Any]) -> None:
     title = learning.get("title", "")
     detail = learning.get("detail", "")
     evidence = learning.get("evidence", {})
-    
+
     # 写入 memory/YYYY-MM-DD.md
     today = datetime.now().strftime("%Y-%m-%d")
     memory_dir = BASE_DIR / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     memory_file = memory_dir / f"{today}.md"
-    
+
     with open(memory_file, "a", encoding="utf-8") as f:
         f.write(f"\n## {category}: {title}\n\n")
         f.write(f"{detail}\n\n")
         if evidence:
-            f.write(f"**证据**:\n```\n{json.dumps(evidence, ensure_ascii=False, indent=2)}\n```\n\n")
-    
+            f.write(
+                f"**证据**:\n```\n{json.dumps(evidence, ensure_ascii=False, indent=2)}\n```\n\n"
+            )
+
     # 写入 MEMORY.md
     main_memory = BASE_DIR / "MEMORY.md"
     if not main_memory.exists():
         main_memory.write_text("# MEMORY.md\n\n", encoding="utf-8")
-    
+
     with open(main_memory, "a", encoding="utf-8") as f:
         f.write(f"\n### {category}\n\n")
         f.write(f"- **{title}**: {detail}\n")
@@ -2033,6 +2559,7 @@ def promote_learning_to_memory(learning: dict[str, Any]) -> None:
 # ========== 心跳检测 + Guardrail ==========
 TASK_WATCHER: TaskWatcher | None = None
 RECOVERY_WATCHDOG: RecoveryWatchdog | None = None
+
 
 def get_task_watcher() -> TaskWatcher:
     """获取任务监控器（单例）"""
@@ -2045,7 +2572,9 @@ def get_task_watcher() -> TaskWatcher:
 def get_recovery_watchdog() -> RecoveryWatchdog:
     global RECOVERY_WATCHDOG
     if RECOVERY_WATCHDOG is None:
-        RECOVERY_WATCHDOG = RecoveryWatchdog(base_dir=BASE_DIR, store=STORE, config=CONFIG)
+        RECOVERY_WATCHDOG = RecoveryWatchdog(
+            base_dir=BASE_DIR, store=STORE, config=CONFIG
+        )
     else:
         RECOVERY_WATCHDOG.config = CONFIG
     return RECOVERY_WATCHDOG
@@ -2076,43 +2605,47 @@ def run_recovery_watchdog(spec: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def run_monitor_db_retention() -> dict[str, Any]:
     result = STORE.prune_retention(CONFIG)
-    deleted = {k: v for k, v in (result.get("deleted") or {}).items() if int(v or 0) > 0}
+    deleted = {
+        k: v for k, v in (result.get("deleted") or {}).items() if int(v or 0) > 0
+    }
     if deleted:
         summary = ", ".join(f"{k}={v}" for k, v in deleted.items())
         log(f"DB retention pruned: {summary}")
     return result
 
 
-def run_self_evolution_cycle(*, dry_run: bool = False) -> dict[str, Any]:
+def run_self_evolution_maintenance_cycle(*, dry_run: bool = False) -> dict[str, Any]:
     """运行自我进化周期
-    
+
     功能：
     1. 检查所有重复问题
     2. 尝试自动解决
     3. 更新 LEARNINGS.md
     4. 生成每日报告
-    
+
     这是自我进化的核心：不只是记录问题，而是主动解决。
     """
     from self_evolution import run_self_evolution_cycle as _run_cycle
-    
+
     result = _run_cycle(BASE_DIR, STORE, recurrence_threshold=10, dry_run=dry_run)
-    
+
     # 记录结果
     resolution = result.get("resolution") or {}
     checked = resolution.get("checked_count") or 0
     resolved = resolution.get("resolved_count") or 0
     unresolvable = resolution.get("unresolvable_count") or 0
-    
+
     if checked > 0:
-        log(f"自我进化周期完成: 检查 {checked} 个问题, 解决 {resolved} 个, {unresolvable} 个需要人工介入")
-    
+        log(
+            f"自我进化周期完成: 检查 {checked} 个问题, 解决 {resolved} 个, {unresolvable} 个需要人工介入"
+        )
+
     return result
 
 
 def check_heartbeat_and_guardrail() -> dict[str, Any]:
     """心跳检测 + Guardrail 检查
-    
+
     功能：
     1. 检查所有活跃任务的心跳状态
     2. 检测超时任务
@@ -2121,21 +2654,24 @@ def check_heartbeat_and_guardrail() -> dict[str, Any]:
     """
     watcher = get_task_watcher()
     result = watcher.check_all_tasks()
-    
+
     # 处理超时任务
     for timeout_task in result.get("timeout_tasks", []):
         task_id = timeout_task.get("task_id")
         if task_id:
             log(f"检测到超时任务: {task_id}", "WARNING")
-            
+
             # 尝试恢复
             recovery_result = watcher.recover_timeout_task(task_id)
-            
+
             if recovery_result.get("success"):
                 log(f"任务 {task_id} 恢复成功: {recovery_result.get('action')}")
             else:
-                log(f"任务 {task_id} 恢复失败: {recovery_result.get('message')}", "ERROR")
-                
+                log(
+                    f"任务 {task_id} 恢复失败: {recovery_result.get('message')}",
+                    "ERROR",
+                )
+
                 # 通知用户
                 if should_alert("task_timeout"):
                     notify(
@@ -2143,14 +2679,14 @@ def check_heartbeat_and_guardrail() -> dict[str, Any]:
                         f"任务 {task_id} 已超时且无法自动恢复\n"
                         f"阶段: {timeout_task.get('phase')}\n"
                         f"超时时间: {timeout_task.get('timeout_seconds')}秒",
-                        "error"
+                        "error",
                     )
-    
+
     # 记录健康状态
     health_status = result.get("health_status", "healthy")
     if health_status != "healthy":
         STORE.save_runtime_value("last_degraded_at", int(time.time() * 1000))
-    
+
     return result
 
 
@@ -2183,20 +2719,32 @@ def _infer_heartbeat_phase_for_task(task: dict[str, Any]) -> HeartbeatPhase:
     combined = f"{stage} {question}"
     if "plan" in combined or "planning" in combined or "方案" in combined:
         return HeartbeatPhase.PLANNING
-    if "dev" in combined or "implementation" in combined or "开发" in combined or "实现" in combined:
+    if (
+        "dev" in combined
+        or "implementation" in combined
+        or "开发" in combined
+        or "实现" in combined
+    ):
         return HeartbeatPhase.IMPLEMENTATION
     if "test" in combined or "testing" in combined or "测试" in combined:
         return HeartbeatPhase.TESTING
     if "calculation" in combined or "calculator" in combined or "计算" in combined:
         return HeartbeatPhase.CALCULATION
-    if "verification" in combined or "verifier" in combined or "校验" in combined or "验证" in combined:
+    if (
+        "verification" in combined
+        or "verifier" in combined
+        or "校验" in combined
+        or "验证" in combined
+    ):
         return HeartbeatPhase.VERIFICATION
     if "risk" in combined or "风控" in combined:
         return HeartbeatPhase.RISK_ASSESSMENT
     return HeartbeatPhase.IDLE
 
 
-def _infer_heartbeat_progress_for_task(task: dict[str, Any], phase: HeartbeatPhase) -> int:
+def _infer_heartbeat_progress_for_task(
+    task: dict[str, Any], phase: HeartbeatPhase
+) -> int:
     if str(task.get("status") or "") == "blocked":
         return 0
     defaults = {
@@ -2247,14 +2795,14 @@ def get_observability_report() -> dict[str, Any]:
 
 def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     """自我学习进化闭环的核心函数。
-    
+
     功能：
     1. 检查过去 24 小时的 learnings
     2. 自动 promote 达到阈值的 learnings
     3. 将 promoted learnings 写入 MEMORY.md 和 memory/YYYY-MM-DD.md
     4. 根据学习结果自动改进系统
     5. 主动检查并解决重复问题
-    
+
     边界原则：
     - 这是自我学习进化的核心闭环
     - 不需要人工干预
@@ -2268,18 +2816,22 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     if not force and last_run and now - last_run < interval:
         return {"status": "skipped", "promoted": 0, "reviewed": 0}
 
+    # 先把运行时问题和任务执行问题沉淀为 learning，再做反思/解决。
+    scan_runtime_anomalies()
+    capture_task_execution_learnings(now=now)
+
     # 1. 生成每日报告
     report = generate_daily_evolution_report(STORE, now=now)
-    
+
     # 2. 主动检查并解决重复问题
     from self_evolution import spawn_reflection_agent
-    
+
     resolution_result = check_and_resolve_learnings(
         STORE,
         recurrence_threshold=int(CONFIG.get("LEARNING_PROMOTION_THRESHOLD", 3)),
         dry_run=False,
     )
-    
+
     # 3. 如果有无法自动解决的问题，派发给主脑（不通知主人，等主脑处理完再通知）
     if resolution_result.get("unresolvable"):
         spawn_result = spawn_reflection_agent(
@@ -2288,23 +2840,25 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
         )
         log(f"反思链派发任务给主脑: {spawn_result.get('task_file')}", "INFO")
         resolution_result["spawn_result"] = spawn_result
-    
+
     # 3. 写入 LEARNINGS.md
     learnings_dir = BASE_DIR / ".learnings"
     learnings_dir.mkdir(parents=True, exist_ok=True)
     learnings_md = render_learnings_markdown(STORE, limit=100)
     (learnings_dir / "LEARNINGS.md").write_text(learnings_md, encoding="utf-8")
-    
+
     # 4. 将 promoted learnings 写入 MEMORY.md
     projections = STORE.list_self_evolution_projections(limit=100)
     for item in projections:
         current_state = str(item.get("current_state") or "")
         if current_state in ("adopted", "verified"):
             promote_learning_to_memory(item)
-    
+
     # 5. 写入状态快照和日报
     promoted = int(report.get("rules_added") or 0)
-    reviewed = int(report.get("issues_fixed") or 0) + int(report.get("pending_verification") or 0)
+    reviewed = int(report.get("issues_fixed") or 0) + int(
+        report.get("pending_verification") or 0
+    )
     summary = {
         "status": "ok",
         "reviewed": reviewed,
@@ -2320,17 +2874,36 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     write_state_snapshot(BASE_DIR, STORE, now=now)
     evolution_dir = BASE_DIR / "self-evolution"
     evolution_dir.mkdir(parents=True, exist_ok=True)
-    (evolution_dir / f"daily-report-{time.strftime('%Y-%m-%d', time.localtime(now))}.md").write_text(
+    (
+        evolution_dir
+        / f"daily-report-{time.strftime('%Y-%m-%d', time.localtime(now))}.md"
+    ).write_text(
         render_daily_evolution_report_markdown(STORE, now=now),
         encoding="utf-8",
     )
-    
+
     # 6. 如果有高复发问题，记录告警
     if resolution_result.get("unresolvable_count", 0) > 0:
-        log(f"反思链发现 {resolution_result['unresolvable_count']} 个无法自动解决的问题", "WARNING")
+        log(
+            f"反思链发现 {resolution_result['unresolvable_count']} 个无法自动解决的问题",
+            "WARNING",
+        )
         for item in resolution_result.get("unresolvable", [])[:3]:
-            log(f"  - {item.get('problem_code')}: 复发 {item.get('recurrence_count')} 次", "WARNING")
-    
+            log(
+                f"  - {item.get('problem_code')}: 复发 {item.get('recurrence_count')} 次",
+                "WARNING",
+            )
+
+    log(
+        "自我进化周期完成: "
+        f"新记录={report.get('issues_found', 0)} "
+        f"复发={report.get('recurrence_events', 0)} "
+        f"验证通过={report.get('issues_fixed', 0)} "
+        f"待验证={report.get('pending_verification', 0)} "
+        f"已解决={resolution_result.get('resolved_count', 0)} "
+        f"待人工={resolution_result.get('unresolvable_count', 0)}"
+    )
+
     return summary
 
 
@@ -2358,7 +2931,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
         return
 
     env_id = current_env_spec()["id"]
-    contract_catalog = load_task_contract_catalog(BASE_DIR, str(CONFIG.get("TASK_CONTRACTS_FILE", "") or ""))
+    contract_catalog = load_task_contract_catalog(
+        BASE_DIR, str(CONFIG.get("TASK_CONTRACTS_FILE", "") or "")
+    )
     question_candidates: list[tuple[int, str]] = []
     open_dispatches: dict[str, dict[str, Any]] = {}
     last_closed_dispatch: dict[str, Any] | None = None
@@ -2369,7 +2944,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
         task = STORE.get_task(task_id)
         if not task:
             return
-        core = STORE.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
+        core = STORE.get_core_closure_snapshot_for_task(
+            task_id, allow_legacy_projection=False
+        )
         root_task_id = str((core.get("root_task") or {}).get("root_task_id") or "")
         if not root_task_id or root_task_id.startswith("legacy-root:"):
             STORE.sync_legacy_task_projection(task_id)
@@ -2400,7 +2977,11 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                     nearest_question = qmsg
                     break
             requester_open_id = extract_requester_open_id(line)
-            session_key = extract_runtime_session_key(line) or requester_open_id or f"dispatch:{ts_raw}"
+            session_key = (
+                extract_runtime_session_key(line)
+                or requester_open_id
+                or f"dispatch:{ts_raw}"
+            )
             existing = STORE.get_latest_task_for_session(session_key)
             touched_session_keys.add(session_key)
             question_text = normalize_task_question(nearest_question)
@@ -2408,7 +2989,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 question_text = normalize_task_question(
                     existing.get("last_user_message") or existing.get("question", "")
                 )
-            existing_contract = STORE.get_task_contract(existing["task_id"]) if existing else None
+            existing_contract = (
+                STORE.get_task_contract(existing["task_id"]) if existing else None
+            )
             contract = infer_task_contract(
                 question_text,
                 catalog=contract_catalog,
@@ -2494,7 +3077,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 reconcile_task(dispatch["task_id"])
                 continue
             dispatch["marker"] = str(normalized_payload.get("marker") or marker)
-            dispatch["current_stage"] = str(normalized_payload.get("stage") or normalize_stage_label(marker))
+            dispatch["current_stage"] = str(
+                normalized_payload.get("stage") or normalize_stage_label(marker)
+            )
             dispatch["last_progress_at"] = int(ts)
             dispatch["updated_at"] = int(ts)
             STORE.update_task_fields(
@@ -2550,7 +3135,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 blocked_reason = receipt.get("evidence", "")
             elif action == "completed":
                 status = "running"
-            dispatch["current_stage"] = stage_label or dispatch.get("current_stage", "处理中")
+            dispatch["current_stage"] = stage_label or dispatch.get(
+                "current_stage", "处理中"
+            )
             dispatch["last_progress_at"] = int(ts)
             dispatch["updated_at"] = int(ts)
             dispatch["status"] = status
@@ -2601,7 +3188,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 status=status,
                 current_stage=stage,
                 updated_at=int(ts),
-                completed_at=int(ts) if close_dispatch else int(dispatch.get("completed_at") or 0),
+                completed_at=int(ts)
+                if close_dispatch
+                else int(dispatch.get("completed_at") or 0),
             )
             touched_task_ids.add(dispatch["task_id"])
             touched_session_keys.add(dispatch.get("session_key") or "")
@@ -2631,7 +3220,6 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
     write_task_registry_snapshot()
 
 
-
 def lookup_openclaw_session_id(session_key: str) -> str | None:
     """Resolve a sessionKey to sessionId using the local OpenClaw session store."""
     if not session_key:
@@ -2649,9 +3237,15 @@ def lookup_openclaw_session_id(session_key: str) -> str | None:
         log(f"读取 OpenClaw 会话失败: {stderr or 'unknown error'}", "ERROR")
         return None
     try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError:
-        log("解析 OpenClaw 会话列表失败", "ERROR")
+        # 插件日志可能混在输出中，取最后一个 JSON 对象
+        json_str = stdout.strip()
+        if "\n{" in json_str:
+            # 找到最后一个 JSON 对象的开始位置
+            last_brace = json_str.rfind("\n{")
+            json_str = json_str[last_brace + 1 :]
+        payload = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        log(f"解析 OpenClaw 会话列表失败: {e}", "ERROR")
         return None
 
     for item in payload.get("sessions", []):
@@ -2661,7 +3255,9 @@ def lookup_openclaw_session_id(session_key: str) -> str | None:
             cache[key] = session_id
 
     if cache:
-        STORE.save_runtime_value("openclaw_session_cache", trim_runtime_seen(cache, keep=500))
+        STORE.save_runtime_value(
+            "openclaw_session_cache", trim_runtime_seen(cache, keep=500)
+        )
     return cache.get(session_key)
 
 
@@ -2687,7 +3283,7 @@ def send_guardian_followup(
         "--channel",
         "feishu",  # 指定通道，避免多通道配置冲突
     ]
-    
+
     # 从 session_key 中提取 open_id 用于 --reply-to
     # session_key 格式: agent:main:feishu:direct:ou_xxx
     if deliver and session_key:
@@ -2707,8 +3303,7 @@ def send_guardian_followup(
         return True, None
     error_text = stderr or stdout or "unknown error"
     log(
-        f"守护追问失败({session_key} -> {session_id}): "
-        f"{error_text}",
+        f"守护追问失败({session_key} -> {session_id}): {error_text}",
         "ERROR",
     )
     return False, classify_guardian_followup_error(error_text)
@@ -2735,17 +3330,19 @@ def check_session_has_response(session_key: str, since_timestamp: int) -> bool:
     """检查会话是否有新的响应（追问后主脑是否回复）"""
     if not session_key:
         return False
-    
+
     # 从会话缓存中获取最后活动时间
     cache = STORE.load_runtime_value("openclaw_session_cache", {})
     session_info = cache.get(session_key, {})
     last_activity = int(session_info.get("last_activity", 0) or 0)
-    
+
     # 如果最后活动时间 > 追问时间，说明有响应
     if last_activity > since_timestamp:
-        log(f"检测到会话有新响应: {session_key} (last_activity={last_activity}, since={since_timestamp})")
+        log(
+            f"检测到会话有新响应: {session_key} (last_activity={last_activity}, since={since_timestamp})"
+        )
         return True
-    
+
     return False
 
 
@@ -2760,20 +3357,22 @@ def deliver_guardian_progress_update(
     open_id = dispatch.get("requester_open_id") or ""
     retries = max(1, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRIES", 2)))
     retry_delay = max(0, int(CONFIG.get("GUARDIAN_FOLLOWUP_RETRY_DELAY", 3)))
-    response_check_delay = max(5, int(CONFIG.get("GUARDIAN_RESPONSE_CHECK_DELAY", 10)))  # 等待响应的时间
+    response_check_delay = max(
+        5, int(CONFIG.get("GUARDIAN_RESPONSE_CHECK_DELAY", 10))
+    )  # 等待响应的时间
     blocked_reason: str | None = None
 
     if session_key:
         for attempt in range(1, retries + 1):
             # 记录追问时间
             followup_sent_at = int(time.time())
-            
+
             ok, error_kind = send_guardian_followup(session_key, followup_message)
             if ok:
                 # 追问发送成功，等待主脑响应
                 log(f"追问已发送，等待主脑响应: {session_key}")
                 time.sleep(response_check_delay)
-                
+
                 # 检查是否有响应
                 if check_session_has_response(session_key, followup_sent_at):
                     log(f"主脑已响应追问: {session_key}")
@@ -2783,12 +3382,17 @@ def deliver_guardian_progress_update(
                     # 记录追问成功但未确认响应
                     STORE.save_runtime_value(
                         f"followup_pending:{session_key}",
-                        {"sent_at": followup_sent_at, "confirmed": False}
+                        {"sent_at": followup_sent_at, "confirmed": False},
                     )
                     return "session", "response_not_confirmed"
-                    
+
             blocked_reason = error_kind or blocked_reason
-            if blocked_reason in {"session_lock", "model_auth", "model_unavailable", "model_pool_failed"}:
+            if blocked_reason in {
+                "session_lock",
+                "model_auth",
+                "model_unavailable",
+                "model_pool_failed",
+            }:
                 break
             if attempt < retries and retry_delay:
                 time.sleep(retry_delay)
@@ -2810,7 +3414,9 @@ def trim_runtime_seen(seen: dict[str, int], keep: int = 2000) -> dict[str, int]:
     return dict(newest)
 
 
-def trim_runtime_state_map(state: dict[str, dict[str, Any]], keep: int = 500) -> dict[str, dict[str, Any]]:
+def trim_runtime_state_map(
+    state: dict[str, dict[str, Any]], keep: int = 500
+) -> dict[str, dict[str, Any]]:
     """Bound runtime state maps keyed by task/session using their freshest timestamp."""
     if len(state) <= keep:
         return state
@@ -2827,7 +3433,9 @@ def trim_runtime_state_map(state: dict[str, dict[str, Any]], keep: int = 500) ->
     return dict(newest)
 
 
-def should_record_control_plane_anomaly(task_id: str, blocked_reason: str, *, interval: int = 1800) -> bool:
+def should_record_control_plane_anomaly(
+    task_id: str, blocked_reason: str, *, interval: int = 1800
+) -> bool:
     seen = STORE.load_runtime_value("control_plane_block_seen", {})
     key = f"{task_id}:{blocked_reason}"
     now = int(time.time())
@@ -2835,7 +3443,9 @@ def should_record_control_plane_anomaly(task_id: str, blocked_reason: str, *, in
     if last and now - last < interval:
         return False
     seen[key] = now
-    STORE.save_runtime_value("control_plane_block_seen", trim_runtime_seen(seen, keep=500))
+    STORE.save_runtime_value(
+        "control_plane_block_seen", trim_runtime_seen(seen, keep=500)
+    )
     return True
 
 
@@ -2853,7 +3463,9 @@ def attach_guardian_progress_fact(
     STORE.record_task_event(task["task_id"], event_type, payload)
 
 
-def attach_background_result_if_late(task_id: str, session_key: str, *, completed_at: int, status: str) -> None:
+def attach_background_result_if_late(
+    task_id: str, session_key: str, *, completed_at: int, status: str
+) -> None:
     if not session_key:
         return
     tasks = STORE.list_tasks_for_session(session_key, limit=20)
@@ -2869,14 +3481,18 @@ def attach_background_result_if_late(task_id: str, session_key: str, *, complete
     )
     if not newer_active:
         return
-    STORE.update_task_fields(task_id, backgrounded_at=completed_at, updated_at=completed_at)
+    STORE.update_task_fields(
+        task_id, backgrounded_at=completed_at, updated_at=completed_at
+    )
     STORE.record_task_event(
         task_id,
         "background_result",
         {
             "timestamp": datetime.now().isoformat(),
             "active_task_id": newer_active["task_id"],
-            "active_question": newer_active.get("question") or newer_active.get("last_user_message") or "未知任务",
+            "active_question": newer_active.get("question")
+            or newer_active.get("last_user_message")
+            or "未知任务",
             "status": status,
         },
     )
@@ -2896,7 +3512,9 @@ def reconcile_background_results_for_sessions(session_keys: set[str]) -> None:
             task = STORE.get_task(task_id)
             if not task:
                 continue
-            completed_at = int(task.get("completed_at") or task.get("updated_at") or time.time())
+            completed_at = int(
+                task.get("completed_at") or task.get("updated_at") or time.time()
+            )
             attach_background_result_if_late(
                 task_id,
                 session_key,
@@ -2910,7 +3528,9 @@ def enforce_single_active_runtime_guard() -> list[dict[str, Any]]:
     return []
 
 
-def _terminate_pid(pid: Optional[int], label: str, timeout: float = 8.0) -> tuple[bool, str]:
+def _terminate_pid(
+    pid: Optional[int], label: str, timeout: float = 8.0
+) -> tuple[bool, str]:
     if pid is None:
         return True, f"{label} listener 未运行"
     try:
@@ -2949,7 +3569,9 @@ def patrol_active_binding_runtime() -> list[dict[str, Any]]:
                 "message": "主闭环纯净度门禁失败",
                 "details": {
                     "env_id": closure.get("env_id") or bound_env,
-                    "purity_gate_reasons": list(closure.get("purity_gate_reasons") or []),
+                    "purity_gate_reasons": list(
+                        closure.get("purity_gate_reasons") or []
+                    ),
                 },
             }
         )
@@ -2978,7 +3600,12 @@ def patrol_active_binding_runtime() -> list[dict[str, Any]]:
             {
                 "code": f"unbound_listener_{env_id}",
                 "message": f"未绑定环境 {env_id} 仍在监听，已执行清退",
-                "details": {"env_id": env_id, "gateway_port": spec["port"], "result": result, "killed": killed},
+                "details": {
+                    "env_id": env_id,
+                    "gateway_port": spec["port"],
+                    "result": result,
+                    "killed": killed,
+                },
             }
         )
     if issues:
@@ -2988,8 +3615,16 @@ def patrol_active_binding_runtime() -> list[dict[str, Any]]:
             code = str(issue.get("code") or "binding_patrol")
             if code not in seen or now - int(seen.get(code, 0)) > 300:
                 seen[code] = now
-                record_change_log("anomaly", str(issue.get("message") or "binding patrol"), issue.get("details") or {})
-                notify("绑定巡检告警", str(issue.get("message") or "检测到未绑定 listener"), "error")
+                record_change_log(
+                    "anomaly",
+                    str(issue.get("message") or "binding patrol"),
+                    issue.get("details") or {},
+                )
+                notify(
+                    "绑定巡检告警",
+                    str(issue.get("message") or "检测到未绑定 listener"),
+                    "error",
+                )
             STORE.append_runtime_event(
                 "binding_audit_events",
                 {
@@ -3001,7 +3636,9 @@ def patrol_active_binding_runtime() -> list[dict[str, Any]]:
                 },
                 limit=200,
             )
-        STORE.save_runtime_value("binding_patrol_seen", trim_runtime_seen(seen, keep=50))
+        STORE.save_runtime_value(
+            "binding_patrol_seen", trim_runtime_seen(seen, keep=50)
+        )
     return issues
 
 
@@ -3109,7 +3746,11 @@ def collect_runtime_anomalies(
                     nearest_question = qmsg
                     break
             requester_open_id = extract_requester_open_id(line)
-            session_key = extract_runtime_session_key(line) or requester_open_id or f"dispatch:{ts_raw}"
+            session_key = (
+                extract_runtime_session_key(line)
+                or requester_open_id
+                or f"dispatch:{ts_raw}"
+            )
             open_dispatches[session_key] = {
                 "session_key": session_key,
                 "started_at": ts,
@@ -3141,7 +3782,9 @@ def collect_runtime_anomalies(
             replies = 0
             if "replies=" in lower:
                 try:
-                    replies = int(lower.split("replies=", 1)[1].split(")", 1)[0].split(",", 1)[0])
+                    replies = int(
+                        lower.split("replies=", 1)[1].split(")", 1)[0].split(",", 1)[0]
+                    )
                 except Exception:
                     replies = 0
 
@@ -3193,6 +3836,33 @@ def collect_runtime_anomalies(
                     "details": {"timestamp": ts_raw},
                 }
             )
+        elif "failovererror" in lower and "timed out" in lower:
+            anomalies.append(
+                {
+                    "signature": signature,
+                    "type": "model_timeout",
+                    "message": "模型请求超时",
+                    "details": {"timestamp": ts_raw},
+                }
+            )
+        elif "failovererror" in lower and ("rate limit" in lower or "exhaust" in lower):
+            anomalies.append(
+                {
+                    "signature": signature,
+                    "type": "failover_exhausted",
+                    "message": "模型 failover 未能成功恢复",
+                    "details": {"timestamp": ts_raw},
+                }
+            )
+        elif "inflightskipped=" in lower or "releasing aged in-flight lock" in lower:
+            anomalies.append(
+                {
+                    "signature": signature,
+                    "type": "channel_inflight_stuck",
+                    "message": "消息通道 in-flight 锁异常或重投受阻",
+                    "details": {"timestamp": ts_raw},
+                }
+            )
         elif "abort failed" in lower and "no_active_run" in lower:
             anomalies.append(
                 {
@@ -3203,7 +3873,9 @@ def collect_runtime_anomalies(
                 }
             )
 
-    for dispatch in sorted(open_dispatches.values(), key=lambda item: item["started_at"]):
+    for dispatch in sorted(
+        open_dispatches.values(), key=lambda item: item["started_at"]
+    ):
         duration = int(now - dispatch["started_at"])
         details = {
             "question": dispatch["question"],
@@ -3213,7 +3885,10 @@ def collect_runtime_anomalies(
         if dispatch.get("marker"):
             details["marker"] = dispatch["marker"]
 
-        if dispatch.get("marker") and int(now - dispatch["last_progress_at"]) >= stalled_threshold:
+        if (
+            dispatch.get("marker")
+            and int(now - dispatch["last_progress_at"]) >= stalled_threshold
+        ):
             anomalies.append(
                 {
                     "signature": f"stage:{dispatch['timestamp']}:{dispatch['marker']}",
@@ -3296,12 +3971,17 @@ def scan_runtime_anomalies() -> list[dict]:
                 detail_lines.append(f"问题: {anomaly['details']['question']}")
             reasons = anomaly["details"].get("reasons")
             if isinstance(reasons, list) and reasons:
-                detail_lines.append(f"原因: {', '.join(str(item) for item in reasons[:3])}")
+                detail_lines.append(
+                    f"原因: {', '.join(str(item) for item in reasons[:3])}"
+                )
             if anomaly["details"].get("duration") is not None:
                 detail_lines.append(f"耗时: {anomaly['details']['duration']}秒")
             if anomaly["details"].get("timestamp"):
                 detail_lines.append(f"时间: {anomaly['details']['timestamp']}")
             notify("OpenClaw 任务异常", "\n".join(detail_lines), "warning")
+
+    if recorded:
+        capture_runtime_anomaly_learnings(recorded)
 
     if latest_signature != last_signature:
         STORE.save_runtime_value(
@@ -3327,6 +4007,9 @@ def push_runtime_progress_updates() -> list[dict]:
 
     now = time.time()
     open_dispatches = collect_open_runtime_dispatches(lines)
+
+    if not bool(CONFIG.get("ENABLE_GUARDIAN_PROGRESS_PUSH", False)):
+        return []
 
     progress_interval = int(CONFIG.get("PROGRESS_PUSH_INTERVAL", 180))
     progress_cooldown = int(CONFIG.get("PROGRESS_PUSH_COOLDOWN", 300))
@@ -3402,7 +4085,11 @@ def push_runtime_progress_updates() -> list[dict]:
                 push_state[push_key] = state
             continue
 
-        if blocked_reason and blocked_until <= int(now) and now - last_blocked_notice >= blocked_notice_interval:
+        if (
+            blocked_reason
+            and blocked_until <= int(now)
+            and now - last_blocked_notice >= blocked_notice_interval
+        ):
             reason_label = blocked_reason_label(blocked_reason)
             blocked_message = (
                 f"任务当前已阻塞。当前阶段：{stage_label}。"
@@ -3503,7 +4190,12 @@ def push_runtime_progress_updates() -> list[dict]:
                     },
                 )
                 state["last_stage_push"] = int(now)
-                if failed_reason in {"session_lock", "model_auth", "model_unavailable", "model_pool_failed"}:
+                if failed_reason in {
+                    "session_lock",
+                    "model_auth",
+                    "model_unavailable",
+                    "model_pool_failed",
+                }:
                     state["blocked_reason"] = failed_reason
                     state["blocked_until"] = int(now) + blocked_cooldown
                 pushed.append(
@@ -3517,7 +4209,10 @@ def push_runtime_progress_updates() -> list[dict]:
                     }
                 )
 
-        if idle >= escalation_interval and now - last_escalation_push >= escalation_interval:
+        if (
+            idle >= escalation_interval
+            and now - last_escalation_push >= escalation_interval
+        ):
             followup = (
                 "GUARDIAN_ESCALATION: 这是一条守护系统升级催办，不是用户新需求。"
                 "请不要启动新任务。"
@@ -3525,7 +4220,9 @@ def push_runtime_progress_updates() -> list[dict]:
                 f"累计运行={format_duration_label(duration)}；当前问题={dispatch['question']}。"
                 "请明确向用户同步：当前是否仍在执行、是否已阻塞、下一步动作是什么。"
             )
-            escalation_reason = blocked_reason_label(blocked_reason) if blocked_reason else ""
+            escalation_reason = (
+                blocked_reason_label(blocked_reason) if blocked_reason else ""
+            )
             fallback_message = (
                 (
                     f"任务当前已阻塞。当前阶段：{stage_label}。"
@@ -3572,7 +4269,12 @@ def push_runtime_progress_updates() -> list[dict]:
                     },
                 )
                 state["last_escalation_push"] = int(now)
-                if failed_reason in {"session_lock", "model_auth", "model_unavailable", "model_pool_failed"}:
+                if failed_reason in {
+                    "session_lock",
+                    "model_auth",
+                    "model_unavailable",
+                    "model_pool_failed",
+                }:
                     state["blocked_reason"] = failed_reason
                     state["blocked_until"] = int(now) + blocked_cooldown
                 pushed.append(
@@ -3594,7 +4296,9 @@ def push_runtime_progress_updates() -> list[dict]:
             push_state.pop(push_key, None)
 
     if push_state:
-        STORE.save_runtime_value("runtime_progress_push_state", trim_runtime_state_map(push_state, keep=500))
+        STORE.save_runtime_value(
+            "runtime_progress_push_state", trim_runtime_state_map(push_state, keep=500)
+        )
     return pushed
 
 
@@ -3614,7 +4318,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
         if task.get("env_id") != env_id:
             continue
 
-        core = STORE.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
+        core = STORE.get_core_closure_snapshot_for_task(
+            task["task_id"], allow_legacy_projection=False
+        )
         core_supervision = STORE.derive_core_task_supervision(task["task_id"])
         workflow_state = str(core.get("workflow_state") or "")
         root_task_id = str((core.get("root_task") or {}).get("root_task_id") or "")
@@ -3625,7 +4331,8 @@ def enforce_task_registry_control_plane() -> list[dict]:
         )
         if (
             native_core_task
-            and workflow_state in {"accepted", "routed", "queued", "started", "completed"}
+            and workflow_state
+            in {"accepted", "routed", "queued", "started", "completed"}
             and not core_supervision.get("needs_followup")
             and not core_supervision.get("is_blocked")
             and not core_supervision.get("is_delivery_pending")
@@ -3649,34 +4356,48 @@ def enforce_task_registry_control_plane() -> list[dict]:
         next_actor = str(control.get("next_actor") or "")
         blocked_reason = str(task.get("blocked_reason") or "")
         recovery = control.get("pipeline_recovery") or {}
-        recovery_candidate = bool(recovery) and next_action == "manual_or_session_recovery"
-        
+        recovery_candidate = (
+            bool(recovery) and next_action == "manual_or_session_recovery"
+        )
+
         # P0 修复：不再只检查 required_receipts，而是检查 control_state
         # 即使是 single_agent 合同，如果 control_state 是 received_only 且 idle 超过阈值，也应该 blocked
         has_required_receipts = bool(contract.get("required_receipts") or [])
-        needs_control_action = control_state in {
-            "received_only",
-            "planning_only",
-            "progress_only",
-            "calculator_running",
-            "awaiting_verifier",
-            "dev_running",
-            "awaiting_test",
-            "test_running",
-            "blocked_unverified",
-            "blocked_control_followup_failed",
-        } or recovery_candidate or bool(core_supervision.get("needs_followup")) or bool(core_supervision.get("is_blocked"))
+        needs_control_action = (
+            control_state
+            in {
+                "received_only",
+                "planning_only",
+                "progress_only",
+                "calculator_running",
+                "awaiting_verifier",
+                "dev_running",
+                "awaiting_test",
+                "test_running",
+                "blocked_unverified",
+                "blocked_control_followup_failed",
+            }
+            or recovery_candidate
+            or bool(core_supervision.get("needs_followup"))
+            or bool(core_supervision.get("is_blocked"))
+        )
 
         if not has_required_receipts and not needs_control_action:
             continue
 
-        idle = max(0, now - int(task.get("last_progress_at") or task.get("updated_at") or now))
+        idle = max(
+            0, now - int(task.get("last_progress_at") or task.get("updated_at") or now)
+        )
         total = max(0, now - int(task.get("started_at") or now))
         action = action or control.get("control_action")
-        action_id = int(action["id"]) if isinstance(action, dict) and action.get("id") else 0
+        action_id = (
+            int(action["id"]) if isinstance(action, dict) and action.get("id") else 0
+        )
         native_followup_id = ""
         if isinstance(action, dict):
-            native_followup_id = str((action.get("details") or {}).get("followup_id") or "")
+            native_followup_id = str(
+                (action.get("details") or {}).get("followup_id") or ""
+            )
 
         def update_native_followup(
             *,
@@ -3695,19 +4416,28 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 updated_at=now,
                 metadata_updates=metadata_updates or {},
             )
+
         attempts = int((action or {}).get("attempts", 0))
         last_followup_at = int((action or {}).get("last_followup_at", 0))
         phase = _infer_heartbeat_phase_for_task(task)
         profile = infer_duration_profile(phase=phase, task=task, control=control)
         timing = resolve_timing_window(phase=phase, profile=profile)
-        first_window = timing.first_ack_sla if control_state in {"received_only", "planning_only", "progress_only"} else timing.heartbeat_interval
+        first_window = (
+            timing.first_ack_sla
+            if control_state in {"received_only", "planning_only", "progress_only"}
+            else timing.heartbeat_interval
+        )
         hard_timeout = timing.hard_timeout
         soft_or_hard_stage = "soft" if attempts == 0 else "hard"
         immediate_followup_states = {
             "blocked_unverified",
             "blocked_control_followup_failed",
         }
-        followup_threshold = 0 if (recovery_candidate or control_state in immediate_followup_states) else first_window
+        followup_threshold = (
+            0
+            if (recovery_candidate or control_state in immediate_followup_states)
+            else first_window
+        )
 
         if idle < followup_threshold:
             continue
@@ -3715,9 +4445,10 @@ def enforce_task_registry_control_plane() -> list[dict]:
         if (
             not recovery_candidate
             and task.get("status") == "blocked"
-            and str(task.get("blocked_reason") or "") in {
-            "missing_pipeline_receipt",
-            "control_followup_failed",
+            and str(task.get("blocked_reason") or "")
+            in {
+                "missing_pipeline_receipt",
+                "control_followup_failed",
             }
         ):
             continue
@@ -3730,7 +4461,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
             if core_next_actor:
                 next_actor = core_next_actor
             if core_supervision.get("control_state"):
-                control_state = str(core_supervision.get("control_state") or control_state)
+                control_state = str(
+                    core_supervision.get("control_state") or control_state
+                )
             if core_supervision.get("recovery_candidate"):
                 recovery_candidate = True
             if core_supervision.get("followup_summary"):
@@ -3739,9 +4472,18 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 blocked_reason = str(core_supervision.get("blocked_reason") or "")
             action = action or control.get("control_action")
 
-        if core_supervision.get("truth_level") == "core_projection" and core_supervision.get("is_blocked"):
-            blocked_reason = str(core_supervision.get("blocked_reason") or blocked_reason or "core_blocked")
-            if task.get("status") != "blocked" or str(task.get("blocked_reason") or "") != blocked_reason:
+        if core_supervision.get(
+            "truth_level"
+        ) == "core_projection" and core_supervision.get("is_blocked"):
+            blocked_reason = str(
+                core_supervision.get("blocked_reason")
+                or blocked_reason
+                or "core_blocked"
+            )
+            if (
+                task.get("status") != "blocked"
+                or str(task.get("blocked_reason") or "") != blocked_reason
+            ):
                 STORE.update_task_fields(
                     task["task_id"],
                     status="blocked",
@@ -3761,7 +4503,11 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 STORE.update_control_action(
                     action_id,
                     status="pending",
-                    summary=str(core_supervision.get("followup_summary") or approved_summary or "主闭环当前处于阻塞状态。"),
+                    summary=str(
+                        core_supervision.get("followup_summary")
+                        or approved_summary
+                        or "主闭环当前处于阻塞状态。"
+                    ),
                     control_state=control_state,
                     details=details,
                 )
@@ -3769,26 +4515,40 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 update_native_followup(
                     state="open",
                     metadata_updates={
-                        "summary": str(core_supervision.get("followup_summary") or approved_summary or "主闭环当前处于阻塞状态。"),
+                        "summary": str(
+                            core_supervision.get("followup_summary")
+                            or approved_summary
+                            or "主闭环当前处于阻塞状态。"
+                        ),
                         "truth_level": "core_projection",
                         "workflow_state": workflow_state,
                         "followup_types": core_supervision.get("followup_types") or [],
                     },
                 )
 
-        should_block = attempts >= max_attempts or total >= hard_timeout or idle >= hard_timeout
+        should_block = (
+            attempts >= max_attempts or total >= hard_timeout or idle >= hard_timeout
+        )
         if recovery_candidate and not intrusive_control:
-            summary = str(core_supervision.get("followup_summary") or "检测到流水线失联；Health Monitor 默认不主动催办内部协作，请先核对 OpenClaw 原生状态。")
+            summary = str(
+                core_supervision.get("followup_summary")
+                or "检测到流水线失联；Health Monitor 默认不主动催办内部协作，请先核对 OpenClaw 原生状态。"
+            )
             STORE.record_task_event(
                 task["task_id"],
                 "ops_attention_needed",
                 {
-                    "reason": str(core_supervision.get("blocked_reason") or "pipeline_recovery_needed"),
+                    "reason": str(
+                        core_supervision.get("blocked_reason")
+                        or "pipeline_recovery_needed"
+                    ),
                     "control_state": control_state,
                     "pipeline_recovery": recovery,
                     "idle": idle,
                     "total": total,
-                    "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
+                    "truth_level": "core_projection"
+                    if core_supervision.get("truth_level") == "core_projection"
+                    else "derived",
                     "timestamp": datetime.now().isoformat(),
                 },
             )
@@ -3797,7 +4557,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 details.update(
                     {
                         "policy": "observe_only",
-                        "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
+                        "truth_level": "core_projection"
+                        if core_supervision.get("truth_level") == "core_projection"
+                        else "derived",
                         "pipeline_recovery": recovery,
                         "followup_types": core_supervision.get("followup_types") or [],
                     }
@@ -3816,7 +4578,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     metadata_updates={
                         "summary": summary,
                         "policy": "observe_only",
-                        "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
+                        "truth_level": "core_projection"
+                        if core_supervision.get("truth_level") == "core_projection"
+                        else "derived",
                         "pipeline_recovery": recovery,
                         "followup_types": core_supervision.get("followup_types") or [],
                         "last_followup_at": now,
@@ -3826,13 +4590,17 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 "anomaly",
                 "检测到流水线失联，需要人工核对 OpenClaw 原生状态",
                 {
-                    "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                    "question": task.get("question")
+                    or task.get("last_user_message")
+                    or "未知任务",
                     "task_id": task["task_id"],
                     "control_state": control_state,
                     "pipeline_recovery": recovery,
                     "idle": idle,
                     "duration": total,
-                    "truth_level": "core_projection" if core_supervision.get("truth_level") == "core_projection" else "derived",
+                    "truth_level": "core_projection"
+                    if core_supervision.get("truth_level") == "core_projection"
+                    else "derived",
                 },
             )
             outcomes.append(
@@ -3847,7 +4615,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
 
         if recovery_candidate:
             session_key = str(task.get("session_key") or "")
-            question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+            question = str(
+                task.get("question") or task.get("last_user_message") or "未知任务"
+            )
             # 新增：陈旧任务年龄检查，避免对过时任务发送恢复消息
             stale_task_max_age = int(CONFIG.get("GUARDIAN_STALE_TASK_MAX_AGE", 3600))
             if total >= stale_task_max_age:
@@ -3960,7 +4730,8 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 "recovery_started",
                 {
                     "recovery_kind": recovery.get("kind") or "",
-                    "last_dispatched_agent": recovery.get("last_dispatched_agent") or "",
+                    "last_dispatched_agent": recovery.get("last_dispatched_agent")
+                    or "",
                     "stale_subagent": recovery.get("stale_subagent") or "",
                     "rebind_target": recovery.get("rebind_target") or "",
                     "attempt": next_attempts,
@@ -3989,7 +4760,8 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "recovery_succeeded",
                     {
                         "recovery_kind": recovery.get("kind") or "",
-                        "last_dispatched_agent": recovery.get("last_dispatched_agent") or "",
+                        "last_dispatched_agent": recovery.get("last_dispatched_agent")
+                        or "",
                         "stale_subagent": recovery.get("stale_subagent") or "",
                         "rebind_target": recovery.get("rebind_target") or "",
                         "attempt": next_attempts,
@@ -4046,7 +4818,8 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "recovery_failed",
                     {
                         "recovery_kind": recovery.get("kind") or "",
-                        "last_dispatched_agent": recovery.get("last_dispatched_agent") or "",
+                        "last_dispatched_agent": recovery.get("last_dispatched_agent")
+                        or "",
                         "stale_subagent": recovery.get("stale_subagent") or "",
                         "rebind_target": recovery.get("rebind_target") or "",
                         "attempt": next_attempts,
@@ -4076,7 +4849,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         attempts=next_attempts,
                         last_followup_at=now,
                         last_error=error_kind or "",
-                        summary="守护系统恢复流水线失败。" if fatal_recovery else "守护系统恢复流水线失败，将继续重试。",
+                        summary="守护系统恢复流水线失败。"
+                        if fatal_recovery
+                        else "守护系统恢复流水线失败，将继续重试。",
                         control_state=control_state,
                         details=details,
                     )
@@ -4084,7 +4859,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     update_native_followup(
                         state="open",
                         metadata_updates={
-                            "summary": "守护系统恢复流水线失败。" if fatal_recovery else "守护系统恢复流水线失败，将继续重试。",
+                            "summary": "守护系统恢复流水线失败。"
+                            if fatal_recovery
+                            else "守护系统恢复流水线失败，将继续重试。",
                             "recovery_kind": recovery.get("kind") or "",
                             "recovery_attempt": next_attempts,
                             "recovery_error": error_kind or "",
@@ -4093,7 +4870,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                             "last_error": error_kind or "",
                         },
                     )
-                if fatal_recovery and should_record_control_plane_anomaly(task["task_id"], "pipeline_recovery_failed"):
+                if fatal_recovery and should_record_control_plane_anomaly(
+                    task["task_id"], "pipeline_recovery_failed"
+                ):
                     record_change_log(
                         "anomaly",
                         "守护控制面恢复流水线失败，任务已阻塞",
@@ -4111,8 +4890,12 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 outcomes.append(
                     {
                         "task_id": task["task_id"],
-                        "action": "blocked" if fatal_recovery else "recovery_retry_pending",
-                        "blocked_reason": "pipeline_recovery_failed" if fatal_recovery else "",
+                        "action": "blocked"
+                        if fatal_recovery
+                        else "recovery_retry_pending",
+                        "blocked_reason": "pipeline_recovery_failed"
+                        if fatal_recovery
+                        else "",
                         "control_state": control_state,
                         "pipeline_recovery": recovery,
                     }
@@ -4146,7 +4929,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "anomaly",
                     "守护控制面判定任务阻塞",
                     {
-                        "question": task.get("question") or task.get("last_user_message") or "未知任务",
+                        "question": task.get("question")
+                        or task.get("last_user_message")
+                        or "未知任务",
                         "control_state": control_state,
                         "idle": idle,
                         "duration": total,
@@ -4175,7 +4960,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         "hard_timeout": timing.hard_timeout,
                         "followup_stage": soft_or_hard_stage,
                         "status_template": build_user_visible_status_template(
-                            control_state="blocked_unverified" if blocked_reason == "missing_pipeline_receipt" else "blocked_control_followup_failed",
+                            control_state="blocked_unverified"
+                            if blocked_reason == "missing_pipeline_receipt"
+                            else "blocked_control_followup_failed",
                             phase=phase,
                             timing=timing,
                             heartbeat_ok=False,
@@ -4201,7 +4988,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         "hard_timeout": timing.hard_timeout,
                         "followup_stage": soft_or_hard_stage,
                         "status_template": build_user_visible_status_template(
-                            control_state="blocked_unverified" if blocked_reason == "missing_pipeline_receipt" else "blocked_control_followup_failed",
+                            control_state="blocked_unverified"
+                            if blocked_reason == "missing_pipeline_receipt"
+                            else "blocked_control_followup_failed",
                             phase=phase,
                             timing=timing,
                             heartbeat_ok=False,
@@ -4214,10 +5003,14 @@ def enforce_task_registry_control_plane() -> list[dict]:
             continue
 
         session_key = str(task.get("session_key") or "")
-        question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+        question = str(
+            task.get("question") or task.get("last_user_message") or "未知任务"
+        )
         stage = str(task.get("current_stage") or "处理中")
         if not intrusive_control:
-            summary = "Health Monitor 已记录缺失证据，但默认不主动催办 OpenClaw 内部流水线。"
+            summary = (
+                "Health Monitor 已记录缺失证据，但默认不主动催办 OpenClaw 内部流水线。"
+            )
             STORE.record_task_event(
                 task["task_id"],
                 "ops_attention_needed",
@@ -4300,7 +5093,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-            if should_record_control_plane_anomaly(task["task_id"], "control_followup_failed"):
+            if should_record_control_plane_anomaly(
+                task["task_id"], "control_followup_failed"
+            ):
                 record_change_log(
                     "anomaly",
                     "守护控制面无法继续催办，任务已阻塞",
@@ -4432,10 +5227,10 @@ def enforce_task_registry_control_plane() -> list[dict]:
         STORE.record_task_event(
             task["task_id"],
             "control_followup",
-                {
-                    "control_state": control_state,
-                    "pipeline_recovery": recovery,
-                    "attempt": next_attempts,
+            {
+                "control_state": control_state,
+                "pipeline_recovery": recovery,
+                "attempt": next_attempts,
                 "idle": idle,
                 "total": total,
                 "sent": ok,
@@ -4489,7 +5284,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-            if should_record_control_plane_anomaly(task["task_id"], "control_followup_failed"):
+            if should_record_control_plane_anomaly(
+                task["task_id"], "control_followup_failed"
+            ):
                 record_change_log(
                     "anomaly",
                     "守护控制面催办失败，任务已标记阻塞",
@@ -4549,12 +5346,12 @@ def has_config_changes() -> bool:
         code, stdout, _ = run_cmd(f"cd {env_home} && git diff --quiet")
         if code != 0:
             return True
-    
+
     if env_code.exists() and (env_code / ".git").exists():
         code, stdout, _ = run_cmd(f"cd {env_code} && git diff --quiet")
         if code != 0:
             return True
-    
+
     return False
 
 
@@ -4572,22 +5369,27 @@ def should_alert(alert_type: str) -> bool:
     """检查是否应该发送告警（去重）"""
     now = time.time()
     interval = CONFIG.get("ALERT_DEDUP_INTERVAL", 600)
-    
+
     if alert_type not in ALERTS:
         ALERTS[alert_type] = {"last_alert": now, "count": 1}
         return True
-    
+
     last_alert = ALERTS[alert_type]["last_alert"]
     if now - last_alert < interval:
         return False
-    
-    ALERTS[alert_type] = {"last_alert": now, "count": ALERTS[alert_type].get("count", 0) + 1}
+
+    ALERTS[alert_type] = {
+        "last_alert": now,
+        "count": ALERTS[alert_type].get("count", 0) + 1,
+    }
     return True
 
 
 def notify(title: str, message: str, level: str = "info"):
     """发送通知"""
-    emoji = {"info": "ℹ️", "warning": "⚠️", "error": "❌", "success": "✅"}.get(level, "ℹ️")
+    emoji = {"info": "ℹ️", "warning": "⚠️", "error": "❌", "success": "✅"}.get(
+        level, "ℹ️"
+    )
     text = f"## {emoji} OpenClaw Guardian\n\n**{title}**\n\n{message}"
 
     def post_json(url: str, payload: dict[str, Any]) -> None:
@@ -4599,7 +5401,7 @@ def notify(title: str, message: str, level: str = "info"):
         )
         with urllib.request.urlopen(req, timeout=10):
             return
-    
+
     # 钉钉
     if CONFIG.get("DINGTALK_WEBHOOK"):
         try:
@@ -4608,15 +5410,12 @@ def notify(title: str, message: str, level: str = "info"):
                 raise ValueError(reason)
             post_json(
                 CONFIG["DINGTALK_WEBHOOK"],
-                {
-                    "msgtype": "markdown",
-                    "markdown": {"title": title, "text": text}
-                },
+                {"msgtype": "markdown", "markdown": {"title": title, "text": text}},
             )
             log(f"钉钉通知已发送: {title}")
         except Exception as e:
             log(f"钉钉通知失败: {e}")
-    
+
     # 飞书
     if CONFIG.get("FEISHU_WEBHOOK"):
         try:
@@ -4630,10 +5429,12 @@ def notify(title: str, message: str, level: str = "info"):
             log(f"飞书通知已发送: {title}")
         except Exception as e:
             log(f"飞书通知失败: {e}")
-    
+
     # macOS 通知
     if CONFIG.get("ENABLE_MAC_NOTIFY"):
-        run_cmd(f'osascript -e \'display notification "{message}" with title "OpenClaw Guardian: {title}"\'')
+        run_cmd(
+            f'osascript -e \'display notification "{message}" with title "OpenClaw Guardian: {title}"\''
+        )
 
 
 def restart_gateway():
@@ -4642,13 +5443,19 @@ def restart_gateway():
     purity_gate = build_main_closure_supervision_summary(spec)
     if not bool(purity_gate.get("purity_gate_ok", True)):
         reasons = list(purity_gate.get("purity_gate_reasons") or [])
-        reason_text = ", ".join(str(item) for item in reasons[:3]) or "main_closure_purity_gate_failed"
+        reason_text = (
+            ", ".join(str(item) for item in reasons[:3])
+            or "main_closure_purity_gate_failed"
+        )
         _record_restart_event(
             source="guardian",
             target=spec["id"],
             stage="completed",
             status="failed",
-            details={"error": reason_text, "message": "主闭环纯净度门禁失败，拒绝重启 Gateway"},
+            details={
+                "error": reason_text,
+                "message": "主闭环纯净度门禁失败，拒绝重启 Gateway",
+            },
         )
         record_change_log(
             "restart",
@@ -4667,14 +5474,19 @@ def restart_gateway():
     log(f"尝试重启 Gateway ({spec['id']})...")
 
     run_args([str(DESKTOP_RUNTIME), "stop", "gateway"], timeout=120)
-    code, stdout, stderr = run_args([str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180)
+    code, stdout, stderr = run_args(
+        [str(DESKTOP_RUNTIME), "start", "gateway"], timeout=180
+    )
     if code != 0:
         _record_restart_event(
             source="guardian",
             target="primary",
             stage="completed",
             status="failed",
-            details={"error": (stderr or stdout).strip(), "message": "主用版 Gateway 重启失败"},
+            details={
+                "error": (stderr or stdout).strip(),
+                "message": "主用版 Gateway 重启失败",
+            },
         )
         record_change_log(
             "restart",
@@ -4694,7 +5506,9 @@ def restart_gateway():
             status="succeeded",
             details={"message": "主用版 Gateway 重启成功"},
         )
-        record_change_log("restart", "主用版 Gateway 重启成功", {"target_env": "primary"})
+        record_change_log(
+            "restart", "主用版 Gateway 重启成功", {"target_env": "primary"}
+        )
         log("Gateway 重启成功")
         return True
 
@@ -4726,7 +5540,9 @@ def rollback_to_last_good() -> bool:
         return False
 
     log(f"✅ 已恢复配置快照: {snapshot_dir.name}")
-    record_change_log("recover", f"恢复配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name})
+    record_change_log(
+        "recover", f"恢复配置快照: {snapshot_dir.name}", {"snapshot": snapshot_dir.name}
+    )
     return True
 
 
@@ -4735,7 +5551,7 @@ def check_update_available() -> bool:
     env_code = current_env_spec()["code"]
     if not (env_code / ".git").exists():
         return False
-    
+
     code, _, _ = run_cmd(f"cd {env_code} && git fetch --dry-run")
     return code == 0
 
@@ -4746,33 +5562,39 @@ def do_auto_update() -> bool:
     auto_update_enabled = CONFIG.get("AUTO_UPDATE", False)
     if not auto_update_enabled:
         return False
-    
+
     channel = CONFIG.get("UPDATE_CHANNEL", "stable")
     log(f"执行自动更新 ({channel})...")
-    
+
     # 备份当前版本
     current_ver = get_current_version()
     VERSIONS["current"] = current_ver
-    VERSIONS["history"].append({
-        "version": current_ver,
-        "date": datetime.now().isoformat(),
-        "commit": run_cmd(f"cd {spec['code']} && git rev-parse HEAD")[1].strip()
-    })
+    VERSIONS["history"].append(
+        {
+            "version": current_ver,
+            "date": datetime.now().isoformat(),
+            "commit": run_cmd(f"cd {spec['code']} && git rev-parse HEAD")[1].strip(),
+        }
+    )
     # 保留最近5个版本
     VERSIONS["history"] = VERSIONS["history"][-5:]
     save_versions()
-    
+
     # 执行更新
     code, stdout, stderr = run_cmd(f"openclaw update --channel {channel}")
-    
+
     if code != 0:
         log(f"更新失败: {stderr or stdout}")
         # 回滚到稳定版本
         if rollback_to_last_good():
             restart_gateway()
-        notify("自动更新失败", f"更新失败，已回退到上一版本\n{(stderr or stdout)[:200]}", "error")
+        notify(
+            "自动更新失败",
+            f"更新失败，已回退到上一版本\n{(stderr or stdout)[:200]}",
+            "error",
+        )
         return False
-    
+
     # 重启
     time.sleep(2)
     if not restart_gateway():
@@ -4781,11 +5603,11 @@ def do_auto_update() -> bool:
         restart_gateway()
         notify("更新后启动失败", "已自动回退到上一版本", "error")
         return False
-    
+
     new_ver = get_current_version()
     VERSIONS["current"] = new_ver
     save_versions()
-    
+
     notify("自动更新成功", f"已更新到 {new_ver}", "success")
     return True
 
@@ -4796,20 +5618,22 @@ def save_stable_version():
         if (OPENCLAW_CODE / ".git").exists():
             commit = run_cmd(f"cd {OPENCLAW_CODE} && git rev-parse HEAD")[1].strip()
             old_commit = VERSIONS.get("stable", {}).get("commit", "")
-            
-            VERSIONS["stable"] = {
-                "commit": commit,
-                "date": datetime.now().isoformat()
-            }
+
+            VERSIONS["stable"] = {"commit": commit, "date": datetime.now().isoformat()}
             save_versions()
-            
+
             # 记录版本变更
             if old_commit and old_commit != commit:
-                record_change_log("version", f"版本变更: {old_commit[:8]} → {commit[:8]}", 
-                                 {"from": old_commit, "to": commit})
+                record_change_log(
+                    "version",
+                    f"版本变更: {old_commit[:8]} → {commit[:8]}",
+                    {"from": old_commit, "to": commit},
+                )
             elif not old_commit:
-                record_change_log("version", f"初始稳定版本: {commit[:8]}", {"commit": commit})
-            
+                record_change_log(
+                    "version", f"初始稳定版本: {commit[:8]}", {"commit": commit}
+                )
+
             log(f"✅ 已标记稳定版本: {commit[:8]}")
     except:
         pass
@@ -4837,25 +5661,26 @@ def record_change_log(change_type: str, message: str, details: Optional[dict] = 
     try:
         STORE.record_change(change_type, message, details)
         from pathlib import Path
+
         log_dir = Path(__file__).parent / "change-logs"
         log_dir.mkdir(exist_ok=True)
-        
+
         today = datetime.now().strftime("%Y-%m-%d")
         log_file = log_dir / f"{today}.json"
-        
+
         logs = []
         if log_file.exists():
             with open(log_file) as f:
                 logs = json.load(f)
-        
+
         entry = {
             "time": datetime.now().strftime("%H:%M:%S"),
             "type": change_type,
             "message": message,
-            "details": details or {}
+            "details": details or {},
         }
         logs.append(entry)
-        
+
         with open(log_file, "w") as f:
             json.dump(logs, f, indent=2, ensure_ascii=False)
     except:
@@ -4892,24 +5717,24 @@ def main():
     load_config()
     load_alerts()
     load_versions()
-    
+
     log("=" * 50)
     log("OpenClaw Guardian 启动")
     log("=" * 50)
-    
+
     notify("Guardian 启动", "OpenClaw 守护进程已运行", "info")
-    
+
     gateway_was_healthy = False
     last_check_time = 0
     last_retention_time = 0
-    
+
     while True:
         try:
             load_config()
 
             # 系统指标
             metrics = get_system_metrics()
-            
+
             # 进程状态
             process_running = check_process_running()
             gateway_healthy = check_gateway_health()
@@ -4917,45 +5742,45 @@ def main():
             patrol_active_binding_runtime()
 
             now = time.time()
-            
+
             # 状态变化检测
             if process_running and not gateway_was_healthy:
                 log("Gateway 从异常变为正常")
                 gateway_was_healthy = True
-                
+
                 # 检查是否有配置变更
                 if has_config_changes():
                     log("检测到配置变更后启动成功，正常操作")
                 else:
                     pass  # 正常启动，不通知
-                
+
                 # 标记当前版本为稳定版本
                 save_stable_version()
                 capture_snapshot("healthy")
-            
+
             elif not process_running or not gateway_healthy:
                 if gateway_was_healthy:
                     log("Gateway 从正常变为异常！")
-                    
+
                     # 给一点时间等待手动重启（用户可能正在重启）
                     time.sleep(20)
                     process_running = check_process_running()
                     gateway_healthy = check_gateway_health()
-                    
+
                     # 再次检查，如果仍然异常才处理
                     if process_running and gateway_healthy:
                         log("Gateway 恢复（可能是手动重启）")
                         gateway_was_healthy = True
                     else:
                         gateway_was_healthy = False
-                    
+
                     if should_alert("gateway_down"):
                         notify(
                             "Gateway 异常",
                             f"进程: {'运行中' if process_running else '未运行'}\nHTTP: {'正常' if gateway_healthy else '无响应'}",
-                            "error"
+                            "error",
                         )
-                    
+
                     # 尝试重启
                     if CONFIG.get("AUTO_RESTART", True):
                         if restart_gateway():
@@ -4968,8 +5793,14 @@ def main():
                                 time.sleep(3)
                                 if restart_gateway():
                                     if should_alert("rollback_success"):
-                                        notify("回滚成功", "已回滚配置并重启 Gateway", "success")
-                                    record_change_log("recover", "自动回滚并重启成功", {})
+                                        notify(
+                                            "回滚成功",
+                                            "已回滚配置并重启 Gateway",
+                                            "success",
+                                        )
+                                    record_change_log(
+                                        "recover", "自动回滚并重启成功", {}
+                                    )
                                 else:
                                     # 第三级保护：回滚后仍失败，通知人工处理
                                     if should_alert("rollback_failed"):
@@ -4977,20 +5808,28 @@ def main():
                             else:
                                 if should_alert("rollback_failed"):
                                     notify("回滚失败", "没有可用的稳定版本", "error")
-                
+
                 else:
                     log("Gateway 持续异常")
-            
+
             # 性能告警
             if metrics["cpu"] > CONFIG.get("CPU_THRESHOLD", 90):
                 if should_alert("high_cpu"):
                     notify("CPU 过高", f"当前使用率: {metrics['cpu']}%", "warning")
-            
-            mem_percent = (metrics["mem_used"] / metrics["mem_total"] * 100) if metrics["mem_total"] > 0 else 0
+
+            mem_percent = (
+                (metrics["mem_used"] / metrics["mem_total"] * 100)
+                if metrics["mem_total"] > 0
+                else 0
+            )
             if mem_percent > CONFIG.get("MEMORY_THRESHOLD", 85):
                 if should_alert("high_memory"):
-                    notify("内存过高", f"已使用: {metrics['mem_used']}G / {metrics['mem_total']}G ({mem_percent:.0f}%)", "warning")
-            
+                    notify(
+                        "内存过高",
+                        f"已使用: {metrics['mem_used']}G / {metrics['mem_total']}G ({mem_percent:.0f}%)",
+                        "warning",
+                    )
+
             # 慢会话检测
             slow_sessions = analyze_slow_sessions()
             if slow_sessions and should_alert("slow_session"):
@@ -4998,7 +5837,7 @@ def main():
                 notify(
                     "慢响应会话",
                     f"响应时间: {latest['duration']}秒\n原因: {latest['reason']}",
-                    "warning"
+                    "warning",
                 )
 
             runtime_log = resolve_runtime_gateway_log()
@@ -5014,23 +5853,27 @@ def main():
             push_runtime_progress_updates()
             enforce_task_registry_control_plane()
             run_reflection_cycle()
-            
+
             emit_taskwatcher_heartbeats()
 
             # 心跳检测 + Guardrail 检查
             check_heartbeat_and_guardrail()
             run_recovery_watchdog(current_env_spec())
-            
+
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:
                 last_check_time = now
                 do_auto_update()
 
-            retention_interval = int(CONFIG.get("DB_RETENTION_INTERVAL_SECONDS", 21600) or 21600)
-            if retention_interval > 0 and (now - last_retention_time > retention_interval):
+            retention_interval = int(
+                CONFIG.get("DB_RETENTION_INTERVAL_SECONDS", 21600) or 21600
+            )
+            if retention_interval > 0 and (
+                now - last_retention_time > retention_interval
+            ):
                 last_retention_time = now
                 run_monitor_db_retention()
-            
+
             # 保存告警状态
             save_alerts()
 
@@ -5041,12 +5884,14 @@ def main():
                 mem_used=metrics["mem_used"],
                 mem_total=metrics["mem_total"],
             )
-            
+
             # 定期日志
-            log(f"检查: 进程={'✓' if process_running else '✗'} HTTP={'✓' if gateway_healthy else '✗'} CPU={metrics['cpu']}% 内存={metrics['mem_used']}G")
-            
+            log(
+                f"检查: 进程={'✓' if process_running else '✗'} HTTP={'✓' if gateway_healthy else '✗'} CPU={metrics['cpu']}% 内存={metrics['mem_used']}G"
+            )
+
             time.sleep(CONFIG.get("CHECK_INTERVAL", 30))
-            
+
         except KeyboardInterrupt:
             log("收到退出信号，正在停止...")
             notify("Guardian 停止", "守护进程已停止", "info")

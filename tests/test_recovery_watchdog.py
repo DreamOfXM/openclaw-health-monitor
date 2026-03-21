@@ -10,12 +10,22 @@ from state_store import MonitorStateStore
 
 
 class RecoveryWatchdogTests(unittest.TestCase):
-    def _write_inputs(self, base: Path, payload: dict) -> None:
+    def _write_inputs(
+        self, base: Path, payload: dict, runtime_health: dict | None = None
+    ) -> None:
         data_dir = base / "data"
         shared_dir = data_dir / "shared-state"
         shared_dir.mkdir(parents=True, exist_ok=True)
-        (data_dir / "current-task-facts.json").write_text(json.dumps(payload), encoding="utf-8")
-        (shared_dir / "task-registry-snapshot.json").write_text(json.dumps({"tasks": [], "control_queue": []}), encoding="utf-8")
+        (data_dir / "current-task-facts.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        (shared_dir / "task-registry-snapshot.json").write_text(
+            json.dumps({"tasks": [], "control_queue": []}), encoding="utf-8"
+        )
+        if runtime_health is not None:
+            (shared_dir / "runtime-health.json").write_text(
+                json.dumps(runtime_health), encoding="utf-8"
+            )
 
     def test_detects_correction_and_dispatches_internal_hint(self):
         # Phase 2 简化后：watchdog 只检测"完成/阻塞但未送达"
@@ -31,8 +41,17 @@ class RecoveryWatchdogTests(unittest.TestCase):
                         "control_state": "completed_verified",
                         "updated_at": now,
                     },
-                    "current_root_task": {"root_task_id": "rt-completed", "current_workflow_run_id": "wf-completed", "workflow_state": "completed", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-completed", "current_state": "completed", "updated_at": now},
+                    "current_root_task": {
+                        "root_task_id": "rt-completed",
+                        "current_workflow_run_id": "wf-completed",
+                        "workflow_state": "completed",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-completed",
+                        "current_state": "completed",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": ""},
                 },
             )
@@ -46,14 +65,24 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     "ENABLE_RECOVERY_WATCHDOG_DISPATCH": True,
                     "RECOVERY_WATCHDOG_USE_OLLAMA": False,
                 },
-                dispatcher=lambda code_root, session_key, message: dispatched.append((session_key, message)) or {"ok": True},
+                dispatcher=lambda code_root, session_key, message: (
+                    dispatched.append((session_key, message)) or {"ok": True}
+                ),
             )
 
-            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
             self.assertEqual(result["dispatched_count"], 1)
             self.assertEqual(dispatched[0][0], "agent:main:main")
             self.assertIn("WATCHDOG_RECOVERY_HINT", dispatched[0][1])
+            self.assertEqual(
+                result["items"][0]["incident_type"], "completed_not_delivered"
+            )
+            self.assertEqual(result["items"][0]["status"], "open")
+            self.assertIn("created_at", result["items"][0])
+            self.assertIn("recommended_action", result["items"][0])
 
     def test_cooldown_prevents_repeat_dispatch(self):
         # Phase 2 简化后：watchdog 只检测"完成/阻塞但未送达"
@@ -63,9 +92,23 @@ class RecoveryWatchdogTests(unittest.TestCase):
             self._write_inputs(
                 base,
                 {
-                    "current_task": {"task_id": "task-completed", "session_key": "agent:main:main", "control_state": "completed_verified", "updated_at": now},
-                    "current_root_task": {"root_task_id": "rt-completed", "current_workflow_run_id": "wf-completed", "workflow_state": "completed", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-completed", "current_state": "completed", "updated_at": now},
+                    "current_task": {
+                        "task_id": "task-completed",
+                        "session_key": "agent:main:main",
+                        "control_state": "completed_verified",
+                        "updated_at": now,
+                    },
+                    "current_root_task": {
+                        "root_task_id": "rt-completed",
+                        "current_workflow_run_id": "wf-completed",
+                        "workflow_state": "completed",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-completed",
+                        "current_state": "completed",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": ""},
                 },
             )
@@ -80,11 +123,17 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     "RECOVERY_WATCHDOG_USE_OLLAMA": False,
                     "RECOVERY_WATCHDOG_COOLDOWN_SECONDS": 3600,
                 },
-                dispatcher=lambda code_root, session_key, message: calls.__setitem__("count", calls["count"] + 1) or {"ok": True},
+                dispatcher=lambda code_root, session_key, message: (
+                    calls.__setitem__("count", calls["count"] + 1) or {"ok": True}
+                ),
             )
 
-            first = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
-            second = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            first = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
+            second = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
             self.assertEqual(first["dispatched_count"], 1)
             self.assertEqual(second["cooldown_skips"], 1)
@@ -98,9 +147,23 @@ class RecoveryWatchdogTests(unittest.TestCase):
             self._write_inputs(
                 base,
                 {
-                    "current_task": {"task_id": "task-completed", "session_key": "agent:main:main", "control_state": "completed_verified", "updated_at": now},
-                    "current_root_task": {"root_task_id": "rt-completed", "current_workflow_run_id": "wf-completed", "workflow_state": "completed", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-completed", "current_state": "completed", "updated_at": now},
+                    "current_task": {
+                        "task_id": "task-completed",
+                        "session_key": "agent:main:main",
+                        "control_state": "completed_verified",
+                        "updated_at": now,
+                    },
+                    "current_root_task": {
+                        "root_task_id": "rt-completed",
+                        "current_workflow_run_id": "wf-completed",
+                        "workflow_state": "completed",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-completed",
+                        "current_state": "completed",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": ""},
                 },
             )
@@ -124,7 +187,9 @@ class RecoveryWatchdogTests(unittest.TestCase):
                 },
             )
 
-            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
             self.assertEqual(result["dispatched_count"], 0)
             self.assertEqual(result["items"][0]["should_dispatch"], False)
@@ -136,9 +201,23 @@ class RecoveryWatchdogTests(unittest.TestCase):
             self._write_inputs(
                 base,
                 {
-                    "current_task": {"task_id": "task-done", "session_key": "agent:main:main", "control_state": "completed_verified", "updated_at": now},
-                    "current_root_task": {"root_task_id": "rt-done", "current_workflow_run_id": "wf-done", "workflow_state": "delivered", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-done", "current_state": "delivered", "updated_at": now},
+                    "current_task": {
+                        "task_id": "task-done",
+                        "session_key": "agent:main:main",
+                        "control_state": "completed_verified",
+                        "updated_at": now,
+                    },
+                    "current_root_task": {
+                        "root_task_id": "rt-done",
+                        "current_workflow_run_id": "wf-done",
+                        "workflow_state": "delivered",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-done",
+                        "current_state": "delivered",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": "confirmed"},
                 },
             )
@@ -146,11 +225,17 @@ class RecoveryWatchdogTests(unittest.TestCase):
             watchdog = RecoveryWatchdog(
                 base_dir=base,
                 store=store,
-                config={"ENABLE_RECOVERY_WATCHDOG": True, "RECOVERY_WATCHDOG_USE_OLLAMA": False, "RECOVERY_WATCHDOG_FOLLOWUP_SECONDS": 60},
+                config={
+                    "ENABLE_RECOVERY_WATCHDOG": True,
+                    "RECOVERY_WATCHDOG_USE_OLLAMA": False,
+                    "RECOVERY_WATCHDOG_FOLLOWUP_SECONDS": 60,
+                },
                 dispatcher=lambda code_root, session_key, message: {"ok": True},
             )
 
-            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
             self.assertEqual(result["candidate_count"], 0)
             self.assertEqual(result["dispatched_count"], 0)
@@ -193,8 +278,17 @@ class RecoveryWatchdogTests(unittest.TestCase):
                         "control_state": "blocked_unverified",
                         "updated_at": now,
                     },
-                    "current_root_task": {"root_task_id": "rt-blocked", "current_workflow_run_id": "wf-blocked", "workflow_state": "accepted", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-blocked", "current_state": "accepted", "updated_at": now},
+                    "current_root_task": {
+                        "root_task_id": "rt-blocked",
+                        "current_workflow_run_id": "wf-blocked",
+                        "workflow_state": "accepted",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-blocked",
+                        "current_state": "accepted",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": ""},
                 },
             )
@@ -208,14 +302,25 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     "ENABLE_RECOVERY_WATCHDOG_DISPATCH": True,
                     "RECOVERY_WATCHDOG_USE_OLLAMA": False,
                 },
-                dispatcher=lambda code_root, session_key, message: dispatched.append(message) or {"ok": True},
+                dispatcher=lambda code_root, session_key, message: (
+                    dispatched.append(message) or {"ok": True}
+                ),
             )
 
-            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
             self.assertGreaterEqual(result["dispatched_count"], 1)
-            self.assertTrue(any(item["anomaly_type"] == "blocked_not_delivered" for item in result["items"]))
-            self.assertTrue(any("blocked but not delivered" in message for message in dispatched))
+            self.assertTrue(
+                any(
+                    item["anomaly_type"] == "blocked_not_delivered"
+                    for item in result["items"]
+                )
+            )
+            self.assertTrue(
+                any("blocked but not delivered" in message for message in dispatched)
+            )
 
     def test_followup_pending_without_main_recovery_dispatches(self):
         # Phase 2 简化后：watchdog 只检测"完成/阻塞但未送达"
@@ -231,8 +336,17 @@ class RecoveryWatchdogTests(unittest.TestCase):
                         "control_state": "blocked_unverified",
                         "updated_at": now,
                     },
-                    "current_root_task": {"root_task_id": "rt-blocked", "current_workflow_run_id": "wf-blocked", "workflow_state": "accepted", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-blocked", "current_state": "accepted", "updated_at": now},
+                    "current_root_task": {
+                        "root_task_id": "rt-blocked",
+                        "current_workflow_run_id": "wf-blocked",
+                        "workflow_state": "accepted",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-blocked",
+                        "current_state": "accepted",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": ""},
                 },
             )
@@ -246,14 +360,25 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     "ENABLE_RECOVERY_WATCHDOG_DISPATCH": True,
                     "RECOVERY_WATCHDOG_USE_OLLAMA": False,
                 },
-                dispatcher=lambda code_root, session_key, message: dispatched.append(message) or {"ok": True},
+                dispatcher=lambda code_root, session_key, message: (
+                    dispatched.append(message) or {"ok": True}
+                ),
             )
 
-            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
-            self.assertTrue(any(item["anomaly_type"] == "blocked_not_delivered" for item in result["items"]))
+            self.assertTrue(
+                any(
+                    item["anomaly_type"] == "blocked_not_delivered"
+                    for item in result["items"]
+                )
+            )
             self.assertEqual(result["dispatched_count"], 1)
-            self.assertTrue(any("blocked but not delivered" in message for message in dispatched))
+            self.assertTrue(
+                any("blocked but not delivered" in message for message in dispatched)
+            )
 
     def test_watchdog_exhausts_after_three_attempts(self):
         # Phase 2 简化后：watchdog 只检测"完成/阻塞但未送达"
@@ -263,9 +388,23 @@ class RecoveryWatchdogTests(unittest.TestCase):
             self._write_inputs(
                 base,
                 {
-                    "current_task": {"task_id": "task-completed", "session_key": "agent:main:main", "control_state": "completed_verified", "updated_at": now},
-                    "current_root_task": {"root_task_id": "rt-completed", "current_workflow_run_id": "wf-completed", "workflow_state": "completed", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-completed", "current_state": "completed", "updated_at": now},
+                    "current_task": {
+                        "task_id": "task-completed",
+                        "session_key": "agent:main:main",
+                        "control_state": "completed_verified",
+                        "updated_at": now,
+                    },
+                    "current_root_task": {
+                        "root_task_id": "rt-completed",
+                        "current_workflow_run_id": "wf-completed",
+                        "workflow_state": "completed",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-completed",
+                        "current_state": "completed",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": ""},
                 },
             )
@@ -281,16 +420,23 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     "RECOVERY_WATCHDOG_COOLDOWN_SECONDS": 0,
                     "RECOVERY_WATCHDOG_MAX_ATTEMPTS": 3,
                 },
-                dispatcher=lambda code_root, session_key, message: dispatches.__setitem__("count", dispatches["count"] + 1) or {"ok": True},
+                dispatcher=lambda code_root, session_key, message: (
+                    dispatches.__setitem__("count", dispatches["count"] + 1)
+                    or {"ok": True}
+                ),
             )
 
             watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
             watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
             watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
-            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
             self.assertEqual(dispatches["count"], 3)
-            self.assertEqual(result["items"][0]["dispatch"]["status"], "watchdog_exhausted")
+            self.assertEqual(
+                result["items"][0]["dispatch"]["status"], "watchdog_exhausted"
+            )
 
     def test_missing_heartbeat_escalates_to_hard_candidate(self):
         # Phase 2 简化后：watchdog 不再检测心跳，只检测"完成/阻塞但未送达"
@@ -307,8 +453,17 @@ class RecoveryWatchdogTests(unittest.TestCase):
                         "control_state": "completed_verified",
                         "updated_at": now,
                     },
-                    "current_root_task": {"root_task_id": "rt-completed", "current_workflow_run_id": "wf-completed", "workflow_state": "completed", "updated_at": now},
-                    "current_workflow_run": {"workflow_run_id": "wf-completed", "current_state": "completed", "updated_at": now},
+                    "current_root_task": {
+                        "root_task_id": "rt-completed",
+                        "current_workflow_run_id": "wf-completed",
+                        "workflow_state": "completed",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-completed",
+                        "current_state": "completed",
+                        "updated_at": now,
+                    },
                     "current_delivery_attempt": {"delivery_state": ""},
                 },
             )
@@ -323,13 +478,128 @@ class RecoveryWatchdogTests(unittest.TestCase):
                 },
             )
 
-            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
 
-            self.assertTrue(any(item["anomaly_type"] == "completed_not_delivered" for item in result["items"]))
+            self.assertTrue(
+                any(
+                    item["anomaly_type"] == "completed_not_delivered"
+                    for item in result["items"]
+                )
+            )
             self.assertTrue(any(item["severity"] == "high" for item in result["items"]))
             self.assertEqual(result["items"][0]["dispatch"]["status"], "dry_run")
 
-    def test_dispatch_via_openclaw_uses_session_id_and_preserves_watchdog_hint_payload(self):
+    def test_detects_no_visible_result_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            now = int(time.time()) - 1200
+            self._write_inputs(
+                base,
+                {
+                    "current_task": {
+                        "task_id": "task-silent",
+                        "session_key": "agent:main:main",
+                        "control_state": "progress_only",
+                        "updated_at": now,
+                    },
+                    "current_root_task": {
+                        "root_task_id": "rt-silent",
+                        "current_workflow_run_id": "wf-silent",
+                        "workflow_state": "started",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-silent",
+                        "current_state": "started",
+                        "updated_at": now,
+                    },
+                    "current_delivery_attempt": {"delivery_state": ""},
+                },
+            )
+            store = MonitorStateStore(base)
+            watchdog = RecoveryWatchdog(
+                base_dir=base,
+                store=store,
+                config={
+                    "ENABLE_RECOVERY_WATCHDOG": True,
+                    "ENABLE_RECOVERY_WATCHDOG_DISPATCH": False,
+                    "RECOVERY_WATCHDOG_USE_OLLAMA": False,
+                    "RECOVERY_WATCHDOG_NO_VISIBLE_RESULT_TIMEOUT_SECONDS": 600,
+                },
+            )
+
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
+
+            self.assertTrue(
+                any(
+                    item["incident_type"] == "no_visible_result_timeout"
+                    for item in result["items"]
+                )
+            )
+            incident = next(
+                item
+                for item in result["items"]
+                if item["incident_type"] == "no_visible_result_timeout"
+            )
+            self.assertEqual(incident["recommended_action"], "main_recheck_or_block")
+            self.assertGreaterEqual(
+                int(incident["evidence"].get("age_seconds") or 0), 1200
+            )
+
+    def test_detects_openclaw_unreachable_from_runtime_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._write_inputs(
+                base,
+                {
+                    "current_task": {},
+                    "current_root_task": {},
+                    "current_workflow_run": {},
+                    "current_delivery_attempt": {},
+                },
+                runtime_health={
+                    "gateway_running": False,
+                    "gateway_healthy": False,
+                    "generated_at": int(time.time()),
+                },
+            )
+            store = MonitorStateStore(base)
+            watchdog = RecoveryWatchdog(
+                base_dir=base,
+                store=store,
+                config={
+                    "ENABLE_RECOVERY_WATCHDOG": True,
+                    "ENABLE_RECOVERY_WATCHDOG_DISPATCH": False,
+                    "RECOVERY_WATCHDOG_USE_OLLAMA": False,
+                },
+            )
+
+            result = watchdog.run(
+                {"id": "primary", "code": str(base), "home": str(base)}
+            )
+
+            self.assertTrue(
+                any(
+                    item["incident_type"] == "openclaw_unreachable"
+                    for item in result["items"]
+                )
+            )
+            incident = next(
+                item
+                for item in result["items"]
+                if item["incident_type"] == "openclaw_unreachable"
+            )
+            self.assertEqual(incident["recommended_action"], "restart_openclaw")
+            self.assertEqual(incident["status"], "open")
+            self.assertIn("runtime_health_snapshot", incident["evidence"])
+
+    def test_dispatch_via_openclaw_uses_session_id_and_preserves_watchdog_hint_payload(
+        self,
+    ):
         sessions_payload = json.dumps(
             {
                 "sessions": [
@@ -345,10 +615,15 @@ class RecoveryWatchdogTests(unittest.TestCase):
             if cmd[:3] == ["node", "openclaw.mjs", "sessions"]:
                 return mock.Mock(returncode=0, stdout=sessions_payload, stderr="")
             if cmd[:3] == ["node", "openclaw.mjs", "agent"]:
-                return mock.Mock(returncode=0, stdout='{"status":"accepted"}', stderr="")
+                return mock.Mock(
+                    returncode=0, stdout='{"status":"accepted"}', stderr=""
+                )
             raise AssertionError(f"unexpected command: {cmd}")
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("recovery_watchdog.subprocess.run", side_effect=fake_run):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("recovery_watchdog.subprocess.run", side_effect=fake_run),
+        ):
             base = Path(tmp)
             message = RecoveryWatchdog._build_hint_message(
                 {
@@ -361,20 +636,34 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     "reason": "followup_pending_without_main_recovery",
                     "hint_title": "WATCHDOG_RECOVERY_HINT:followup_pending_without_main_recovery",
                     "hint_message": "main must not leave it pending without recovery",
-                    "evidence": {"followup_stage": "hard", "next_action": "await_dev_receipt"},
+                    "evidence": {
+                        "followup_stage": "hard",
+                        "next_action": "await_dev_receipt",
+                    },
                 },
                 "agent:main:main",
             )
 
-            result = RecoveryWatchdog._dispatch_via_openclaw(base, "agent:main:main", message)
+            result = RecoveryWatchdog._dispatch_via_openclaw(
+                base, "agent:main:main", message
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["session_id"], "session-main-123")
-        self.assertEqual(calls[0][:6], ["node", "openclaw.mjs", "sessions", "--json", "--all-agents", "--active"])
+        self.assertEqual(
+            calls[0][:6],
+            ["node", "openclaw.mjs", "sessions", "--json", "--all-agents", "--active"],
+        )
         self.assertIn("10080", calls[0])
-        self.assertEqual(calls[1][0:5], ["node", "openclaw.mjs", "agent", "--session-id", "session-main-123"])
+        self.assertEqual(
+            calls[1][0:5],
+            ["node", "openclaw.mjs", "agent", "--session-id", "session-main-123"],
+        )
         self.assertIn("--message", calls[1])
         sent_message = calls[1][calls[1].index("--message") + 1]
         self.assertIn("WATCHDOG_RECOVERY_HINT", sent_message)
         self.assertIn('"target_session_key": "agent:main:main"', sent_message)
         self.assertIn('"type": "WATCHDOG_RECOVERY_HINT"', sent_message)
+        self.assertIn(
+            "accept_repair, observe_only, dismiss, or need_more_evidence", sent_message
+        )

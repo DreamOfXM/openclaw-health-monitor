@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "PROGRESS_PUSH_INTERVAL": 180,
     "PROGRESS_PUSH_COOLDOWN": 300,
     "PROGRESS_ESCALATION_INTERVAL": 600,
+    "ENABLE_GUARDIAN_PROGRESS_PUSH": False,
     "GUARDIAN_STALE_TASK_MAX_AGE": 3600,
     "GUARDIAN_FOLLOWUP_TIMEOUT": 120,
     "GUARDIAN_FOLLOWUP_RETRIES": 2,
@@ -163,11 +164,7 @@ def parse_webhook_allowlist(config: dict[str, Any]) -> set[str]:
     raw = str(config.get("WEBHOOK_ALLOWED_HOSTS", "") or "").strip()
     if not raw:
         return set()
-    return {
-        item.strip().lower()
-        for item in raw.split(",")
-        if item.strip()
-    }
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
 def is_webhook_url_allowed(url: str, config: dict[str, Any]) -> tuple[bool, str]:
@@ -187,7 +184,9 @@ def is_webhook_url_allowed(url: str, config: dict[str, Any]) -> tuple[bool, str]
     return False, f"Webhook 域名未在白名单中: {host}"
 
 
-def validate_config_update(key: str, value: str, config: dict[str, Any]) -> tuple[bool, str]:
+def validate_config_update(
+    key: str, value: str, config: dict[str, Any]
+) -> tuple[bool, str]:
     if key not in WEBHOOK_CONFIG_KEYS:
         return True, ""
     return is_webhook_url_allowed(value, config)
@@ -196,8 +195,16 @@ def validate_config_update(key: str, value: str, config: dict[str, Any]) -> tupl
 def get_env_specs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Return the static environment registry."""
     primary_port = int(config.get("GATEWAY_PORT", 18789))
-    primary_home = Path(str(config.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))))
-    primary_code = Path(str(config.get("OPENCLAW_CODE", str(Path.home() / "openclaw-workspace" / "openclaw"))))
+    primary_home = Path(
+        str(config.get("OPENCLAW_HOME", str(Path.home() / ".openclaw")))
+    )
+    primary_code = Path(
+        str(
+            config.get(
+                "OPENCLAW_CODE", str(Path.home() / "openclaw-workspace" / "openclaw")
+            )
+        )
+    )
     return {
         "primary": {
             "env_id": "primary",
@@ -236,7 +243,9 @@ def read_active_binding(base_dir: Path, config: dict[str, Any]) -> dict[str, Any
         env_id = str(data.get("active_env") or selected).strip() or selected
         if env_id not in specs:
             return default_binding
-        expected = data.get("expected") if isinstance(data.get("expected"), dict) else {}
+        expected = (
+            data.get("expected") if isinstance(data.get("expected"), dict) else {}
+        )
         merged_expected = dict(specs[env_id])
         merged_expected.update(expected)
         return {
@@ -250,7 +259,13 @@ def read_active_binding(base_dir: Path, config: dict[str, Any]) -> dict[str, Any
         return default_binding
 
 
-def write_active_binding(base_dir: Path, config: dict[str, Any], env_id: str, *, switch_state: str = "committed") -> dict[str, Any]:
+def write_active_binding(
+    base_dir: Path,
+    config: dict[str, Any],
+    env_id: str,
+    *,
+    switch_state: str = "committed",
+) -> dict[str, Any]:
     specs = get_env_specs(config)
     if env_id not in specs:
         raise ValueError(f"unknown env_id: {env_id}")
