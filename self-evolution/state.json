@@ -55,7 +55,7 @@
   },
   "daily_report": {
     "date": "2026-03-21",
-    "generated_at": 1774086765,
+    "generated_at": 1774086923,
     "issues_found": 0,
     "issues_reopened": 1,
     "recurrence_events": 998,
@@ -120,5 +120,5 @@
     "pending_total": 4,
     "total": 5
   },
-  "generated_at": 1774086765
+  "generated_at": 1774086923
 }
