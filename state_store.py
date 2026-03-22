@@ -678,8 +678,12 @@ class MonitorStateStore:
             ).fetchall()
             for row in existing_rows:
                 marker = (str(row["task_id"] or ""), str(row["event_type"] or ""), str(row["event_key"] or ""))
+                if marker in dedupe_map:
+                    duplicate_ids.append(int(row["id"]))
+                    needs_rebuild = True
+                    continue
                 dedupe_map[marker] = int(row["id"])
-            if rows:
+            if rows or duplicate_ids:
                 needs_rebuild = True
             for row in rows:
                 event_key = hashlib.sha1(
