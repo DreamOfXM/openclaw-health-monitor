@@ -1455,6 +1455,8 @@ def normalize_stage_label(marker: str) -> str:
 def classify_guardian_followup_error(output: str) -> str:
     """Classify follow-up failures into coarse blocking reasons."""
     text = (output or "").lower()
+    if output == "session_active":
+        return "session_active"
     if "session file locked" in text or ".jsonl.lock" in text:
         return "session_lock"
     if (
@@ -3261,10 +3263,86 @@ def lookup_openclaw_session_id(session_key: str) -> str | None:
     return cache.get(session_key)
 
 
+def cleanup_stale_session_locks(max_age_seconds: int = 300) -> int:
+    """Clean up stale session lock files that are no longer held by any process.
+    
+    Args:
+        max_age_seconds: Lock files older than this are considered stale (default 5 minutes)
+    
+    Returns:
+        Number of lock files cleaned up
+    """
+    import json
+    locks_dir = OPENCLAW_HOME / "agents"
+    if not locks_dir.exists():
+        return 0
+    
+    cleaned = 0
+    now = time.time()
+    
+    for lock_file in locks_dir.rglob("*.lock"):
+        try:
+            # First check if any process is actually holding the lock using lsof
+            try:
+                result = subprocess.run(
+                    ["lsof", str(lock_file)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    # Some process is holding the lock, don't clean
+                    continue
+            except Exception:
+                # lsof failed, fall back to other checks
+                pass
+            
+            # Read lock file to get PID and creation time
+            content = lock_file.read_text()
+            lock_data = json.loads(content) if content.strip().startswith("{") else {}
+            
+            # Check if lock is stale by age
+            created_at = lock_data.get("createdAt", "")
+            if created_at:
+                # Parse ISO timestamp
+                from datetime import datetime
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    created_ts = created_dt.timestamp()
+                    if now - created_ts < max_age_seconds:
+                        # Lock is not old enough, skip
+                        continue
+                except Exception:
+                    pass
+            
+            # Clean up stale lock (no process holding it AND old enough)
+            lock_file.unlink()
+            log(f"Cleaned up stale session lock: {lock_file}")
+            cleaned += 1
+            
+        except Exception as e:
+            log(f"Error checking lock file {lock_file}: {e}", "WARNING")
+    
+    return cleaned
+
+
 def send_guardian_followup(
     session_key: str, message: str, *, deliver: bool = True
 ) -> tuple[bool, str | None]:
     """Send a marked system follow-up into an existing OpenClaw session."""
+    # Clean up stale session locks before attempting to send
+    cleanup_stale_session_locks(max_age_seconds=300)
+    
+    # Check if session has recent activity (within 60 seconds) - if so, skip followup
+    # because the agent is already actively processing
+    cache = STORE.load_runtime_value("openclaw_session_cache", {})
+    session_info = cache.get(session_key, {})
+    last_activity = int(session_info.get("last_activity", 0) or 0)
+    now = int(time.time())
+    if last_activity > 0 and now - last_activity < 60:
+        log(f"会话正在活跃处理中，跳过追问: {session_key} (last_activity={last_activity}, age={now - last_activity}s)")
+        return True, "session_active"  # Treat as success, no need to followup
+    
     session_id = lookup_openclaw_session_id(session_key)
     if not session_id:
         log(f"守护追问失败，未找到会话: {session_key}", "ERROR")
@@ -5172,7 +5250,24 @@ def enforce_task_registry_control_plane() -> list[dict]:
             idle=idle,
             total=total,
         )
-        ok, error_kind = send_guardian_followup(session_key, control_message)
+        fallback_message = build_user_visible_status_template(
+            control_state="blocked_unverified"
+            if control_state in {"progress_only", "received_only", "unknown"}
+            else control_state,
+            phase=phase,
+            timing=timing,
+            heartbeat_ok=False,
+            followup_stage=soft_or_hard_stage,
+        )
+        delivery_mode, error_kind = deliver_guardian_progress_update(
+            {
+                "session_key": session_key,
+                "requester_open_id": task.get("requester_open_id") or "",
+            },
+            followup_message=control_message,
+            fallback_message=fallback_message,
+        )
+        ok = delivery_mode is not None
         next_attempts = attempts + 1
         if action_id:
             details = dict(action.get("details") or {})
@@ -5191,6 +5286,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         heartbeat_ok=False,
                         followup_stage=soft_or_hard_stage,
                     ),
+                    "delivery_mode": delivery_mode or "",
                 }
             )
             STORE.update_control_action(
@@ -5219,6 +5315,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                         heartbeat_ok=False,
                         followup_stage=soft_or_hard_stage,
                     ),
+                    "delivery_mode": delivery_mode or "",
                     "attempts": next_attempts,
                     "last_followup_at": now,
                     "last_error": error_kind or "",
