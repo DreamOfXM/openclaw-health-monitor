@@ -2530,7 +2530,7 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
         title = f"control_observation:{problem_code}"
         detail = f"task={task_id};control_state={control_state or '-'};action={action};blocked_reason={blocked_reason or '-'}"
         learning_key = derive_learning_key(
-            "control", env_id, control_state, problem_code
+            "control", env_id, task_id, problem_code
         )
         learning = record_learning(
             STORE,
