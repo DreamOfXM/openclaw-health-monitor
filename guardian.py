@@ -1313,8 +1313,41 @@ def extract_pipeline_marker(line: str) -> str | None:
 
 
 def extract_pipeline_receipt(line: str) -> dict[str, str] | None:
-    """Extract and validate a structured PIPELINE_RECEIPT payload from runtime logs."""
+    """Extract and validate a structured PIPELINE_RECEIPT payload from runtime logs.
+    
+    Supports two formats:
+    1. Old format: PIPELINE_RECEIPT: agent=... | phase=... | action=...
+    2. JSON format: **PIPELINE_RECEIPT** followed by JSON block with "type": "PIPELINE_RECEIPT"
+    """
     marker = "PIPELINE_RECEIPT:"
+    json_marker = "**PIPELINE_RECEIPT**"
+    
+    # Try JSON format first
+    if json_marker in line:
+        # Look for JSON block after the marker
+        try:
+            # Find JSON content - could be on same line or next
+            json_start = line.find("{")
+            if json_start >= 0:
+                json_str = line[json_start:]
+                # Try to parse as JSON
+                import json
+                data = json.loads(json_str)
+                if isinstance(data, dict) and data.get("type") == "PIPELINE_RECEIPT":
+                    receipt = {
+                        "agent": str(data.get("agent", "")),
+                        "phase": str(data.get("status", "")),
+                        "action": str(data.get("status", "")),
+                        "task_id": str(data.get("task_id", "")),
+                        "summary": str(data.get("summary", "")),
+                        "timestamp": str(data.get("timestamp", "")),
+                    }
+                    ts_raw, _ = parse_runtime_timestamp(line)
+                    return normalize_pipeline_receipt(receipt, timestamp=ts_raw)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    
+    # Fall back to old format
     if marker not in line:
         return None
     payload = line.split(marker, 1)[1].strip()
@@ -2941,6 +2974,12 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
     last_closed_dispatch: dict[str, Any] | None = None
     touched_task_ids: set[str] = set()
     touched_session_keys: set[str] = set()
+    
+    # Buffer for multi-line JSON receipts
+    json_receipt_buffer: list[str] = []
+    in_json_receipt = False
+    json_receipt_ts_raw = ""
+    json_receipt_ts = None
 
     def reconcile_task(task_id: str) -> None:
         task = STORE.get_task(task_id)
@@ -2949,10 +2988,16 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
         core = STORE.get_core_closure_snapshot_for_task(
             task_id, allow_legacy_projection=False
         )
+        # Ensure core is a dict
+        if not isinstance(core, dict):
+            core = {}
         root_task_id = str((core.get("root_task") or {}).get("root_task_id") or "")
         if not root_task_id or root_task_id.startswith("legacy-root:"):
             STORE.sync_legacy_task_projection(task_id)
         control = STORE.derive_task_control_state(task_id)
+        # Ensure control is a dict
+        if not isinstance(control, dict):
+            control = {}
         if not root_task_id or root_task_id.startswith("legacy-root:"):
             STORE.reconcile_task_control_action(task, control)
 
@@ -2961,7 +3006,90 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             return None
         return max(open_dispatches.items(), key=lambda item: item[1]["started_at"])[0]
 
+    def process_json_receipt_buffer() -> None:
+        """Process accumulated multi-line JSON receipt."""
+        nonlocal json_receipt_buffer, in_json_receipt, json_receipt_ts_raw, json_receipt_ts
+        if not json_receipt_buffer:
+            return
+        try:
+            import json
+            json_str = "\n".join(json_receipt_buffer)
+            # Find the JSON object
+            json_start = json_str.find("{")
+            if json_start >= 0:
+                json_str = json_str[json_start:]
+                # Find the end of JSON (last closing brace before any markdown)
+                json_end = json_str.rfind("}")
+                if json_end >= 0:
+                    json_str = json_str[:json_end+1]
+                data = json.loads(json_str)
+                if isinstance(data, dict) and data.get("type") == "PIPELINE_RECEIPT":
+                    receipt = {
+                        "agent": str(data.get("agent", "")),
+                        "phase": str(data.get("status", "")),
+                        "action": str(data.get("status", "")),
+                        "task_id": str(data.get("task_id", "")),
+                        "summary": str(data.get("summary", "")),
+                        "timestamp": str(data.get("timestamp", "")),
+                    }
+                    # Process the receipt
+                    if open_dispatches:
+                        current_key = most_recent_key()
+                        if current_key:
+                            dispatch = open_dispatches[current_key]
+                            action = receipt.get("action", "")
+                            if action == "completed":
+                                dispatch["status"] = "completed"
+                                dispatch["current_stage"] = "已完成"
+                            elif action == "blocked":
+                                dispatch["status"] = "blocked"
+                                dispatch["current_stage"] = "阻塞"
+                            dispatch["last_progress_at"] = int(json_receipt_ts or time.time())
+                            dispatch["updated_at"] = int(json_receipt_ts or time.time())
+                            STORE.update_task_fields(
+                                dispatch["task_id"],
+                                status=dispatch["status"],
+                                current_stage=dispatch["current_stage"],
+                                last_progress_at=dispatch["last_progress_at"],
+                                updated_at=dispatch["updated_at"],
+                                latest_receipt=receipt,
+                            )
+                            touched_task_ids.add(dispatch["task_id"])
+                            STORE.record_task_event(
+                                dispatch["task_id"],
+                                "pipeline_receipt",
+                                {"receipt": receipt, "timestamp": data.get("timestamp", "")},
+                            )
+                            log(f"已识别 JSON 回执: task_id={receipt.get('task_id')} status={receipt.get('action')}")
+        except Exception as e:
+            log(f"解析 JSON 回执失败: {e}", "WARNING")
+        finally:
+            json_receipt_buffer = []
+            in_json_receipt = False
+            json_receipt_ts_raw = ""
+            json_receipt_ts = None
+
     for line in lines:
+        # Check for multi-line JSON receipt start
+        if "**PIPELINE_RECEIPT**" in line:
+            in_json_receipt = True
+            json_receipt_buffer = []
+            json_receipt_ts_raw, json_receipt_ts = parse_runtime_timestamp(line)
+            continue
+        
+        # Check for multi-line JSON receipt end
+        if in_json_receipt:
+            if "```" in line and json_receipt_buffer:
+                # End of JSON block
+                process_json_receipt_buffer()
+            else:
+                # Collect JSON lines
+                json_receipt_buffer.append(line.strip())
+                # Check if this line contains closing brace
+                if "}" in line:
+                    process_json_receipt_buffer()
+            continue
+        
         ts_raw, ts = parse_runtime_timestamp(line)
         if ts is None:
             continue
