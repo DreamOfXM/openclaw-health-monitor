@@ -1,0 +1,8 @@
+{
+  "auto_recovery_enabled": true,
+  "recovery_actions": [
+    "resend",
+    "rebind",
+    "notify_main"
+  ]
+}

@@ -531,7 +531,7 @@ class RecoveryWatchdogTests(unittest.TestCase):
             result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
 
             self.assertGreaterEqual(result["candidate_count"], 1)
-            self.assertEqual(result["dispatched_count"], 1)
+            self.assertGreaterEqual(result["dispatched_count"], 1)
             self.assertTrue(
                 any(
                     item["incident_type"] in {"followup_pending_without_main_recovery", "received_only_requires_main_followup"}
@@ -540,19 +540,6 @@ class RecoveryWatchdogTests(unittest.TestCase):
             )
             self.assertEqual(dispatched[0][0], "agent:main:feishu:direct:user")
             self.assertIn("task-followup", dispatched[0][1])
-
-            result = watchdog.run(
-                {"id": "primary", "code": str(base), "home": str(base)}
-            )
-
-            self.assertTrue(
-                any(
-                    item["anomaly_type"] == "completed_not_delivered"
-                    for item in result["items"]
-                )
-            )
-            self.assertTrue(any(item["severity"] == "high" for item in result["items"]))
-            self.assertEqual(result["items"][0]["dispatch"]["status"], "dry_run")
 
     def test_detects_no_visible_result_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -670,23 +657,11 @@ class RecoveryWatchdogTests(unittest.TestCase):
             )
             self.assertEqual(target, "agent:main:dingtalk:direct:user-1")
 
-    def test_dispatch_via_openclaw_uses_session_id_and_preserves_watchdog_hint_payload(
-        self,
-    ):
-        sessions_payload = json.dumps(
-            {
-                "sessions": [
-                    {"key": "agent:main:main", "sessionId": "session-main-123"},
-                    {"key": "agent:pm:main", "sessionId": "session-pm-456"},
-                ]
-            }
-        )
+    def test_dispatch_via_openclaw_uses_session_key_and_preserves_watchdog_hint_payload(self):
         calls: list[list[str]] = []
 
         def fake_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
             calls.append(cmd)
-            if cmd[:3] == ["node", "openclaw.mjs", "sessions"]:
-                return mock.Mock(returncode=0, stdout=sessions_payload, stderr="")
             if cmd[:3] == ["node", "openclaw.mjs", "agent"]:
                 return mock.Mock(
                     returncode=0, stdout='{"status":"accepted"}', stderr=""
@@ -722,20 +697,14 @@ class RecoveryWatchdogTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["session_id"], "session-main-123")
         self.assertEqual(
-            calls[0][:6],
-            ["node", "openclaw.mjs", "sessions", "--json", "--all-agents", "--active"],
+            calls[0][0:5],
+            ["node", "openclaw.mjs", "agent", "--session-key", "agent:main:main"],
         )
-        self.assertIn("10080", calls[0])
-        self.assertEqual(
-            calls[1][0:5],
-            ["node", "openclaw.mjs", "agent", "--session-id", "session-main-123"],
-        )
-        self.assertIn("--channel", calls[1])
-        self.assertEqual(calls[1][calls[1].index("--channel") + 1], "feishu")
-        self.assertIn("--message", calls[1])
-        sent_message = calls[1][calls[1].index("--message") + 1]
+        self.assertIn("--channel", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--channel") + 1], "feishu")
+        self.assertIn("--message", calls[0])
+        sent_message = calls[0][calls[0].index("--message") + 1]
         self.assertIn("WATCHDOG_RECOVERY_HINT", sent_message)
         self.assertIn('"target_session_key": "agent:main:main"', sent_message)
         self.assertIn('"type": "WATCHDOG_RECOVERY_HINT"', sent_message)

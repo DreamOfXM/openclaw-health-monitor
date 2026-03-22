@@ -751,61 +751,6 @@ class RecoveryWatchdog:
         )
 
     @staticmethod
-    def _lookup_session_id_via_openclaw(
-        code_root: Path, target_session_key: str
-    ) -> dict[str, Any]:
-        cmd = [
-            "node",
-            "openclaw.mjs",
-            "sessions",
-            "--json",
-            "--all-agents",
-            "--active",
-            "10080",
-        ]
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(code_root),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except Exception as exc:
-            return {"ok": False, "error": str(exc), "command": cmd}
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
-        if result.returncode != 0 or not stdout:
-            return {
-                "ok": False,
-                "returncode": result.returncode,
-                "stdout": stdout[-400:],
-                "stderr": stderr[-400:],
-                "command": cmd,
-            }
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            return {
-                "ok": False,
-                "error": f"invalid sessions json: {exc}",
-                "stdout": stdout[-400:],
-                "command": cmd,
-            }
-        for item in payload.get("sessions", []):
-            if item.get("key") == target_session_key and item.get("sessionId"):
-                return {
-                    "ok": True,
-                    "session_id": str(item["sessionId"]),
-                    "command": cmd,
-                }
-        return {
-            "ok": False,
-            "error": f"session not found: {target_session_key}",
-            "command": cmd,
-        }
-
-    @staticmethod
     def _infer_channel_from_session_key(session_key: str) -> str:
         parts = str(session_key or "").split(":")
         if len(parts) >= 4 and parts[2]:
@@ -816,16 +761,13 @@ class RecoveryWatchdog:
     def _dispatch_via_openclaw(
         cls, code_root: Path, target_session_key: str, message: str
     ) -> dict[str, Any]:
-        lookup = cls._lookup_session_id_via_openclaw(code_root, target_session_key)
-        if not lookup.get("ok"):
-            return {"ok": False, "phase": "lookup_session", **lookup}
         channel = cls._infer_channel_from_session_key(target_session_key)
         cmd = [
             "node",
             "openclaw.mjs",
             "agent",
-            "--session-id",
-            str(lookup.get("session_id") or ""),
+            "--session-key",
+            target_session_key,
             "--channel",
             channel,
             "--message",
@@ -848,7 +790,6 @@ class RecoveryWatchdog:
         return {
             "ok": result.returncode == 0,
             "phase": "dispatch",
-            "session_id": lookup.get("session_id"),
             "target_session_key": target_session_key,
             "command": cmd,
             "returncode": result.returncode,

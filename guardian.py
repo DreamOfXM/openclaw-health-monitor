@@ -6134,7 +6134,8 @@ def main():
             notify("Guardian 停止", "守护进程已停止", "info")
             break
         except Exception as e:
-            log(f"监控循环异常: {e}", "ERROR")
+            import traceback
+            log(f"监控循环异常: {e}\n{traceback.format_exc()}", "ERROR")
             time.sleep(10)
 
 
