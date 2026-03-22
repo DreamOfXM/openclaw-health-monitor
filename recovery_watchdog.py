@@ -189,6 +189,7 @@ class RecoveryWatchdog:
         )
         control_state = str(current_task.get("control_state") or "")
         next_action = str(current_task.get("next_action") or "")
+        control = dict(current_task.get("control") or {})
         delivery_state = (
             str(
                 current_delivery.get("delivery_state")
@@ -219,6 +220,17 @@ class RecoveryWatchdog:
             .lower()
         )
         recent_logs = list((context.get("anomaly_lines") or [])[-8:])
+        heartbeat_age = int(
+            current_task.get("heartbeat_age_seconds")
+            or control.get("heartbeat_age_seconds")
+            or ((control.get("timing") or {}).get("heartbeat_age_seconds") if isinstance(control.get("timing"), dict) else 0)
+            or 0
+        )
+        followup_stage = str(current_task.get("followup_stage") or control.get("followup_stage") or "").strip().lower()
+        timing = dict(control.get("timing") or {})
+        hard_followup = int(timing.get("hard_followup") or self.config.get("RECOVERY_WATCHDOG_FOLLOWUP_SECONDS", 180) or 180)
+        core_supervision = dict(control.get("core_supervision") or {})
+        needs_followup = bool(core_supervision.get("needs_followup") or current_root.get("needs_followup"))
 
         def build_recent_events() -> list[dict[str, Any]]:
             events: list[dict[str, Any]] = []
@@ -376,6 +388,27 @@ class RecoveryWatchdog:
                 "main_recheck_or_block",
                 age_seconds=age_seconds,
                 timeout_seconds=timeout_seconds,
+            )
+
+        if task_id and not is_delivered and control_state in {"received_only", "progress_only"} and needs_followup and heartbeat_age >= hard_followup:
+            add_candidate(
+                "followup_pending_without_main_recovery",
+                "high",
+                f"task {task_id} has stalled in {control_state} for {heartbeat_age}s without main recovery",
+                "main_recheck_or_block",
+                heartbeat_age_seconds=heartbeat_age,
+                followup_stage=followup_stage,
+                hard_followup_seconds=hard_followup,
+            )
+
+        if task_id and not is_delivered and followup_stage == "blocked" and next_action in {"manual_or_session_recovery", "require_receipt_or_block"}:
+            add_candidate(
+                "received_only_requires_main_followup",
+                "critical",
+                f"task {task_id} is stuck in blocked followup stage without a main-visible closure decision",
+                "main_recheck_or_block",
+                heartbeat_age_seconds=heartbeat_age,
+                followup_stage=followup_stage,
             )
         return candidates
 

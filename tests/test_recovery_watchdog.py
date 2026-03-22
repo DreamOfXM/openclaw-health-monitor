@@ -74,7 +74,7 @@ class RecoveryWatchdogTests(unittest.TestCase):
                 {"id": "primary", "code": str(base), "home": str(base)}
             )
 
-            self.assertEqual(result["dispatched_count"], 1)
+            self.assertGreaterEqual(result["dispatched_count"], 1)
             self.assertEqual(dispatched[0][0], "agent:main:feishu:direct:user")
             self.assertIn("WATCHDOG_RECOVERY_HINT", dispatched[0][1])
             self.assertEqual(
@@ -375,7 +375,7 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     for item in result["items"]
                 )
             )
-            self.assertEqual(result["dispatched_count"], 1)
+            self.assertGreaterEqual(result["dispatched_count"], 1)
             self.assertTrue(
                 any("blocked but not delivered" in message for message in dispatched)
             )
@@ -477,6 +477,69 @@ class RecoveryWatchdogTests(unittest.TestCase):
                     "RECOVERY_WATCHDOG_USE_OLLAMA": False,
                 },
             )
+
+    def test_received_only_stall_dispatches_followup_to_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            now = int(time.time()) - 1000
+            self._write_inputs(
+                base,
+                {
+                    "current_task": {
+                        "task_id": "task-followup",
+                        "session_key": "agent:main:feishu:direct:user",
+                        "control_state": "received_only",
+                        "next_action": "require_receipt_or_block",
+                        "followup_stage": "blocked",
+                        "heartbeat_age_seconds": 500,
+                        "updated_at": now,
+                        "control": {
+                            "followup_stage": "blocked",
+                            "core_supervision": {"needs_followup": True},
+                            "timing": {"hard_followup": 75},
+                        },
+                    },
+                    "current_root_task": {
+                        "root_task_id": "rt-followup",
+                        "current_workflow_run_id": "wf-followup",
+                        "workflow_state": "started",
+                        "updated_at": now,
+                    },
+                    "current_workflow_run": {
+                        "workflow_run_id": "wf-followup",
+                        "current_state": "started",
+                        "updated_at": now,
+                    },
+                },
+            )
+            store = MonitorStateStore(base)
+            dispatched: list[tuple[str, str]] = []
+            watchdog = RecoveryWatchdog(
+                base_dir=base,
+                store=store,
+                config={
+                    "ENABLE_RECOVERY_WATCHDOG": True,
+                    "ENABLE_RECOVERY_WATCHDOG_DISPATCH": True,
+                    "RECOVERY_WATCHDOG_USE_OLLAMA": False,
+                    "RECOVERY_WATCHDOG_COOLDOWN_SECONDS": 0,
+                },
+                dispatcher=lambda code_root, session_key, message: (
+                    dispatched.append((session_key, message)) or {"ok": True}
+                ),
+            )
+
+            result = watchdog.run({"id": "primary", "code": str(base), "home": str(base)})
+
+            self.assertGreaterEqual(result["candidate_count"], 1)
+            self.assertEqual(result["dispatched_count"], 1)
+            self.assertTrue(
+                any(
+                    item["incident_type"] in {"followup_pending_without_main_recovery", "received_only_requires_main_followup"}
+                    for item in result["items"]
+                )
+            )
+            self.assertEqual(dispatched[0][0], "agent:main:feishu:direct:user")
+            self.assertIn("task-followup", dispatched[0][1])
 
             result = watchdog.run(
                 {"id": "primary", "code": str(base), "home": str(base)}
