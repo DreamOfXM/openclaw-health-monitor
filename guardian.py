@@ -3542,7 +3542,13 @@ def check_session_has_response(session_key: str, since_timestamp: int) -> bool:
 
     # 从会话缓存中获取最后活动时间
     cache = STORE.load_runtime_value("openclaw_session_cache", {})
+    # Ensure cache is a dict
+    if not isinstance(cache, dict):
+        cache = {}
     session_info = cache.get(session_key, {})
+    # Ensure session_info is a dict
+    if not isinstance(session_info, dict):
+        session_info = {}
     last_activity = int(session_info.get("last_activity", 0) or 0)
 
     # 如果最后活动时间 > 追问时间，说明有响应
