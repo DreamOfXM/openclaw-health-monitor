@@ -3337,6 +3337,9 @@ def send_guardian_followup(
     # because the agent is already actively processing
     cache = STORE.load_runtime_value("openclaw_session_cache", {})
     session_info = cache.get(session_key, {})
+    # Ensure session_info is a dict, not a string
+    if not isinstance(session_info, dict):
+        session_info = {}
     last_activity = int(session_info.get("last_activity", 0) or 0)
     now = int(time.time())
     if last_activity > 0 and now - last_activity < 60:
@@ -4399,7 +4402,13 @@ def enforce_task_registry_control_plane() -> list[dict]:
         core = STORE.get_core_closure_snapshot_for_task(
             task["task_id"], allow_legacy_projection=False
         )
+        # Ensure core is a dict, not a string
+        if not isinstance(core, dict):
+            core = {}
         core_supervision = STORE.derive_core_task_supervision(task["task_id"])
+        # Ensure core_supervision is a dict, not a string
+        if not isinstance(core_supervision, dict):
+            core_supervision = {}
         workflow_state = str(core.get("workflow_state") or "")
         root_task_id = str((core.get("root_task") or {}).get("root_task_id") or "")
         native_core_task = (
@@ -4422,6 +4431,9 @@ def enforce_task_registry_control_plane() -> list[dict]:
             continue
 
         control = STORE.derive_task_control_state(task["task_id"])
+        # Ensure control is a dict, not a string
+        if not isinstance(control, dict):
+            control = {}
         if native_core_task:
             action = control.get("control_action")
         else:
