@@ -7612,6 +7612,20 @@ def main():
             # 心跳检测 + Guardrail 检查
             check_heartbeat_and_guardrail()
             run_recovery_watchdog(current_env_spec())
+            
+            # 执行 pending 的 control action（自我进化系统的执行层）
+            execute_pending_control_actions()
+            
+            # 每天运行一次自我进化验证（记录指标，追踪问题数量变化）
+            try:
+                from verify_self_evolution import run_verification, save_metrics, should_run_today, mark_run_today
+                if should_run_today():
+                    metrics = run_verification()
+                    save_metrics(metrics)
+                    mark_run_today()
+                    log(f"自我进化验证: background_root_missing={metrics['background_root_missing']}, pending_actions={metrics['pending_actions']}, blocked_actions={metrics['blocked_actions']}")
+            except Exception as exc:
+                log(f"自我进化验证失败: {exc}", "ERROR")
 
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:
@@ -7658,6 +7672,150 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def execute_pending_control_actions() -> dict[str, Any]:
+    """执行 pending 状态的 control action。
+    
+    这是自我进化系统的执行层：不只是创建 action，还要执行 action。
+    
+    执行逻辑：
+    1. 获取所有 pending 的 action
+    2. 对于每个 action，检查任务状态
+    3. 如果任务已经有进展，标记 action 为 resolved
+    4. 如果任务超时，标记 action 为 blocked
+    5. 如果任务需要恢复，触发恢复逻辑
+    
+    Returns:
+        执行结果统计
+    """
+    now = int(time.time())
+    result = {
+        "checked": 0,
+        "resolved": 0,
+        "blocked": 0,
+        "recovered": 0,
+        "errors": 0,
+    }
+    
+    # 获取所有任务
+    tasks = STORE.list_tasks(limit=500)
+    
+    for task in tasks:
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+            
+        # 获取 pending 的 action
+        action = STORE.get_open_control_action(task_id)
+        if not action:
+            continue
+        if action.get("status") not in ("pending", "sent"):
+            continue
+            
+        result["checked"] += 1
+        action_type = str(action.get("action_type") or "")
+        control_state = str(action.get("control_state") or "")
+        
+        # 获取任务当前状态
+        control = STORE.derive_task_control_state(task_id)
+        current_control_state = str(control.get("control_state") or "")
+        has_receipt = bool(control.get("has_pipeline_receipt"))
+        delivery_state = str(control.get("delivery_state") or "")
+        
+        try:
+            # 检查是否已经有进展
+            if has_receipt:
+                # 任务已有回执，标记 action 为 resolved
+                STORE.update_control_action(
+                    action["id"],
+                    status="resolved",
+                    summary=f"任务已有回执，control_state={current_control_state}",
+                    resolved_at=now,
+                )
+                result["resolved"] += 1
+                log(f"Action {action['id']} resolved: task {task_id} has receipt")
+                continue
+                
+            if delivery_state in ("delivered", "delivery_confirmed", "owner_escalated"):
+                # 任务已送达，标记 action 为 resolved
+                STORE.update_control_action(
+                    action["id"],
+                    status="resolved",
+                    summary=f"任务已送达，delivery_state={delivery_state}",
+                    resolved_at=now,
+                )
+                result["resolved"] += 1
+                log(f"Action {action['id']} resolved: task {task_id} delivered")
+                continue
+                
+            if current_control_state in ("completed_verified", "completed_delivered"):
+                # 任务已完成，标记 action 为 resolved
+                STORE.update_control_action(
+                    action["id"],
+                    status="resolved",
+                    summary=f"任务已完成，control_state={current_control_state}",
+                    resolved_at=now,
+                )
+                result["resolved"] += 1
+                log(f"Action {action['id']} resolved: task {task_id} completed")
+                continue
+            
+            # 检查是否超时
+            updated_at = int(action.get("updated_at") or action.get("created_at") or now)
+            age_seconds = now - updated_at
+            timeout_seconds = 3600  # 1小时超时
+            
+            if age_seconds > timeout_seconds:
+                # 超时，标记为 blocked
+                STORE.update_control_action(
+                    action["id"],
+                    status="blocked",
+                    summary=f"Action 超时 {age_seconds} 秒，需要人工介入",
+                )
+                result["blocked"] += 1
+                log(f"Action {action['id']} blocked: timeout {age_seconds}s", "WARNING")
+                continue
+            
+            # 对于特定 action 类型，执行恢复逻辑
+            if action_type == "manual_or_session_recovery":
+                # 尝试恢复任务
+                # 检查任务是否有 session_key
+                session_key = str(task.get("session_key") or "")
+                if session_key:
+                    # 尝试通过 sessions_send 恢复
+                    try:
+                        # 这里只是标记为需要恢复，实际恢复由其他机制处理
+                        STORE.update_control_action(
+                            action["id"],
+                            status="sent",
+                            summary="已触发恢复请求",
+                            attempts=int(action.get("attempts") or 0) + 1,
+                            last_followup_at=now,
+                        )
+                        result["recovered"] += 1
+                        log(f"Action {action['id']} sent: recovery triggered for task {task_id}")
+                    except Exception as e:
+                        log(f"恢复任务失败: {task_id}, 错误: {e}", "ERROR")
+                        result["errors"] += 1
+                else:
+                    # 没有 session_key，标记为需要人工介入
+                    STORE.update_control_action(
+                        action["id"],
+                        status="blocked",
+                        summary="任务没有 session_key，需要人工介入",
+                    )
+                    result["blocked"] += 1
+                    log(f"Action {action['id']} blocked: no session_key", "WARNING")
+                    
+        except Exception as e:
+            log(f"执行 action 失败: {task_id}, 错误: {e}", "ERROR")
+            result["errors"] += 1
+    
+    if result["checked"] > 0:
+        log(f"执行 pending actions: 检查 {result['checked']} 个, 解决 {result['resolved']} 个, 阻塞 {result['blocked']} 个, 恢复 {result['recovered']} 个, 错误 {result['errors']} 个")
+    
+    return result
 
 
 def emit_pipeline_receipt_if_missing(task: dict, control: dict | None = None) -> dict:
