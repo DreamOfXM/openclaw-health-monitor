@@ -1,0 +1,14 @@
+{
+  "event": "PIPELINE_RECEIPT",
+  "task_id": "21868bad56c95928",
+  "stage": "completed",
+  "agent": "main",
+  "timestamp": "2026-03-26T13:08:59.266729+08:00",
+  "summary": "诊断完成：系统有信号但持仓为0，导致无法成交。根因是账户状态未滚动，不是通知问题。",
+  "evidence": {
+    "signals_found": "open=1, midday=2, daily=46",
+    "positions_qty": "全部为0",
+    "trade_count": 0,
+    "root_cause": "信号未转化为持仓，账户状态未滚动"
+  }
+}

@@ -13,8 +13,12 @@ LAUNCH_DOMAIN="gui/$(id -u)"
 GUARDIAN_LABEL="ai.openclaw.guardian"
 DASHBOARD_LABEL="ai.openclaw.dashboard"
 LEGACY_MONITOR_LABEL="ai.openclaw.health-monitor"
+WATCHER_LABEL="ai.openclaw.task-closure-watcher"
+EVOLUTION_LABEL="ai.openclaw.self-evolution"
 GUARDIAN_PLIST="$HOME/Library/LaunchAgents/${GUARDIAN_LABEL}.plist"
 DASHBOARD_PLIST="$HOME/Library/LaunchAgents/${DASHBOARD_LABEL}.plist"
+WATCHER_PLIST="$HOME/Library/LaunchAgents/${WATCHER_LABEL}.plist"
+EVOLUTION_PLIST="$HOME/Library/LaunchAgents/${EVOLUTION_LABEL}.plist"
 LEGACY_MONITOR_PLIST="$HOME/Library/LaunchAgents/${LEGACY_MONITOR_LABEL}.plist"
 PYTHON_BIN=""
 OPENCLAW_BIN=""
@@ -46,6 +50,11 @@ launchd_bootstrap() {
 launchd_kickstart() {
     local label="$1"
     launchctl kickstart -k "${LAUNCH_DOMAIN}/${label}"
+}
+
+launchd_loaded() {
+    local label="$1"
+    launchctl print "${LAUNCH_DOMAIN}/${label}" >/dev/null 2>&1
 }
 
 resolve_cmd_from_login_shell() {
@@ -175,6 +184,10 @@ guardian_pid() {
 
 dashboard_pid() {
     launchd_pid "$DASHBOARD_LABEL" || read_pid_file "$DASHBOARD_PID_FILE" || listener_pid "$(dashboard_port)" || find_pid "$BASE_DIR/dashboard_v2/app.py|$BASE_DIR/dashboard_backend.py"
+}
+
+watcher_pid() {
+    launchd_pid "$WATCHER_LABEL" || find_pid "$BASE_DIR/scripts/task_closure_watcher.py"
 }
 
 dashboard_reachable() {
@@ -365,6 +378,140 @@ install_dashboard_launch_agent() {
 EOF
 }
 
+install_watcher_launch_agent() {
+    local python_bin
+    ensure_launch_agents_dir
+    python_bin="$(plist_python_bin)"
+    cat > "$WATCHER_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${WATCHER_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${python_bin}</string>
+    <string>${BASE_DIR}/scripts/task_closure_watcher.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${BASE_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>${PATH}</string>
+    <key>NO_PROXY</key>
+    <string>127.0.0.1,localhost</string>
+    <key>no_proxy</key>
+    <string>127.0.0.1,localhost</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>45</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/task-closure-watcher.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/task-closure-watcher.launchd.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
+install_evolution_launch_agent() {
+    local python_bin
+    ensure_launch_agents_dir
+    python_bin="$(plist_python_bin)"
+    cat > "$EVOLUTION_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${EVOLUTION_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${python_bin}</string>
+    <string>${BASE_DIR}/scripts/self_evolution_engine.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${BASE_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>${PATH}</string>
+    <key>NO_PROXY</key>
+    <string>127.0.0.1,localhost</string>
+    <key>no_proxy</key>
+    <string>127.0.0.1,localhost</string>
+    <key>OPENCLAW_MODEL_DECIDER_CMD</key>
+    <string>${python_bin} ${BASE_DIR}/scripts/external_model_decider.py</string>
+    <key>OPENCLAW_MODEL_DECIDER_REQUIRED</key>
+    <string>1</string>
+    <key>OPENCLAW_SELF_EVOLUTION_AUTO_COMMIT</key>
+    <string>1</string>
+    <key>OPENCLAW_SELF_EVOLUTION_AUTO_PUSH_PR</key>
+    <string>1</string>
+    <key>OPENCLAW_SELF_EVOLUTION_REMOTE</key>
+    <string>origin</string>
+    <key>OPENCLAW_SELF_EVOLUTION_BASE</key>
+    <string>main</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>86400</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/self-evolution.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/self-evolution.launchd.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
+install_watcher_launch_agent() {
+    local python_bin
+    ensure_launch_agents_dir
+    python_bin="$(plist_python_bin)"
+    cat > "$WATCHER_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${WATCHER_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${python_bin}</string>
+    <string>${BASE_DIR}/scripts/task_closure_watcher.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${BASE_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>${PATH}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/task-closure-watcher.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/task-closure-watcher.launchd.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
 is_running() {
     case "${1:-}" in
         gateway)
@@ -376,8 +523,11 @@ is_running() {
         dashboard)
             [ -n "$(dashboard_pid)" ]
             ;;
+        watcher)
+            [ -n "$(watcher_pid)" ] || launchd_loaded "$WATCHER_LABEL"
+            ;;
         all)
-            [ -n "$(gateway_pid)" ] && [ -n "$(guardian_pid)" ] && [ -n "$(dashboard_pid)" ]
+            [ -n "$(gateway_pid)" ] && [ -n "$(guardian_pid)" ] && [ -n "$(dashboard_pid)" ] && [ -n "$(watcher_pid)" ]
             ;;
         *)
             echo "Unknown service: ${1:-}" >&2
@@ -494,6 +644,75 @@ start_dashboard() {
     echo "$pid"
 }
 
+start_watcher() {
+    local pid
+    pid="$(watcher_pid || true)"
+    if [ -n "$pid" ]; then
+        echo "$pid"
+        return 0
+    fi
+    bootstrap_env
+    if [ -z "$PYTHON_BIN" ]; then
+        echo "Python with flask+requests not found" >&2
+        return 1
+    fi
+    install_watcher_launch_agent
+    launchd_bootout "$WATCHER_LABEL" "$WATCHER_PLIST"
+    launchd_bootstrap "$WATCHER_PLIST"
+    launchd_kickstart "$WATCHER_LABEL" || true
+    sleep 2
+    pid="$(watcher_pid || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "$pid"
+        return 0
+    fi
+    if launchd_loaded "$WATCHER_LABEL"; then
+        echo "launchd:${WATCHER_LABEL}"
+        return 0
+    fi
+    echo "Watcher failed to start" >&2
+    return 1
+}
+
+evolution_pid() {
+    launchd_pid "$EVOLUTION_LABEL" || find_pid "$BASE_DIR/scripts/self_evolution_engine.py"
+}
+
+start_evolution() {
+    local pid
+    pid="$(evolution_pid || true)"
+    if [ -n "$pid" ]; then
+        echo "$pid"
+        return 0
+    fi
+    bootstrap_env
+    if [ -z "$PYTHON_BIN" ]; then
+        echo "Python with flask+requests not found" >&2
+        return 1
+    fi
+    install_evolution_launch_agent
+    launchd_bootout "$EVOLUTION_LABEL" "$EVOLUTION_PLIST"
+    launchd_bootstrap "$EVOLUTION_PLIST"
+    launchd_kickstart "$EVOLUTION_LABEL" || true
+    sleep 2
+    if launchd_loaded "$EVOLUTION_LABEL"; then
+        echo "launchd:${EVOLUTION_LABEL}"
+        return 0
+    fi
+    echo "Evolution failed to start" >&2
+    return 1
+}
+
+stop_evolution() {
+    local pid
+    launchd_bootout "$EVOLUTION_LABEL" "$EVOLUTION_PLIST"
+    pid="$(evolution_pid || true)"
+    if [ -n "$pid" ]; then
+        stop_pid "$pid" || true
+    fi
+    pkill -f "$BASE_DIR/scripts/self_evolution_engine.py" 2>/dev/null || true
+}
+
 stop_pid() {
     local pid="$1"
     if [ -z "$pid" ]; then
@@ -536,6 +755,16 @@ stop_dashboard() {
     rm -f "$DASHBOARD_PID_FILE"
 }
 
+stop_watcher() {
+    local pid
+    launchd_bootout "$WATCHER_LABEL" "$WATCHER_PLIST"
+    pid="$(watcher_pid || true)"
+    if [ -n "$pid" ]; then
+        stop_pid "$pid" || true
+    fi
+    pkill -f "$BASE_DIR/scripts/task_closure_watcher.py" 2>/dev/null || true
+}
+
 stop_gateway() {
     local pid listener
     local gateway_plist
@@ -568,20 +797,23 @@ start_all() {
     start_active_gateway
     start_guardian >/dev/null
     start_dashboard >/dev/null
+    start_watcher >/dev/null || true
 }
 
 stop_all() {
+    stop_watcher || true
     stop_dashboard || true
     stop_guardian || true
     stop_all_gateways
 }
 
 status_json() {
-    local guardian dashboard gateway
+    local guardian dashboard gateway watcher
     gateway="$(active_gateway_pid || true)"
     guardian="$(guardian_pid || true)"
     dashboard="$(dashboard_pid || true)"
-    printf '{"gateway":"%s","guardian":"%s","dashboard":"%s"}\n' "${gateway:-}" "${guardian:-}" "${dashboard:-}"
+    watcher="$(watcher_pid || true)"
+    printf '{"gateway":"%s","guardian":"%s","dashboard":"%s","watcher":"%s"}\n' "${gateway:-}" "${guardian:-}" "${dashboard:-}" "${watcher:-}"
 }
 
 case "${1:-}" in
@@ -593,6 +825,7 @@ case "${1:-}" in
             gateway) start_active_gateway ;;
             guardian) start_guardian ;;
             dashboard) start_dashboard ;;
+            watcher) start_watcher ;;
             all) start_all ;;
             *) echo "Unknown service: ${2:-}" >&2; exit 2 ;;
         esac
@@ -602,6 +835,7 @@ case "${1:-}" in
             gateway) stop_gateway ;;
             guardian) stop_guardian ;;
             dashboard) stop_dashboard ;;
+            watcher) stop_watcher ;;
             all) stop_all ;;
             *) echo "Unknown service: ${2:-}" >&2; exit 2 ;;
         esac
@@ -610,7 +844,7 @@ case "${1:-}" in
         status_json
         ;;
     *)
-        echo "Usage: $0 {is-running|start|stop|status-json} <gateway|guardian|dashboard|all>" >&2
+        echo "Usage: $0 {is-running|start|stop|status-json} <gateway|guardian|dashboard|watcher|all>" >&2
         exit 2
         ;;
 esac

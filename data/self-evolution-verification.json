@@ -1,0 +1,15 @@
+{
+  "patch_id": "patch-1775015642-repair_background_root_binding",
+  "action": "repair_background_root_binding",
+  "verified_at": "2026-04-01T11:54:28.988792",
+  "checks": [
+    {
+      "name": "background_tasks_have_root_binding",
+      "expected": 0,
+      "actual": 46,
+      "passed": false
+    }
+  ],
+  "passed": false,
+  "summary": "background_root_missing=46"
+}

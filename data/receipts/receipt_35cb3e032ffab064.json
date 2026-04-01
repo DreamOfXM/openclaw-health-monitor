@@ -1,0 +1,17 @@
+{
+  "kind": "PIPELINE_RECEIPT",
+  "task_id": "35cb3e032ffab064",
+  "session_key": "agent:main:feishu:direct:ou_2b6d39ab847fff83c5427b16882a0d9f",
+  "timestamp": "2026-03-27T00:44:54.687710",
+  "status": "completed",
+  "summary": "已关闭所有历史未闭环任务，系统架构稳定性修复完成",
+  "changes": [
+    "守护进程已恢复运行",
+    "Qbot主链路已统一到飞书群",
+    "坏cron配置已修复",
+    "主脑约束已落地",
+    "所有历史未闭环任务已清理"
+  ],
+  "blocked": false,
+  "next_action": null
+}

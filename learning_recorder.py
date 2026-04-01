@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import time
@@ -273,40 +274,26 @@ def render_learnings_markdown(store: MonitorStateStore, *, limit: int = 100) -> 
 
 
 def render_daily_evolution_report_markdown(store: MonitorStateStore, *, now: int | None = None) -> str:
+    """对外日报只输出真实结果；没有修复证据时，明确写无新增修复。"""
     report = generate_daily_evolution_report(store, now=now)
+    fixed = int(report.get("issues_fixed") or 0)
+    closed = int(report.get("closed") or 0)
+    rules_added = int(report.get("rules_added") or 0)
+    pending_verification = int(report.get("pending_verification") or 0)
+
     lines = [
         f"# 每日进化报告 - {report['date']}",
         "",
-        "## 今天发现的问题",
+        "## 今日结果",
+        f"- 已验证修复: {fixed}",
+        f"- 已关闭归档: {closed}",
+        f"- 新采纳规则: {rules_added}",
+        f"- 待补验证: {pending_verification}",
     ]
-    top = report.get("top_learnings") or []
-    if top:
-        for idx, item in enumerate(top[:5], start=1):
-            lines.append(f"{idx}. {item.get('title') or item.get('problem_code')}")
-    else:
-        lines.append("1. 暂无新增问题")
-    lines.extend(
-        [
-            "",
-            "## 今日汇总",
-            f"- 新记录问题: {report['issues_found']}",
-            f"- 重新打开: {report['issues_reopened']}",
-            f"- 复发事件: {report['recurrence_events']}",
-            f"- 新采纳规则: {report['rules_added']}",
-            f"- 新规则候选: {report['candidate_rules']}",
-            f"- 今日验证通过: {report['issues_fixed']}",
-            f"- 今日关闭归档: {report['closed']}",
-            f"- 待验证: {report['pending_verification']}",
-            "",
-            "## 复发统计",
-        ]
-    )
-    recurrent = report.get("recurrent_issues") or {}
-    if recurrent:
-        for problem_code, count in sorted(recurrent.items()):
-            lines.append(f"- {problem_code}: 复发 {count} 次")
-    else:
-        lines.append("- 暂无复发")
+
+    if fixed == 0:
+        lines.append("- 今日无新增已验证修复，不能把检查动作当成交付")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -350,6 +337,59 @@ def write_state_snapshot(base_dir: Path, store: MonitorStateStore, *, now: int |
 # ============================================================================
 # 自我进化主动检查和修复
 # ============================================================================
+
+
+def _latest_learning_evidence(store: MonitorStateStore, learning_key: str) -> dict[str, Any]:
+    events = store.list_self_evolution_events(learning_key=learning_key, limit=20)
+    for event in events:
+        details = event.get("details") or {}
+        evidence = details.get("evidence")
+        if isinstance(evidence, dict) and evidence:
+            return evidence
+    return {}
+
+
+def _safe_eval_condition(condition: str, context: dict[str, Any]) -> bool:
+    """Evaluate a very small subset of boolean expressions used by auto_close_condition."""
+    if not condition.strip():
+        return False
+
+    tree = ast.parse(condition, mode="eval")
+    allowed_nodes = (
+        ast.Expression,
+        ast.BoolOp,
+        ast.And,
+        ast.Or,
+        ast.Compare,
+        ast.Name,
+        ast.Constant,
+        ast.List,
+        ast.Tuple,
+        ast.Eq,
+        ast.NotEq,
+        ast.In,
+        ast.NotIn,
+        ast.Load,
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"unsupported node in condition: {type(node).__name__}")
+
+    return bool(eval(compile(tree, "<auto_close_condition>", "eval"), {"__builtins__": {}}, context))
+
+
+def _evaluate_auto_close(resolution: dict[str, Any], projection: dict[str, Any], evidence: dict[str, Any]) -> tuple[bool, str]:
+    condition = str(resolution.get("auto_close_condition") or "").strip()
+    if not condition:
+        return False, "missing_auto_close_condition"
+
+    context = {**projection, **evidence}
+    try:
+        matched = _safe_eval_condition(condition, context)
+    except Exception as exc:
+        return False, f"condition_eval_failed: {exc}"
+    return matched, condition if matched else f"condition_not_met: {condition}"
+
 
 # 问题类型到解决动作的映射
 PROBLEM_RESOLUTIONS = {
@@ -444,20 +484,16 @@ def check_and_resolve_learnings(
 ) -> dict[str, Any]:
     """
     主动检查并尝试解决重复问题。
-    
-    这是自我进化的核心：不只是记录问题，而是主动解决。
-    
-    Args:
-        store: 状态存储
-        recurrence_threshold: 重复次数阈值，超过此值的问题会被处理
-        dry_run: 如果为 True，只返回会执行的动作，不实际执行
-    
-    Returns:
-        检查结果，包含已解决、待处理、无法自动解决的问题列表
+
+    真闭环要求：
+    1. 发现问题：只扫描达到阈值的重复问题
+    2. 解决问题：给出明确修复动作或缺失信息
+    3. 验证问题：只有满足 auto_close_condition 才允许 verified
+    4. 反馈结果：返回 evidence / action / verification / next_step
     """
     projections = store.list_self_evolution_projections(limit=500)
     now = int(time.time())
-    
+
     result = {
         "generated_at": now,
         "checked_count": 0,
@@ -468,56 +504,74 @@ def check_and_resolve_learnings(
         "pending": [],
         "unresolvable": [],
     }
-    
+
     for item in projections:
         learning_key = str(item.get("learning_key") or "")
         problem_code = str(item.get("problem_code") or "")
         current_state = str(item.get("current_state") or "")
         recurrence_count = int(item.get("recurrence_count") or 0)
         title = str(item.get("title") or "")
-        
-        # 只处理 reopened 状态且重复次数超过阈值的问题
+
         if current_state != "reopened":
             continue
         if recurrence_count < recurrence_threshold:
             continue
-        
+
         result["checked_count"] += 1
-        
-        # 获取问题的解决策略
         resolution = PROBLEM_RESOLUTIONS.get(problem_code, {})
-        
-        if not resolution:
-            # 没有自动解决策略，标记为需要派发给主脑
-            result["unresolvable_count"] += 1
-            result["unresolvable"].append({
-                "learning_key": learning_key,
-                "problem_code": problem_code,
-                "title": title,
-                "recurrence_count": recurrence_count,
-                "reason": "no_auto_resolution_defined",
-            })
-            continue
-        
-        # 尝试自动解决
-        if not dry_run:
-            verify_learning(
-                store,
-                learning_key=learning_key,
-                scenario=f"auto_checked_at_{now}",
-                evidence={"auto_check": True, "recurrence_count": recurrence_count},
-                actor="self_evolution_cron",
-            )
-        
-        result["resolved_count"] += 1
-        result["resolved"].append({
+        latest_evidence = _latest_learning_evidence(store, learning_key)
+
+        base_payload = {
             "learning_key": learning_key,
             "problem_code": problem_code,
             "title": title,
             "recurrence_count": recurrence_count,
-            "resolution": resolution.get("description", ""),
+            "evidence": latest_evidence,
+        }
+
+        if not resolution:
+            result["unresolvable_count"] += 1
+            result["unresolvable"].append({
+                **base_payload,
+                "reason": "no_auto_resolution_defined",
+                "next_step": "需要主脑补充该问题的解决策略与验证条件",
+            })
+            continue
+
+        matched, verification_note = _evaluate_auto_close(resolution, item, latest_evidence)
+        if matched:
+            verification_evidence = {
+                "verification_source": "projection+latest_event_evidence",
+                "verification_condition": str(resolution.get("auto_close_condition") or ""),
+                "verification_note": verification_note,
+                "latest_evidence": latest_evidence,
+            }
+            if not dry_run:
+                verify_learning(
+                    store,
+                    learning_key=learning_key,
+                    scenario=f"auto_verified_at_{now}",
+                    evidence=verification_evidence,
+                    actor="self_evolution_cron",
+                )
+
+            result["resolved_count"] += 1
+            result["resolved"].append({
+                **base_payload,
+                "action": resolution.get("resolution", ""),
+                "verification": verification_note,
+                "next_step": "进入追踪期，确认问题不再复发",
+            })
+            continue
+
+        result["pending_count"] += 1
+        result["pending"].append({
+            **base_payload,
+            "action": resolution.get("resolution", ""),
+            "verification": verification_note,
+            "next_step": "证据不足，不能标记为 verified；需先执行修复动作并补充验证证据",
         })
-    
+
     return result
 
 
@@ -584,6 +638,40 @@ def spawn_reflection_agent(
     }
 
 
+def build_reflection_feedback(cycle_result: dict[str, Any]) -> dict[str, Any]:
+    resolution = cycle_result.get("resolution") or {}
+    pending = list(resolution.get("pending") or [])
+    resolved = list(resolution.get("resolved") or [])
+    unresolvable = list(resolution.get("unresolvable") or [])
+
+    def _compact(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for item in items[:5]:
+            output.append(
+                {
+                    "learning_key": item.get("learning_key"),
+                    "problem_code": item.get("problem_code"),
+                    "title": item.get("title"),
+                    "action": item.get("action") or item.get("reason") or "",
+                    "verification": item.get("verification") or "",
+                    "next_step": item.get("next_step") or "",
+                }
+            )
+        return output
+
+    return {
+        "summary": {
+            "checked": int(resolution.get("checked_count") or 0),
+            "resolved": int(resolution.get("resolved_count") or 0),
+            "pending": int(resolution.get("pending_count") or 0),
+            "unresolvable": int(resolution.get("unresolvable_count") or 0),
+        },
+        "resolved": _compact(resolved),
+        "pending": _compact(pending),
+        "unresolvable": _compact(unresolvable),
+    }
+
+
 def run_self_evolution_cycle(
     base_dir: Path,
     store: MonitorStateStore,
@@ -631,10 +719,12 @@ def run_self_evolution_cycle(
         learnings_dir.mkdir(parents=True, exist_ok=True)
         (learnings_dir / "LEARNINGS.md").write_text(learnings_md, encoding="utf-8")
     
-    return {
+    cycle_result = {
         "generated_at": now,
         "resolution": resolution_result,
         "daily_report": daily_report,
         "state_snapshot": state_snapshot,
         "dry_run": dry_run,
     }
+    cycle_result["feedback"] = build_reflection_feedback(cycle_result)
+    return cycle_result

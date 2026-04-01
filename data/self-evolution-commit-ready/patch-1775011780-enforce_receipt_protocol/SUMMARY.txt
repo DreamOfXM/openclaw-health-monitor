@@ -1,0 +1,5 @@
+patch_id: patch-1775011780-enforce_receipt_protocol
+action: enforce_receipt_protocol
+status: commit_ready
+files:
+- /Users/hangzhou/openclaw-health-monitor/guardian.py: 在 guardian.py 添加缺失回执的结构化建议生成函数

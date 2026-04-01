@@ -1,0 +1,13 @@
+{
+  "event": "PIPELINE_RECEIPT",
+  "task_id": "0af2742dc2ad837e",
+  "stage": "completed",
+  "agent": "main",
+  "timestamp": "2026-03-26T15:32:39.748318+08:00",
+  "summary": "群同步已生效，成交消息已发送到飞书群。用户要求增加股票中文名。",
+  "evidence": {
+    "trade_sent": true,
+    "message": "Qbot自动执行（daily）成交 1 笔：买入 002309.SZ 200股 @4.814。",
+    "user_feedback": "看到了，已经有了，除了股票代号，也把中文名列出来吧"
+  }
+}

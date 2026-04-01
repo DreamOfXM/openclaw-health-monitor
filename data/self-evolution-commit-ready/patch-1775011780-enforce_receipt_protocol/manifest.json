@@ -1,0 +1,28 @@
+{
+  "patch_id": "patch-1775011780-enforce_receipt_protocol",
+  "action": "enforce_receipt_protocol",
+  "generated_at": "2026-04-01T10:50:11.825725",
+  "apply_result": {
+    "patch_id": "patch-1775011780-enforce_receipt_protocol",
+    "applied_at": "2026-04-01T10:50:11.822847",
+    "changes": [
+      {
+        "file": "/Users/hangzhou/openclaw-health-monitor/guardian.py",
+        "status": "applied",
+        "type": "append"
+      }
+    ],
+    "success_count": 1,
+    "failed_count": 0
+  },
+  "changes": [
+    {
+      "file": "/Users/hangzhou/openclaw-health-monitor/guardian.py",
+      "type": "function",
+      "old": "reak\n        except Exception as e:\n            import traceback\n\n            log(f\"监控循环异常: {e}\\n{traceback.format_exc()}\", \"ERROR\")\n            time.sleep(10)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+      "new": "\n\ndef emit_pipeline_receipt_if_missing(task: dict, control: dict | None = None) -> dict:\n    \"\"\"为缺失回执的任务生成结构化建议，不直接发送消息，由上层控制面决定如何投递。\"\"\"\n    control = control or STORE.derive_task_control_state(task.get(\"task_id\"))\n    return {\n        \"type\": \"PIPELINE_RECEIPT\",\n        \"task_id\": task.get(\"task_id\"),\n        \"stage\": \"blocked\" if str(task.get(\"status\") or \"\") == \"blocked\" else \"confirmed\",\n        \"summary\": control.get(\"next_action\") or \"receipt_required\",\n        \"details\": {\n            \"control_state\": control.get(\"control_state\"),\n            \"delivery_state\": control.get(\"delivery_state\"),\n            \"next_action\": control.get(\"next_action\"),\n        },\n        \"generated_by\": \"self_evolution_engine\",\n    }\n",
+      "description": "在 guardian.py 添加缺失回执的结构化建议生成函数"
+    }
+  ],
+  "status": "commit_ready"
+}

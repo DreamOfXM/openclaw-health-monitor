@@ -7,6 +7,7 @@
 2. 有执行：行动项必须被追踪直到完成
 3. 有沉淀：错误必须写入 LEARNINGS.md
 4. 有成长：问题必须减少，不能重复出现
+5. 有送达：晨会完成必须发送给主人（LRN-20260321-005）
 
 流程：
 1. 收集数据（昨日任务、问题、信号）
@@ -15,6 +16,7 @@
 4. 执行行动项（真正去做）
 5. 验证效果（问题是否减少？）
 6. 沉淀知识（写入 LEARNINGS.md）
+7. 发送给主人（必须送达）
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+# 默认接收晨会消息的用户（Feishu open_id）
+DEFAULT_RECIPIENT_OPEN_ID = "ou_2b6d39ab847fff83c5427b16882a0d9f"
+
 
 class MorningMeeting:
     """真正的晨会系统"""
@@ -36,6 +41,91 @@ class MorningMeeting:
         self.learnings_path = workspace_dir / ".learnings" / "LEARNINGS.md"
         self.meetings_dir = workspace_dir / "meetings"
         self.meetings_dir.mkdir(parents=True, exist_ok=True)
+
+    def _to_float(self, value: Any, default: float = 0.0) -> float:
+        """Best-effort numeric coercion for meeting metrics."""
+        try:
+            if value is None:
+                return default
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                cleaned = value.strip().replace(',', '').replace('%', '')
+                if cleaned == '':
+                    return default
+                return float(cleaned)
+        except Exception:
+            pass
+        return default
+
+    def _build_discussion_sections(self, data: dict[str, Any], analysis: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build the three mandatory morning-meeting discussion sections."""
+        sections: list[dict[str, Any]] = []
+
+        system_points: list[str] = []
+        if data['problems']:
+            for item in data['problems'][:3]:
+                system_points.append(f"问题 {item['problem_code']} 出现 {item['count']} 次")
+        else:
+            system_points.append('最近未检测到新的高频系统问题')
+        for issue in analysis.get('task_issues', [])[:2]:
+            system_points.append(f"{issue['issue']}：{issue['root_cause']}（{issue['evidence']}）")
+        sections.append({
+            'title': 'OpenClaw 问题与解决',
+            'agent_mode': '该议题需要 builder / guardrail / main 全程参与，不单独成段',
+            'summary': '只讨论真实问题；没有问题就不硬凑解决方案。',
+            'points': system_points,
+        })
+
+        projects_data = self._load_projects_data() or {}
+        summary = projects_data.get('summary', {}) if isinstance(projects_data, dict) else {}
+        monthly_target = self._to_float(summary.get('monthly_target', 0))
+        monthly_achieved = self._to_float(summary.get('monthly_achieved', 0))
+        gap = self._to_float(summary.get('gap_to_target', monthly_target - monthly_achieved))
+        wealth_points = [
+            f'本月目标 {monthly_target:.1f} 元，当前已实现 {monthly_achieved:.1f} 元，差距 {gap:.1f} 元',
+        ]
+        running_projects = []
+        if isinstance(projects_data, dict):
+            running_projects = [p for p in projects_data.get('projects', []) if p.get('status') == 'running']
+        if running_projects:
+            for proj in running_projects[:3]:
+                wealth_points.append(
+                    f"项目 {proj.get('name', '未知项目')}：下一步 {str(proj.get('next_action', '待补'))[:40]}"
+                )
+        else:
+            wealth_points.append('当前缺少真实项目台账，先补齐项目数据再做优先级排序')
+        sections.append({
+            'title': '发财致富方案',
+            'agent_mode': '该议题也必须让相关子 agent 参与论证，而不是我单口输出',
+            'summary': '输出赚钱方向、依据、优先级、风险和下一步。',
+            'points': wealth_points,
+        })
+
+        a_share_data = self._load_a_share_data() or {}
+        risk_state = str(a_share_data.get('risk_state', 'unknown'))
+        trade_count = int(self._to_float(a_share_data.get('trade_count', 0)))
+        daily_pnl = a_share_data.get('daily_pnl', {}) if isinstance(a_share_data, dict) else {}
+        equity = self._to_float(daily_pnl.get('equity', 0)) if isinstance(daily_pnl, dict) else 0.0
+        drawdown = self._to_float(daily_pnl.get('daily_drawdown', 0)) if isinstance(daily_pnl, dict) else 0.0
+        a_share_points = [
+            f'今日成交 {trade_count} 笔，风险状态 {risk_state}',
+            f'总资产 {equity:.1f} 元，日内回撤 {drawdown * 100:.2f}%',
+        ]
+        signals = data.get('signals', {})
+        signal_status = str(signals.get('status', 'unknown'))
+        if signal_status == 'no_signals':
+            a_share_points.append('今日量化信号尚未生成，需先补齐信号再讨论调仓')
+        else:
+            a_share_points.append(f'信号状态：{signal_status}')
+        sections.append({
+            'title': 'A股讨论',
+            'agent_mode': '该议题要求讨论利好、利空、策略是否调整；需要时直接调整而不是只提建议',
+            'summary': '讨论利好因素、不利因素、策略调整与执行动作。',
+            'points': a_share_points,
+        })
+
+        return sections
         
     def run(self) -> dict[str, Any]:
         """运行晨会"""
@@ -97,7 +187,8 @@ class MorningMeeting:
             "learnings_added": len(learnings),
         }
         
-        # 生成结论
+        # 生成晨会三大议题与结论
+        result["discussion_sections"] = self._build_discussion_sections(data, analysis)
         result["conclusions"] = self._generate_conclusions(data, analysis, execution, verification)
         
         # 计算指标
@@ -110,6 +201,9 @@ class MorningMeeting:
         
         # 保存报告
         self._save_report(result)
+        
+        # 发送给主人（必须送达）
+        self._send_to_user(result)
         
         return result
     
@@ -361,30 +455,16 @@ class MorningMeeting:
         return {"executed": False, "reason": "script_not_found"}
     
     def _update_constraint(self, issue: dict[str, Any]) -> dict[str, Any]:
-        """更新约束规则"""
-        constraint_id = f"MC-{int(time.time())}"
-        constraint_text = f"""
-### {constraint_id}（晨会自动生成）
+        """更新约束规则。
 
-**问题**：{issue['issue']}
-**根因**：{issue['root_cause']}
-**证据**：{issue['evidence']}
-
-**约束**：每次遇到此问题，必须检查并修复
-
-**来源**：晨会系统自动生成
-**生成时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        
-        # 追加到 AGENTS.md
-        agents_md = self.workspace_dir / "AGENTS.md"
-        if agents_md.exists():
-            content = agents_md.read_text(encoding="utf-8")
-            if constraint_id not in content:
-                agents_md.write_text(content + "\n" + constraint_text, encoding="utf-8")
-                return {"updated": True, "constraint_id": constraint_id}
-        
-        return {"updated": False, "reason": "file_not_found"}
+        晨会不再生成“每次遇到此问题，必须检查并修复”这类空泛约束；
+        没有具体改动、验证方法、追踪期时，只记录为待主脑处理。
+        """
+        return {
+            "updated": False,
+            "reason": "generic_constraint_disabled",
+            "next_step": "需要主脑补充具体代码改动、验证结果和追踪期后，才能形成真实约束",
+        }
     
     def _verify_effects(self, data: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
         """验证效果"""
@@ -454,41 +534,98 @@ class MorningMeeting:
             self.learnings_path.write_text("# Learnings\n" + content, encoding="utf-8")
     
     def _generate_conclusions(self, data: dict[str, Any], analysis: dict[str, Any], execution: dict[str, Any], verification: dict[str, Any]) -> list[str]:
-        """生成结论"""
-        conclusions = []
-        
-        # 结论1：昨日表现
-        rate = data["tasks"]["completion_rate"]
+        """生成结论（围绕三大议题，且数值字段统一安全转换）"""
+        conclusions: list[str] = []
+
+        rate = self._to_float(data.get("tasks", {}).get("completion_rate", 0))
         if rate >= 80:
             conclusions.append(f"✅ 昨日表现优秀，完成率 {rate:.1f}%")
         elif rate >= 50:
             conclusions.append(f"⚠️ 昨日表现一般，完成率 {rate:.1f}%，需改进")
         else:
             conclusions.append(f"❌ 昨日表现不佳，完成率 {rate:.1f}%，需重点关注")
-        
-        # 结论2：问题处理
-        if execution["completed"]:
+
+        if execution.get("completed"):
             conclusions.append(f"✅ 已执行 {len(execution['completed'])} 个行动项")
-        if execution["failed"]:
+        if execution.get("failed"):
             conclusions.append(f"❌ {len(execution['failed'])} 个行动项执行失败")
-        
-        # 结论3：今日重点
-        if data["signals"].get("status") == "no_signals":
-            conclusions.append("📌 今日重点：生成A股日报，分析市场信号")
-        
-        # 结论4：策略调整
-        if data["problems"]:
+
+        if data.get("problems"):
             top_problem = data["problems"][0]
-            conclusions.append(f"📌 策略调整：重点关注 {top_problem['problem_code']} 问题")
-        
-        # 结论5：赚钱方案讨论
-        conclusions.append("💰 **赚钱方案讨论**：本月目标至少赚200元")
-        conclusions.append("   - 方案1：优化A股交易策略，提高收益率")
-        conclusions.append("   - 方案2：开发付费技能/服务")
-        conclusions.append("   - 方案3：内容创作变现（技术文章/视频）")
-        conclusions.append("   - 待主人确认后执行")
-        
+            conclusions.append(f"🧠 OpenClaw 当前首要问题：{top_problem['problem_code']}（出现 {top_problem['count']} 次）")
+        else:
+            conclusions.append("🧠 OpenClaw 当前无新增高频问题，本议题无需额外解决方案")
+
+        projects_data = self._load_projects_data() or {}
+        summary = projects_data.get("summary", {}) if isinstance(projects_data, dict) else {}
+        monthly_target = self._to_float(summary.get("monthly_target", 0))
+        monthly_achieved = self._to_float(summary.get("monthly_achieved", 0))
+        gap = self._to_float(summary.get("gap_to_target", monthly_target - monthly_achieved))
+        conclusions.append(f"💰 致富主线：本月目标 {monthly_target:.1f} 元，当前 {monthly_achieved:.1f} 元，差距 {gap:.1f} 元")
+
+        a_share_data = self._load_a_share_data() or {}
+        trade_count = int(self._to_float(a_share_data.get("trade_count", 0)))
+        risk_state = str(a_share_data.get("risk_state", "unknown"))
+        conclusions.append(f"📈 A股主线：今日成交 {trade_count} 笔，当前风控状态 {risk_state}")
+
+        positions = a_share_data.get("positions", []) if isinstance(a_share_data, dict) else []
+        for pos in positions[:3]:
+            symbol = pos.get("symbol", "")
+            pnl = self._to_float(pos.get("unrealized_pnl", 0))
+            conclusions.append(f"   - {symbol}：浮盈 {pnl:+.1f} 元")
+
+        daily_pnl = a_share_data.get("daily_pnl", {}) if isinstance(a_share_data, dict) else {}
+        if isinstance(daily_pnl, dict) and daily_pnl:
+            equity = self._to_float(daily_pnl.get("equity", 0))
+            drawdown = self._to_float(daily_pnl.get("daily_drawdown", 0))
+            conclusions.append(f"   - 总资产 {equity:.1f} 元，回撤 {drawdown * 100:.2f}%")
+
+        conclusions.append("🤝 工作方式：以上三大议题都必须让相关子 agent 参与讨论，不允许变成我的独角戏")
         return conclusions
+
+    def _load_projects_data(self) -> dict[str, Any] | None:
+        """加载赚钱项目追踪数据"""
+        projects_path = self.workspace_dir / "projects.json"
+        if not projects_path.exists():
+            return None
+        try:
+            return json.loads(projects_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    
+    def _load_a_share_data(self) -> dict[str, Any] | None:
+        """加载 A 股交易数据"""
+        # 尝试读取最新的交易回执
+        receipt_dir = Path("/Users/hangzhou/Desktop/Qbot-lab/results/openclaw_receipts/latest")
+        if not receipt_dir.exists():
+            return None
+        
+        # 读取 daily.json 或 close.json
+        for name in ["daily.json", "close.json", "status.json"]:
+            path = receipt_dir / name
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    # 读取持仓数据
+                    positions_path = Path("/Users/hangzhou/Desktop/Qbot-lab/results/a_share_sim/daily_cycle/simulation/positions.csv")
+                    if positions_path.exists():
+                        import csv
+                        with positions_path.open("r", encoding="utf-8") as fp:
+                            reader = csv.DictReader(fp)
+                            data["positions"] = [row for row in reader if int(float(row.get("qty", 0))) > 0]
+                    # 读取每日盈亏
+                    daily_pnl_path = Path("/Users/hangzhou/Desktop/Qbot-lab/results/a_share_sim/daily_cycle/simulation/daily_pnl.csv")
+                    if daily_pnl_path.exists():
+                        import csv
+                        with daily_pnl_path.open("r", encoding="utf-8") as fp:
+                            reader = csv.DictReader(fp)
+                            rows = list(reader)
+                            if rows:
+                                data["daily_pnl"] = rows[-1]  # 最新一行
+                    return data
+                except Exception:
+                    continue
+        return None
     
     def _save_report(self, result: dict[str, Any]) -> None:
         """保存报告"""
@@ -505,6 +642,77 @@ class MorningMeeting:
         
         print(f"📄 报告已保存：{md_path}")
     
+    def _send_to_user(self, result: dict[str, Any], open_id: str | None = None) -> bool:
+        """
+        发送晨会结论给用户（必须送达）
+        
+        根据 LRN-20260321-005 约束：晨会完成 != 主人收到结果
+        必须在生成报告后发送消息给主人
+        """
+        target_open_id = open_id or DEFAULT_RECIPIENT_OPEN_ID
+        if not target_open_id:
+            print("⚠️ 未配置接收用户，跳过发送")
+            return False
+        
+        # 构建简洁的消息内容（不是完整报告，而是结论摘要）
+        lines = [
+            "📅 **每日晨会** " + result["date"],
+            "",
+        ]
+        
+        # 三大议题摘要
+        for section in result.get("discussion_sections", []):
+            lines.append(f"## {section['title']}")
+            lines.append(section.get("summary", ""))
+            for point in section.get("points", [])[:4]:
+                lines.append(f"- {point}")
+            lines.append(f"- 协作要求：{section.get('agent_mode', '')}")
+            lines.append("")
+
+        # 核心结论
+        for c in result["conclusions"]:
+            lines.append(c)
+        
+        lines.extend([
+            "",
+            "---",
+            "",
+            "📊 **指标**",
+            f"- 昨日完成率：{result['metrics']['yesterday_completion_rate']:.1f}%",
+            f"- 发现问题：{result['metrics']['problems_found']} 类",
+            f"- 执行行动：{result['metrics']['actions_executed']} 个",
+            f"- 沉淀知识：{result['metrics']['learnings_captured']} 条",
+        ])
+        
+        message = "\n".join(lines)
+        
+        # 使用 openclaw message send 发送
+        target = f"user:{target_open_id}"
+        openclaw_path = "/Users/hangzhou/Library/pnpm/openclaw"
+        cmd = [
+            openclaw_path, "message", "send",
+            "--channel", "feishu",
+            "--target", target,
+            "--message", message,
+        ]
+        
+        try:
+            result_proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result_proc.returncode == 0:
+                print(f"✅ 晨会结论已发送给主人")
+                return True
+            else:
+                print(f"❌ 发送失败: {result_proc.stderr or result_proc.stdout}")
+                return False
+        except Exception as e:
+            print(f"❌ 发送异常: {e}")
+            return False
+    
     def _render_markdown(self, result: dict[str, Any]) -> str:
         """渲染 Markdown 报告"""
         lines = [
@@ -516,6 +724,16 @@ class MorningMeeting:
             "",
         ]
         
+        for section in result.get("discussion_sections", []):
+            lines.append(f"### {section['title']}")
+            lines.append("")
+            lines.append(section.get("summary", ""))
+            lines.append("")
+            for point in section.get("points", []):
+                lines.append(f"- {point}")
+            lines.append(f"- 协作要求：{section.get('agent_mode', '')}")
+            lines.append("")
+
         for c in result["conclusions"]:
             lines.append(f"- {c}")
         

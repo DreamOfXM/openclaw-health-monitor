@@ -2,6 +2,7 @@ import json
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -109,6 +110,149 @@ class GuardianRuntimeAnomalyTests(unittest.TestCase):
             self.assertEqual(len(notifications), 2)
             seen = store.load_runtime_value("runtime_anomaly_seen", {})
             self.assertEqual(len(seen), 2)
+
+
+class GuardianSessionRecoveryTests(unittest.TestCase):
+    def test_recover_untracked_session_tasks_creates_task_for_latest_unreplied_user(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            transcript = base / "session.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "timestamp": "2026-03-27T23:41:03.697Z",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "上一条回复"}],
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "timestamp": "2026-03-27T23:42:41.240Z",
+                                "message": {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "[message_id: om_x1]\nHangzhou: 又是只承诺没修复吗",
+                                        }
+                                    ],
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "timestamp": "2026-03-27T23:43:01.372Z",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [
+                                        {
+                                            "type": "toolCall",
+                                            "name": "exec",
+                                            "arguments": {"command": "foo"},
+                                        }
+                                    ],
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            session_store = base / "sessions.json"
+            session_store.write_text(
+                json.dumps(
+                    {
+                        "sessions": {
+                            "agent:main:feishu:direct:test-user": {
+                                "status": "running",
+                                "updatedAt": 1774654961356,
+                                "sessionFile": str(transcript),
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(guardian, "STORE", store),
+                mock.patch.object(guardian, "CONFIG", {"TASK_REGISTRY_MAX_ACTIVE": 2}),
+                mock.patch.object(guardian, "active_env_id", return_value="primary"),
+            ):
+                recovered = guardian.recover_untracked_session_tasks(session_store)
+
+            self.assertEqual(len(recovered), 1)
+            task = store.get_latest_task_for_session(
+                "agent:main:feishu:direct:test-user"
+            )
+            self.assertIsNotNone(task)
+            self.assertEqual(task["status"], "running")
+            self.assertEqual(task["question"], "又是只承诺没修复吗")
+
+    def test_send_guardian_followup_defers_for_recent_real_user_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            transcript = base / "session.jsonl"
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "message",
+                        "timestamp": datetime.now().isoformat() + "Z",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Hangzhou: 修复这个问题"}
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            session_store = base / "sessions.json"
+            session_store.write_text(
+                json.dumps(
+                    {
+                        "agent:main:feishu:direct:ou_test": {
+                            "status": "running",
+                            "updatedAt": int(time.time() * 1000),
+                            "sessionFile": str(transcript),
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(guardian, "SESSION_STORE_FILE", session_store),
+                mock.patch.object(
+                    guardian, "CONFIG", {"GUARDIAN_FOLLOWUP_ACTIVE_SESSION_GRACE": 900}
+                ),
+            ):
+                ok, reason = guardian.send_guardian_followup(
+                    "agent:main:feishu:direct:ou_test",
+                    "GUARDIAN_TASK_CONTROL: 这不是用户新需求。",
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(reason, "session_active")
 
     def test_scan_runtime_anomalies_flags_main_closure_purity_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,7 +362,60 @@ class GuardianRuntimeAnomalyTests(unittest.TestCase):
             projections = store.list_self_evolution_projections(limit=20)
             problem_codes = {item["problem_code"] for item in projections}
             self.assertIn("no_reply_after_commit", problem_codes)
-            self.assertIn("model_timeout", problem_codes)
+
+
+class GuardianFollowupModelOverrideTests(unittest.TestCase):
+    def test_send_guardian_followup_uses_ollama_model_via_gateway_call(self):
+        captured = {}
+
+        def fake_run_args(args, timeout=0, env=None):
+            captured["args"] = args
+            captured["timeout"] = timeout
+            captured["env"] = env
+            return 0, '{"ok":true}', ""
+
+        with (
+            mock.patch.object(guardian, "cleanup_stale_session_locks"),
+            mock.patch.object(
+                guardian.STORE,
+                "load_runtime_value",
+                return_value={},
+            ),
+            mock.patch.object(
+                guardian,
+                "lookup_openclaw_session_id",
+                return_value="session-123",
+            ),
+            mock.patch.object(
+                guardian,
+                "openclaw_runtime_env",
+                return_value={"OPENCLAW_CONFIG_PATH": "/tmp/openclaw.json"},
+            ),
+            mock.patch.object(
+                guardian,
+                "CONFIG",
+                {
+                    "GUARDIAN_FOLLOWUP_TIMEOUT": 120,
+                    "GUARDIAN_FOLLOWUP_MODEL": "ollama/qwen3.5:35b",
+                },
+            ),
+            mock.patch.object(guardian, "run_args", side_effect=fake_run_args),
+        ):
+            ok, error_kind = guardian.send_guardian_followup(
+                "agent:main:feishu:direct:ou_test",
+                "GUARDIAN_FOLLOWUP: test",
+            )
+
+        self.assertTrue(ok)
+        self.assertIsNone(error_kind)
+        args = captured["args"]
+        self.assertEqual(args[:4], ["openclaw", "gateway", "call", "agent"])
+        params = json.loads(args[-1])
+        self.assertEqual(params["provider"], "ollama")
+        self.assertEqual(params["model"], "qwen3.5:35b")
+        self.assertEqual(params["sessionId"], "session-123")
+        self.assertEqual(params["replyChannel"], "feishu")
+        self.assertEqual(params["replyTo"], "user:ou_test")
 
 
 class GuardianProgressPushTests(unittest.TestCase):
@@ -280,6 +477,29 @@ class GuardianProgressPushTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('--target "user:ou_test"', commands[0])
         self.assertIn("user:ou_test", logs[0][1])
+
+    def test_extract_runtime_question_keeps_long_user_path(self):
+        line = (
+            '"Feishu[default] dm from Hangzhou: '
+            '/Users/hangzhou/Desktop/小忆/自我进化文章.txt 还是这篇文章，'
+            '别人的openclaw都会自己做,我们的现在还傻乎乎","_meta":{}}'
+        )
+
+        question = guardian.extract_runtime_question(line)
+
+        self.assertEqual(
+            question,
+            "/Users/hangzhou/Desktop/小忆/自我进化文章.txt 还是这篇文章，"
+            "别人的openclaw都会自己做,我们的现在还傻乎乎",
+        )
+
+    def test_normalize_task_question_uses_extended_limit(self):
+        text = "/Users/hangzhou/Desktop/" + ("a" * 260)
+
+        question = guardian.normalize_task_question(text)
+
+        self.assertEqual(len(question), guardian.MAX_TASK_QUESTION_LEN)
+        self.assertTrue(question.startswith("/Users/hangzhou/Desktop/"))
 
     def test_classify_guardian_followup_error(self):
         self.assertEqual(
@@ -2431,6 +2651,90 @@ class GuardianLearningDelegationTests(unittest.TestCase):
                 (home / "shared-context" / "monitor-tasks" / "tasks.jsonl").exists()
             )
 
+    def test_write_task_registry_snapshot_exports_watcher_question_from_task_when_payload_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            home = base / ".openclaw"
+            home.mkdir()
+            (home / "openclaw.json").write_text("{}", encoding="utf-8")
+            now = int(time.time())
+            full_question = (
+                "/Users/hangzhou/Desktop/小忆/自我进化文章.txt 还是这篇文章，"
+                "别人的openclaw都会自己做,我们的现在还傻乎乎"
+            )
+            store.upsert_task(
+                {
+                    "task_id": "task-1",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": full_question,
+                    "last_user_message": full_question,
+                    "started_at": now,
+                    "last_progress_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            store.upsert_watcher_task(
+                {
+                    "watcher_task_id": "watcher-1",
+                    "env_id": "primary",
+                    "source_agent": "main",
+                    "target_agent": "",
+                    "intent": "",
+                    "current_state": "registered",
+                    "completed_at": 0,
+                    "delivered_at": 0,
+                    "last_checked_at": now,
+                    "error_count": 0,
+                    "in_dlq": False,
+                    "payload": {"task_id": "task-1", "question": "/Users/hangzhou/Des"},
+                }
+            )
+            with (
+                mock.patch.object(guardian, "BASE_DIR", base),
+                mock.patch.object(guardian, "STORE", store),
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        **guardian.DEFAULT_CONFIG,
+                        "ENABLE_BOOTSTRAP_INIT": True,
+                        "BOOTSTRAP_WRITE_MISSING": False,
+                    },
+                ),
+                mock.patch.object(
+                    guardian,
+                    "current_env_spec",
+                    return_value={"id": "primary", "home": home},
+                ),
+                mock.patch.object(
+                    guardian,
+                    "all_env_specs",
+                    return_value={"primary": {"id": "primary", "port": 18789}},
+                ),
+                mock.patch.object(
+                    guardian,
+                    "get_system_metrics",
+                    return_value={"cpu": 1.0, "mem_used": 1.0, "mem_total": 8.0},
+                ),
+                mock.patch.object(guardian, "check_process_running", return_value=True),
+                mock.patch.object(guardian, "check_gateway_health", return_value=True),
+            ):
+                guardian.write_task_registry_snapshot()
+
+            lines = (home / "shared-context" / "monitor-tasks" / "tasks.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(len(lines), 1)
+            exported = json.loads(lines[0])
+            self.assertEqual(exported["question"], full_question)
+            self.assertEqual(exported["payload"]["question"], full_question)
+
     def test_build_main_closure_supervision_summary_reads_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -3198,6 +3502,200 @@ class GuardianLearningDelegationTests(unittest.TestCase):
             self.assertEqual(action["status"], "sent")
             self.assertNotIn("policy", action["details"])
             self.assertEqual(outcomes[0]["action"], "recovery_sent")
+
+
+class GuardianGatewayRestartRecoveryTests(unittest.TestCase):
+    def test_continue_gateway_restart_recovery_reports_owner_after_three_failed_attempts(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-open",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "我先查一下晨会任务的实际执行情况",
+                    "last_user_message": "我先查一下晨会任务的实际执行情况",
+                    "started_at": 10,
+                    "last_progress_at": 10,
+                    "created_at": 10,
+                    "updated_at": 10,
+                }
+            )
+
+            with (
+                mock.patch.object(guardian, "STORE", store),
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "TASK_REGISTRY_RETENTION": 20,
+                        "GUARDIAN_GATEWAY_RECOVERY_FOLLOWUP_COOLDOWN": 300,
+                        "GUARDIAN_GATEWAY_RECOVERY_MAX_ATTEMPTS": 3,
+                    },
+                ),
+                mock.patch.object(
+                    guardian, "current_env_spec", return_value={"id": "primary"}
+                ),
+                mock.patch.object(
+                    guardian,
+                    "send_guardian_followup",
+                    side_effect=[
+                        (False, "model_unavailable"),
+                        (False, "model_unavailable"),
+                        (False, "model_unavailable"),
+                    ],
+                ) as followup_push,
+                mock.patch.object(
+                    guardian, "send_feishu_progress_push", return_value=True
+                ) as owner_push,
+                mock.patch.object(guardian, "record_change_log"),
+                mock.patch.object(guardian, "notify"),
+            ):
+                guardian.mark_gateway_restart_recovery_window(100)
+                first = guardian.continue_gateway_restart_recovery_chase(200)
+                second = guardian.continue_gateway_restart_recovery_chase(600)
+                third = guardian.continue_gateway_restart_recovery_chase(1000)
+
+            self.assertEqual(first[0]["action"], "followup_failed")
+            self.assertEqual(second[0]["action"], "followup_failed")
+            self.assertEqual(third[0]["action"], "owner_reported")
+            self.assertEqual(followup_push.call_count, 3)
+            owner_push.assert_called_once()
+            tracker = store.load_runtime_value("gateway_restart_recovery_tracker", {})
+            self.assertFalse(bool(tracker.get("active")))
+            followup = store.get_followup(
+                "guardian:gateway-restart:legacy-root:task-open"
+            )
+            self.assertEqual(followup["current_state"], "escalated")
+            self.assertEqual(
+                int(followup["metadata"].get("gateway_restart_attempts") or 0), 3
+            )
+            self.assertGreater(
+                int(followup["metadata"].get("owner_reported_at") or 0), 0
+            )
+            events = store.list_task_events("task-open", limit=20)
+            self.assertTrue(
+                any(
+                    item["event_type"] == "gateway_restart_recovery_escalated"
+                    for item in events
+                )
+            )
+
+
+class GuardianMainClosureSummaryTests(unittest.TestCase):
+    def test_build_main_closure_supervision_summary_prefers_shared_state_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            shared_state = base / "data" / "shared-state"
+            shared_state.mkdir(parents=True)
+            runtime_status = {
+                "generated_at": 123,
+                "foreground_root_task_id": "",
+                "purity_metrics": {
+                    "purity_gate_ok": True,
+                    "purity_gate_reasons": [],
+                },
+                "roots": [],
+                "followups": [],
+            }
+            events_payload = {"events": []}
+            (shared_state / "main-closure-runtime-status.json").write_text(
+                json.dumps(runtime_status, ensure_ascii=False), encoding="utf-8"
+            )
+            (shared_state / "main-closure-events.json").write_text(
+                json.dumps(events_payload, ensure_ascii=False), encoding="utf-8"
+            )
+
+            with (
+                mock.patch.object(guardian, "BASE_DIR", base),
+                mock.patch.object(guardian, "SHARED_STATE_DIR", shared_state),
+                mock.patch.object(guardian, "STORE") as store,
+                mock.patch.object(
+                    guardian,
+                    "current_env_spec",
+                    return_value={
+                        "id": "primary",
+                        "home": str(base / "missing-openclaw"),
+                    },
+                ),
+            ):
+                store.summarize_main_closure.return_value = {
+                    "roots": [{"root_task_id": "legacy-root:bad"}],
+                    "events": [],
+                }
+                summary = guardian.build_main_closure_supervision_summary()
+
+            self.assertTrue(summary["purity_gate_ok"])
+            self.assertEqual(summary["roots"], [])
+
+    def test_continue_gateway_restart_recovery_resolves_followup_after_task_closes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-closed",
+                    "session_key": "agent:main:feishu:direct:ou_test",
+                    "env_id": "primary",
+                    "channel": "feishu",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "继续推进主任务",
+                    "last_user_message": "继续推进主任务",
+                    "started_at": 10,
+                    "last_progress_at": 10,
+                    "created_at": 10,
+                    "updated_at": 10,
+                }
+            )
+
+            with (
+                mock.patch.object(guardian, "STORE", store),
+                mock.patch.object(
+                    guardian,
+                    "CONFIG",
+                    {
+                        "TASK_REGISTRY_RETENTION": 20,
+                        "GUARDIAN_GATEWAY_RECOVERY_FOLLOWUP_COOLDOWN": 300,
+                        "GUARDIAN_GATEWAY_RECOVERY_MAX_ATTEMPTS": 3,
+                    },
+                ),
+                mock.patch.object(
+                    guardian, "current_env_spec", return_value={"id": "primary"}
+                ),
+                mock.patch.object(
+                    guardian, "send_guardian_followup", return_value=(True, None)
+                ) as followup_push,
+                mock.patch.object(guardian, "record_change_log"),
+                mock.patch.object(guardian, "notify"),
+            ):
+                guardian.mark_gateway_restart_recovery_window(100)
+                guardian.continue_gateway_restart_recovery_chase(200)
+                store.update_task_fields(
+                    "task-closed",
+                    status="completed",
+                    completed_at=260,
+                    updated_at=260,
+                )
+                outcomes = guardian.continue_gateway_restart_recovery_chase(700)
+
+            self.assertEqual(followup_push.call_count, 1)
+            self.assertEqual(outcomes, [])
+            tracker = store.load_runtime_value("gateway_restart_recovery_tracker", {})
+            self.assertFalse(bool(tracker.get("active")))
+            followup = store.get_followup(
+                "guardian:gateway-restart:legacy-root:task-closed"
+            )
+            self.assertEqual(followup["current_state"], "resolved")
+            self.assertGreater(int(followup["resolved_at"] or 0), 0)
 
 
 if __name__ == "__main__":

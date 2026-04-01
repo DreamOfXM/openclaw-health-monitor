@@ -1,0 +1,807 @@
+{
+  "timestamp": "2026-04-01T11:54:42.538891",
+  "summary": {
+    "recurring_problems": 4,
+    "high_severity": 4,
+    "fix_candidates": 4,
+    "model_requests": 4,
+    "patches_written": 4,
+    "verifications_passed": 3,
+    "verifications_failed": 1,
+    "code_patches_generated": 1,
+    "code_patches_applied": 0,
+    "pr_descriptions_generated": 0,
+    "commit_ready_artifacts": 0,
+    "git_commits_created": 0,
+    "remote_prs_created": 0
+  },
+  "top_problems": [
+    {
+      "pattern": "blocked:unverified",
+      "count": 434,
+      "task_ids": [
+        "c05a981d3e3eba8d",
+        "4c6af97949028a61",
+        "24294f08bc557c7b",
+        "404c709baf3171d7",
+        "ca6ac8ba2ae53259",
+        "d08dc0251ec40a25",
+        "2c69f2abdcc274b8",
+        "ebc31671acb5a9cd",
+        "89b34dfbb088da58",
+        "b12346e409daeddd"
+      ],
+      "severity": "high"
+    },
+    {
+      "pattern": "blocked:missing_pipeline_receipt",
+      "count": 265,
+      "task_ids": [
+        "1f8ccd60720864e5",
+        "9acc0956efa405a4",
+        "b78b5d69064fc926",
+        "8307419bb068b996",
+        "31e225ff00230a9b",
+        "7a291e4cc7294a25",
+        "0bbe26a32e68ba87",
+        "a21696a1771cf277",
+        "2d82ecca34da119d",
+        "475662ab4c1ff427"
+      ],
+      "severity": "high"
+    },
+    {
+      "pattern": "blocked:received_only_stall",
+      "count": 104,
+      "task_ids": [
+        "c38a96a53996c92a",
+        "6d724397e0a92beb",
+        "618255f9156b7ffc",
+        "1c057d644d37fdcb",
+        "3136e6ec3e47b7b9",
+        "d0403286abfb7afb",
+        "754ea51b508dfcd4",
+        "7ebcf28512c43cc0",
+        "6b249ba6975af78a",
+        "6974139fa26a8f69"
+      ],
+      "severity": "high"
+    },
+    {
+      "pattern": "blocked:background_root_task_missing",
+      "count": 65,
+      "task_ids": [
+        "c05a981d3e3eba8d",
+        "4c6af97949028a61",
+        "24294f08bc557c7b",
+        "404c709baf3171d7",
+        "ca6ac8ba2ae53259",
+        "d08dc0251ec40a25",
+        "2c69f2abdcc274b8",
+        "ebc31671acb5a9cd",
+        "89b34dfbb088da58",
+        "b12346e409daeddd"
+      ],
+      "severity": "high"
+    }
+  ],
+  "top_fixes": [
+    {
+      "problem": {
+        "pattern": "blocked:unverified",
+        "count": 434,
+        "task_ids": [
+          "c05a981d3e3eba8d",
+          "4c6af97949028a61",
+          "24294f08bc557c7b",
+          "404c709baf3171d7",
+          "ca6ac8ba2ae53259",
+          "d08dc0251ec40a25",
+          "2c69f2abdcc274b8",
+          "ebc31671acb5a9cd",
+          "89b34dfbb088da58",
+          "b12346e409daeddd"
+        ],
+        "severity": "high"
+      },
+      "root_cause": {
+        "category": "blocked",
+        "root_cause": "unresolved_block",
+        "description": "任务被阻塞但未处理",
+        "affected_component": "control_plane"
+      },
+      "fix": {
+        "action": "auto_resolve_blocks",
+        "description": "自动处理阻塞任务",
+        "code_changes": [
+          "guardian.py: 增加 blocked 任务自动恢复逻辑"
+        ],
+        "verification": "检查 blocked 任务是否有恢复动作"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "高频阻塞可能涉及误判，需要模型复核"
+        ]
+      },
+      "generated_at": "2026-04-01T11:53:44.068906",
+      "model_decision": {
+        "request_id": "diag-1775015624-blocked-unverified",
+        "created_at": "2026-04-01T11:53:44.068939",
+        "decided_at": "2026-04-01T11:53:44.104813",
+        "problem": {
+          "pattern": "blocked:unverified",
+          "count": 434,
+          "severity": "high",
+          "task_ids": [
+            "c05a981d3e3eba8d",
+            "4c6af97949028a61",
+            "24294f08bc557c7b",
+            "404c709baf3171d7",
+            "ca6ac8ba2ae53259"
+          ]
+        },
+        "risk": {
+          "risk": "medium",
+          "execution_mode": "model_review",
+          "reasons": [
+            "高频阻塞可能涉及误判，需要模型复核"
+          ]
+        },
+        "decision": {
+          "decision": "approve_with_review",
+          "rationale": [
+            "external_decider_default",
+            "允许执行，但需持续跟踪"
+          ],
+          "apply_action": "auto_resolve_blocks",
+          "requires_human": false,
+          "recommended_changes": [
+            "guardian.py: 增加 blocked 任务自动恢复逻辑"
+          ],
+          "next_step": "execute_fix_and_track",
+          "decider": "external_model_decider",
+          "decided_at": "2026-04-01T11:53:44.101709"
+        },
+        "executor": "external_model",
+        "status": "decided"
+      },
+      "execution_plan": {
+        "decision": "approve_with_review",
+        "apply_action": "auto_resolve_blocks",
+        "next_step": "execute_fix_and_track",
+        "requires_human": false
+      }
+    },
+    {
+      "problem": {
+        "pattern": "blocked:missing_pipeline_receipt",
+        "count": 265,
+        "task_ids": [
+          "1f8ccd60720864e5",
+          "9acc0956efa405a4",
+          "b78b5d69064fc926",
+          "8307419bb068b996",
+          "31e225ff00230a9b",
+          "7a291e4cc7294a25",
+          "0bbe26a32e68ba87",
+          "a21696a1771cf277",
+          "2d82ecca34da119d",
+          "475662ab4c1ff427"
+        ],
+        "severity": "high"
+      },
+      "root_cause": {
+        "category": "receipt_missing",
+        "root_cause": "no_pipeline_receipt",
+        "description": "任务缺少结构化回执",
+        "affected_component": "receipt_protocol"
+      },
+      "fix": {
+        "action": "enforce_receipt_protocol",
+        "description": "强制执行回执协议",
+        "code_changes": [
+          "guardian.py: 增加 receipt_check_by_watcher 触发",
+          "state_store.py: 增加 create_control_action 方法"
+        ],
+        "verification": "检查 received_only 任务是否都有 action"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "auto_with_model_summary",
+        "reasons": [
+          "协议/投递类修复影响面较大，需要模型总结"
+        ]
+      },
+      "generated_at": "2026-04-01T11:53:44.068923",
+      "model_decision": {
+        "request_id": "diag-1775015624-blocked-missing_pipeline_receipt",
+        "created_at": "2026-04-01T11:53:44.068944",
+        "decided_at": "2026-04-01T11:53:44.125274",
+        "problem": {
+          "pattern": "blocked:missing_pipeline_receipt",
+          "count": 265,
+          "severity": "high",
+          "task_ids": [
+            "1f8ccd60720864e5",
+            "9acc0956efa405a4",
+            "b78b5d69064fc926",
+            "8307419bb068b996",
+            "31e225ff00230a9b"
+          ]
+        },
+        "risk": {
+          "risk": "medium",
+          "execution_mode": "auto_with_model_summary",
+          "reasons": [
+            "协议/投递类修复影响面较大，需要模型总结"
+          ]
+        },
+        "decision": {
+          "decision": "approve_auto_fix_with_summary",
+          "rationale": [
+            "external_decider_default",
+            "协议类问题允许自动修复并保留摘要"
+          ],
+          "apply_action": "enforce_receipt_protocol",
+          "requires_human": false,
+          "recommended_changes": [
+            "guardian.py: 增加 receipt_check_by_watcher 触发",
+            "state_store.py: 增加 create_control_action 方法"
+          ],
+          "next_step": "execute_fix_and_emit_summary",
+          "decider": "external_model_decider",
+          "decided_at": "2026-04-01T11:53:44.122955"
+        },
+        "executor": "external_model",
+        "status": "decided"
+      },
+      "execution_plan": {
+        "decision": "approve_auto_fix_with_summary",
+        "apply_action": "enforce_receipt_protocol",
+        "next_step": "execute_fix_and_emit_summary",
+        "requires_human": false
+      }
+    },
+    {
+      "problem": {
+        "pattern": "blocked:received_only_stall",
+        "count": 104,
+        "task_ids": [
+          "c38a96a53996c92a",
+          "6d724397e0a92beb",
+          "618255f9156b7ffc",
+          "1c057d644d37fdcb",
+          "3136e6ec3e47b7b9",
+          "d0403286abfb7afb",
+          "754ea51b508dfcd4",
+          "7ebcf28512c43cc0",
+          "6b249ba6975af78a",
+          "6974139fa26a8f69"
+        ],
+        "severity": "high"
+      },
+      "root_cause": {
+        "category": "blocked",
+        "root_cause": "unresolved_block",
+        "description": "任务被阻塞但未处理",
+        "affected_component": "control_plane"
+      },
+      "fix": {
+        "action": "auto_resolve_blocks",
+        "description": "自动处理阻塞任务",
+        "code_changes": [
+          "guardian.py: 增加 blocked 任务自动恢复逻辑"
+        ],
+        "verification": "检查 blocked 任务是否有恢复动作"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "高频阻塞可能涉及误判，需要模型复核"
+        ]
+      },
+      "generated_at": "2026-04-01T11:53:44.068927",
+      "model_decision": {
+        "request_id": "diag-1775015624-blocked-received_only_stall",
+        "created_at": "2026-04-01T11:53:44.068947",
+        "decided_at": "2026-04-01T11:53:44.145703",
+        "problem": {
+          "pattern": "blocked:received_only_stall",
+          "count": 104,
+          "severity": "high",
+          "task_ids": [
+            "c38a96a53996c92a",
+            "6d724397e0a92beb",
+            "618255f9156b7ffc",
+            "1c057d644d37fdcb",
+            "3136e6ec3e47b7b9"
+          ]
+        },
+        "risk": {
+          "risk": "medium",
+          "execution_mode": "model_review",
+          "reasons": [
+            "高频阻塞可能涉及误判，需要模型复核"
+          ]
+        },
+        "decision": {
+          "decision": "approve_with_review",
+          "rationale": [
+            "external_decider_default",
+            "允许执行，但需持续跟踪"
+          ],
+          "apply_action": "auto_resolve_blocks",
+          "requires_human": false,
+          "recommended_changes": [
+            "guardian.py: 增加 blocked 任务自动恢复逻辑"
+          ],
+          "next_step": "execute_fix_and_track",
+          "decider": "external_model_decider",
+          "decided_at": "2026-04-01T11:53:44.143427"
+        },
+        "executor": "external_model",
+        "status": "decided"
+      },
+      "execution_plan": {
+        "decision": "approve_with_review",
+        "apply_action": "auto_resolve_blocks",
+        "next_step": "execute_fix_and_track",
+        "requires_human": false
+      }
+    },
+    {
+      "problem": {
+        "pattern": "blocked:background_root_task_missing",
+        "count": 65,
+        "task_ids": [
+          "c05a981d3e3eba8d",
+          "4c6af97949028a61",
+          "24294f08bc557c7b",
+          "404c709baf3171d7",
+          "ca6ac8ba2ae53259",
+          "d08dc0251ec40a25",
+          "2c69f2abdcc274b8",
+          "ebc31671acb5a9cd",
+          "89b34dfbb088da58",
+          "b12346e409daeddd"
+        ],
+        "severity": "high"
+      },
+      "root_cause": {
+        "category": "binding_repair",
+        "root_cause": "background_root_task_missing",
+        "description": "后台任务缺失有效 root_task 绑定",
+        "affected_component": "task_binding"
+      },
+      "fix": {
+        "action": "repair_background_root_binding",
+        "description": "修复后台任务缺失的 root_task 绑定",
+        "code_changes": [
+          "state_store.py: 为缺失 root_task 的后台任务补建 legacy projection",
+          "guardian.py: 减少 background_root_task_missing 误阻塞"
+        ],
+        "verification": "检查 background 任务是否仍存在缺失 root_task 绑定"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "核心绑定/控制面修复需要模型复核"
+        ]
+      },
+      "generated_at": "2026-04-01T11:53:44.068930",
+      "model_decision": {
+        "request_id": "diag-1775015624-blocked-background_root_task_missing",
+        "created_at": "2026-04-01T11:53:44.068949",
+        "decided_at": "2026-04-01T11:53:44.165870",
+        "problem": {
+          "pattern": "blocked:background_root_task_missing",
+          "count": 65,
+          "severity": "high",
+          "task_ids": [
+            "c05a981d3e3eba8d",
+            "4c6af97949028a61",
+            "24294f08bc557c7b",
+            "404c709baf3171d7",
+            "ca6ac8ba2ae53259"
+          ]
+        },
+        "risk": {
+          "risk": "medium",
+          "execution_mode": "model_review",
+          "reasons": [
+            "核心绑定/控制面修复需要模型复核"
+          ]
+        },
+        "decision": {
+          "decision": "review_binding_logic",
+          "rationale": [
+            "external_decider_default",
+            "background task 缺 root binding，优先补 projection/root linkage"
+          ],
+          "apply_action": "repair_background_root_binding",
+          "requires_human": false,
+          "recommended_changes": [
+            "state_store.py: 为缺失 root_task 的后台任务补建 legacy projection",
+            "guardian.py: 减少 background_root_task_missing 误阻塞"
+          ],
+          "next_step": "trace_root_binding_and_patch",
+          "decider": "external_model_decider",
+          "decided_at": "2026-04-01T11:53:44.163517"
+        },
+        "executor": "external_model",
+        "status": "decided"
+      },
+      "execution_plan": {
+        "decision": "review_binding_logic",
+        "apply_action": "repair_background_root_binding",
+        "next_step": "trace_root_binding_and_patch",
+        "requires_human": false
+      }
+    }
+  ],
+  "model_requests": [
+    {
+      "request_id": "diag-1775015624-blocked-unverified",
+      "created_at": "2026-04-01T11:53:44.068939",
+      "problem": {
+        "pattern": "blocked:unverified",
+        "count": 434,
+        "severity": "high",
+        "task_ids": [
+          "c05a981d3e3eba8d",
+          "4c6af97949028a61",
+          "24294f08bc557c7b",
+          "404c709baf3171d7",
+          "ca6ac8ba2ae53259"
+        ]
+      },
+      "root_cause": {
+        "category": "blocked",
+        "root_cause": "unresolved_block",
+        "description": "任务被阻塞但未处理",
+        "affected_component": "control_plane"
+      },
+      "proposed_fix": {
+        "action": "auto_resolve_blocks",
+        "description": "自动处理阻塞任务",
+        "code_changes": [
+          "guardian.py: 增加 blocked 任务自动恢复逻辑"
+        ],
+        "verification": "检查 blocked 任务是否有恢复动作"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "高频阻塞可能涉及误判，需要模型复核"
+        ]
+      },
+      "questions": [
+        "这个问题更可能是协议缺陷、代码缺陷、流程缺陷还是任务误分类？",
+        "应该改代码、改协议、改提示词还是改控制面策略？",
+        "低风险可自动执行动作是什么？",
+        "高风险部分需要什么人工确认？"
+      ],
+      "status": "pending_model_diagnosis"
+    },
+    {
+      "request_id": "diag-1775015624-blocked-missing_pipeline_receipt",
+      "created_at": "2026-04-01T11:53:44.068944",
+      "problem": {
+        "pattern": "blocked:missing_pipeline_receipt",
+        "count": 265,
+        "severity": "high",
+        "task_ids": [
+          "1f8ccd60720864e5",
+          "9acc0956efa405a4",
+          "b78b5d69064fc926",
+          "8307419bb068b996",
+          "31e225ff00230a9b"
+        ]
+      },
+      "root_cause": {
+        "category": "receipt_missing",
+        "root_cause": "no_pipeline_receipt",
+        "description": "任务缺少结构化回执",
+        "affected_component": "receipt_protocol"
+      },
+      "proposed_fix": {
+        "action": "enforce_receipt_protocol",
+        "description": "强制执行回执协议",
+        "code_changes": [
+          "guardian.py: 增加 receipt_check_by_watcher 触发",
+          "state_store.py: 增加 create_control_action 方法"
+        ],
+        "verification": "检查 received_only 任务是否都有 action"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "auto_with_model_summary",
+        "reasons": [
+          "协议/投递类修复影响面较大，需要模型总结"
+        ]
+      },
+      "questions": [
+        "这个问题更可能是协议缺陷、代码缺陷、流程缺陷还是任务误分类？",
+        "应该改代码、改协议、改提示词还是改控制面策略？",
+        "低风险可自动执行动作是什么？",
+        "高风险部分需要什么人工确认？"
+      ],
+      "status": "pending_model_diagnosis"
+    },
+    {
+      "request_id": "diag-1775015624-blocked-received_only_stall",
+      "created_at": "2026-04-01T11:53:44.068947",
+      "problem": {
+        "pattern": "blocked:received_only_stall",
+        "count": 104,
+        "severity": "high",
+        "task_ids": [
+          "c38a96a53996c92a",
+          "6d724397e0a92beb",
+          "618255f9156b7ffc",
+          "1c057d644d37fdcb",
+          "3136e6ec3e47b7b9"
+        ]
+      },
+      "root_cause": {
+        "category": "blocked",
+        "root_cause": "unresolved_block",
+        "description": "任务被阻塞但未处理",
+        "affected_component": "control_plane"
+      },
+      "proposed_fix": {
+        "action": "auto_resolve_blocks",
+        "description": "自动处理阻塞任务",
+        "code_changes": [
+          "guardian.py: 增加 blocked 任务自动恢复逻辑"
+        ],
+        "verification": "检查 blocked 任务是否有恢复动作"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "高频阻塞可能涉及误判，需要模型复核"
+        ]
+      },
+      "questions": [
+        "这个问题更可能是协议缺陷、代码缺陷、流程缺陷还是任务误分类？",
+        "应该改代码、改协议、改提示词还是改控制面策略？",
+        "低风险可自动执行动作是什么？",
+        "高风险部分需要什么人工确认？"
+      ],
+      "status": "pending_model_diagnosis"
+    },
+    {
+      "request_id": "diag-1775015624-blocked-background_root_task_missing",
+      "created_at": "2026-04-01T11:53:44.068949",
+      "problem": {
+        "pattern": "blocked:background_root_task_missing",
+        "count": 65,
+        "severity": "high",
+        "task_ids": [
+          "c05a981d3e3eba8d",
+          "4c6af97949028a61",
+          "24294f08bc557c7b",
+          "404c709baf3171d7",
+          "ca6ac8ba2ae53259"
+        ]
+      },
+      "root_cause": {
+        "category": "binding_repair",
+        "root_cause": "background_root_task_missing",
+        "description": "后台任务缺失有效 root_task 绑定",
+        "affected_component": "task_binding"
+      },
+      "proposed_fix": {
+        "action": "repair_background_root_binding",
+        "description": "修复后台任务缺失的 root_task 绑定",
+        "code_changes": [
+          "state_store.py: 为缺失 root_task 的后台任务补建 legacy projection",
+          "guardian.py: 减少 background_root_task_missing 误阻塞"
+        ],
+        "verification": "检查 background 任务是否仍存在缺失 root_task 绑定"
+      },
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "核心绑定/控制面修复需要模型复核"
+        ]
+      },
+      "questions": [
+        "这个问题更可能是协议缺陷、代码缺陷、流程缺陷还是任务误分类？",
+        "应该改代码、改协议、改提示词还是改控制面策略？",
+        "低风险可自动执行动作是什么？",
+        "高风险部分需要什么人工确认？"
+      ],
+      "status": "pending_model_diagnosis"
+    }
+  ],
+  "model_summaries": [
+    {
+      "pattern": "blocked:unverified",
+      "action": "auto_resolve_blocks",
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "高频阻塞可能涉及误判，需要模型复核"
+        ]
+      },
+      "summary": "任务被阻塞但未处理"
+    },
+    {
+      "pattern": "blocked:missing_pipeline_receipt",
+      "action": "enforce_receipt_protocol",
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "auto_with_model_summary",
+        "reasons": [
+          "协议/投递类修复影响面较大，需要模型总结"
+        ]
+      },
+      "summary": "任务缺少结构化回执"
+    },
+    {
+      "pattern": "blocked:received_only_stall",
+      "action": "auto_resolve_blocks",
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "高频阻塞可能涉及误判，需要模型复核"
+        ]
+      },
+      "summary": "任务被阻塞但未处理"
+    },
+    {
+      "pattern": "blocked:background_root_task_missing",
+      "action": "repair_background_root_binding",
+      "risk": {
+        "risk": "medium",
+        "execution_mode": "model_review",
+        "reasons": [
+          "核心绑定/控制面修复需要模型复核"
+        ]
+      },
+      "summary": "后台任务缺失有效 root_task 绑定"
+    }
+  ],
+  "patches": [
+    {
+      "patch_id": "patch-1775015642-auto_resolve_blocks",
+      "action": "auto_resolve_blocks",
+      "description": "自动处理阻塞任务",
+      "code_changes": [
+        "guardian.py: 增加 blocked 任务自动恢复逻辑"
+      ],
+      "verification_criteria": "检查 blocked 任务是否有恢复动作",
+      "status": "pending",
+      "created_at": "2026-04-01T11:54:02.559952",
+      "source_problem": "blocked:unverified",
+      "root_cause": "blocked"
+    },
+    {
+      "patch_id": "patch-1775015642-enforce_receipt_protocol",
+      "action": "enforce_receipt_protocol",
+      "description": "强制执行回执协议",
+      "code_changes": [
+        "guardian.py: 增加 receipt_check_by_watcher 触发",
+        "state_store.py: 增加 create_control_action 方法"
+      ],
+      "verification_criteria": "检查 received_only 任务是否都有 action",
+      "status": "pending",
+      "created_at": "2026-04-01T11:54:02.560895",
+      "source_problem": "blocked:missing_pipeline_receipt",
+      "root_cause": "receipt_missing"
+    },
+    {
+      "patch_id": "patch-1775015642-auto_resolve_blocks",
+      "action": "auto_resolve_blocks",
+      "description": "自动处理阻塞任务",
+      "code_changes": [
+        "guardian.py: 增加 blocked 任务自动恢复逻辑"
+      ],
+      "verification_criteria": "检查 blocked 任务是否有恢复动作",
+      "status": "pending",
+      "created_at": "2026-04-01T11:54:02.561171",
+      "source_problem": "blocked:received_only_stall",
+      "root_cause": "blocked"
+    },
+    {
+      "patch_id": "patch-1775015642-repair_background_root_binding",
+      "action": "repair_background_root_binding",
+      "description": "修复后台任务缺失的 root_task 绑定",
+      "code_changes": [
+        "state_store.py: 为缺失 root_task 的后台任务补建 legacy projection",
+        "guardian.py: 减少 background_root_task_missing 误阻塞"
+      ],
+      "verification_criteria": "检查 background 任务是否仍存在缺失 root_task 绑定",
+      "status": "pending",
+      "created_at": "2026-04-01T11:54:02.561423",
+      "source_problem": "blocked:background_root_task_missing",
+      "root_cause": "binding_repair"
+    }
+  ],
+  "verifications": [
+    {
+      "patch_id": "patch-1775015642-auto_resolve_blocks",
+      "action": "auto_resolve_blocks",
+      "verified_at": "2026-04-01T11:54:02.561691",
+      "checks": [
+        {
+          "name": "blocked_over_24h_marked",
+          "expected": 0,
+          "actual": 0,
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "summary": "blocked_over_24h_unmarked=0"
+    },
+    {
+      "patch_id": "patch-1775015642-enforce_receipt_protocol",
+      "action": "enforce_receipt_protocol",
+      "verified_at": "2026-04-01T11:54:11.375967",
+      "checks": [
+        {
+          "name": "received_tasks_have_action",
+          "expected": 0,
+          "actual": 0,
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "summary": "received_without_action=0"
+    },
+    {
+      "patch_id": "patch-1775015642-auto_resolve_blocks",
+      "action": "auto_resolve_blocks",
+      "verified_at": "2026-04-01T11:54:21.638639",
+      "checks": [
+        {
+          "name": "blocked_over_24h_marked",
+          "expected": 0,
+          "actual": 0,
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "summary": "blocked_over_24h_unmarked=0"
+    },
+    {
+      "patch_id": "patch-1775015642-repair_background_root_binding",
+      "action": "repair_background_root_binding",
+      "verified_at": "2026-04-01T11:54:28.988792",
+      "checks": [
+        {
+          "name": "background_tasks_have_root_binding",
+          "expected": 0,
+          "actual": 46,
+          "passed": false
+        }
+      ],
+      "passed": false,
+      "summary": "background_root_missing=46"
+    }
+  ],
+  "code_patches": [
+    {
+      "patch_id": "patch-1775015642-enforce_receipt_protocol",
+      "action": "enforce_receipt_protocol",
+      "changes": [],
+      "status": "pending",
+      "generated_at": "2026-04-01T11:54:42.536917"
+    }
+  ],
+  "apply_results": [],
+  "commit_ready_artifacts": [],
+  "git_results": [],
+  "remote_pr_results": []
+}

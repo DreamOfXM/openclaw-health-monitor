@@ -17,6 +17,8 @@ import hashlib
 import shlex
 import re
 import urllib.request
+import atexit
+import fcntl
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -56,7 +58,7 @@ from heartbeat_guardrail import (
     build_user_visible_status_template,
 )
 from recovery_watchdog import RecoveryWatchdog, detect_recurrence_problem_code
-from self_evolution import (
+from learning_recorder import (
     check_and_resolve_learnings,
     generate_daily_evolution_report,
     record_learning,
@@ -68,6 +70,10 @@ from self_evolution import (
 # ========== 配置 ==========
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.conf"
+GUARDIAN_LOG_DIR = BASE_DIR / "logs"
+GUARDIAN_PID_FILE = GUARDIAN_LOG_DIR / "guardian.pid"
+GUARDIAN_LOCK_FILE = GUARDIAN_LOG_DIR / "guardian.lock"
+_GUARDIAN_LOCK_HANDLE = None
 LOCAL_CONFIG_FILE = BASE_DIR / "config.local.conf"
 ALERTS_FILE = BASE_DIR / "alerts.json"
 VERSIONS_FILE = BASE_DIR / "versions.json"
@@ -77,6 +83,8 @@ OPENCLAW_HOME = Path.home() / ".openclaw"
 OPENCLAW_CODE = Path.home() / "openclaw-workspace" / "openclaw"
 GATEWAY_LOG = OPENCLAW_HOME / "logs" / "gateway.log"
 TMP_OPENCLAW_LOG_DIR = Path("/tmp/openclaw")
+SESSION_STORE_FILE = OPENCLAW_HOME / "agents" / "main" / "sessions" / "sessions.json"
+SHARED_STATE_DIR = BASE_DIR / "data" / "shared-state"
 DESKTOP_RUNTIME = BASE_DIR / "desktop_runtime.sh"
 
 CONFIG = {}
@@ -84,6 +92,40 @@ ALERTS = {}
 VERSIONS = {"current": None, "history": []}
 STORE = MonitorStateStore(BASE_DIR)
 SNAPSHOTS = SnapshotManager(BASE_DIR, OPENCLAW_HOME)
+
+
+def safe_read_json_file(path: Path, default: Any) -> Any:
+    """Best-effort JSON reader for files that may be concurrently written.
+
+    Returns default on missing/empty/truncated/invalid JSON instead of throwing.
+    """
+    try:
+        if not path.exists():
+            return default
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+        if not raw or not raw.strip():
+            return default
+        text = raw.strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Common concurrent-write case: file exists but body is incomplete.
+            if text[-1:] not in {"}", "]"}:
+                return default
+            return default
+    except Exception:
+        return default
+
+
+def atomic_write_json_file(path: Path, payload: Any) -> None:
+    """Atomically write JSON via temp file + replace to avoid partial reads."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
 
 
 def raise_nofile_limit(target: int = 65536) -> None:
@@ -95,6 +137,73 @@ def raise_nofile_limit(target: int = 65536) -> None:
             resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
     except Exception:
         pass
+
+
+def _cleanup_guardian_singleton() -> None:
+    global _GUARDIAN_LOCK_HANDLE
+    try:
+        if GUARDIAN_PID_FILE.exists():
+            GUARDIAN_PID_FILE.unlink()
+    except Exception:
+        pass
+    try:
+        if _GUARDIAN_LOCK_HANDLE is not None:
+            fcntl.flock(_GUARDIAN_LOCK_HANDLE.fileno(), fcntl.LOCK_UN)
+            _GUARDIAN_LOCK_HANDLE.close()
+            _GUARDIAN_LOCK_HANDLE = None
+    except Exception:
+        pass
+
+
+def ensure_single_guardian_instance() -> None:
+    global _GUARDIAN_LOCK_HANDLE
+    GUARDIAN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Extra guard: if another guardian.py process already exists, exit early.
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "pid=,command=", "-ax"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        current_pid = os.getpid()
+        for line in result.stdout.splitlines():
+            raw = line.strip()
+            if not raw or "guardian.py" not in raw:
+                continue
+            parts = raw.split(None, 1)
+            if not parts:
+                continue
+            try:
+                pid = int(parts[0])
+            except Exception:
+                continue
+            if pid != current_pid:
+                print(f"Guardian already running (pid={pid})", file=sys.stderr)
+                sys.exit(0)
+    except Exception:
+        pass
+
+    lock_handle = GUARDIAN_LOCK_FILE.open("a+")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            existing_pid = GUARDIAN_PID_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            existing_pid = "unknown"
+        print(f"Guardian already running (pid={existing_pid})", file=sys.stderr)
+        sys.exit(0)
+    lock_handle.seek(0)
+    lock_handle.truncate()
+    lock_handle.write(str(os.getpid()))
+    lock_handle.flush()
+    os.fsync(lock_handle.fileno())
+    _GUARDIAN_LOCK_HANDLE = lock_handle
+    GUARDIAN_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    atexit.register(_cleanup_guardian_singleton)
 
 
 def load_config():
@@ -504,6 +613,9 @@ def sync_shared_context_watcher_tasks(
     )
     tasks_file = monitor_dir / "tasks.jsonl"
     dlq_file = monitor_dir / "dlq.jsonl"
+    watcher_log_file = monitor_dir / "watcher.log"
+    audit_log_file = monitor_dir / "audit.log"
+    watcher_signal_file = monitor_dir / "watcher-control-signal.json"
     imported = 0
     receipt_bridge = {"bridged": 0, "observed_unbound": 0, "ignored": 0}
 
@@ -557,6 +669,13 @@ def sync_shared_context_watcher_tasks(
 
     process_file(tasks_file, in_dlq=False)
     process_file(dlq_file, in_dlq=True)
+    watcher_log_records = _read_jsonl_records(watcher_log_file)
+    audit_log_records = _read_jsonl_records(audit_log_file)
+    latest_scan = watcher_log_records[-1] if watcher_log_records else {}
+    latest_alert = audit_log_records[-1] if audit_log_records else {}
+    recent_scans = watcher_log_records[-20:]
+    recent_alerts = audit_log_records[-20:]
+    watcher_signal = safe_read_json_file(watcher_signal_file, {})
     summary = STORE.summarize_watcher_tasks(env_id=env_id)
     result = {
         "env_id": env_id,
@@ -564,6 +683,13 @@ def sync_shared_context_watcher_tasks(
         "imported": imported,
         "summary": summary,
         "receipt_bridge": receipt_bridge,
+        "latest_scan": latest_scan,
+        "latest_alert": latest_alert,
+        "recent_scans": recent_scans,
+        "recent_alerts": recent_alerts,
+        "watcher_signal": watcher_signal,
+        "watcher_log_count": len(watcher_log_records),
+        "audit_log_count": len(audit_log_records),
     }
     STORE.save_runtime_value(f"watcher_summary:{env_id}", result)
     return result
@@ -587,6 +713,71 @@ def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
     except Exception:
         return []
     return records
+
+
+def _watcher_alert_for_task(
+    watcher_summary: dict[str, Any] | None, task_id: str
+) -> dict[str, Any]:
+    summary = watcher_summary if isinstance(watcher_summary, dict) else {}
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for key in ("latest_alert", "latest_scan"):
+        candidate = summary.get(key)
+        if isinstance(candidate, dict):
+            candidates.append((key, candidate))
+    for key, items in (("recent_alerts", summary.get("recent_alerts")), ("recent_scans", summary.get("recent_scans"))):
+        if isinstance(items, list):
+            for item in reversed(items):
+                if isinstance(item, dict):
+                    candidates.append((key, item))
+    for source, candidate in candidates:
+        current = candidate.get("current") if isinstance(candidate.get("current"), dict) else {}
+        candidate_task_id = str(current.get("task_id") or candidate.get("task_id") or "")
+        if candidate_task_id and candidate_task_id == task_id:
+            return {
+                "source": source,
+                "event": candidate.get("event") or "task_closure_watcher_alert",
+                "ts": candidate.get("ts") or 0,
+                "current": current,
+            }
+    return {}
+
+
+def _watcher_signal_needs_action(
+    watcher_summary: dict[str, Any] | None, task_id: str
+) -> dict[str, Any]:
+    summary = watcher_summary if isinstance(watcher_summary, dict) else {}
+    signal = summary.get("watcher_signal") if isinstance(summary.get("watcher_signal"), dict) else {}
+    if not signal:
+        return {}
+    signal_task_id = str(signal.get("task_id") or "")
+    if signal_task_id and signal_task_id == task_id:
+        return {
+            "needs_delivery_retry": bool(signal.get("needs_delivery_retry")),
+            "needs_receipt_or_block": bool(signal.get("needs_receipt_or_block")),
+            "reason": str(signal.get("reason") or ""),
+            "ts": int(signal.get("ts") or 0),
+        }
+    return {}
+
+
+def _clear_watcher_signal_if_processed(watcher_summary: dict[str, Any] | None) -> None:
+    summary = watcher_summary if isinstance(watcher_summary, dict) else {}
+    monitor_dir = summary.get("monitor_dir")
+    if not monitor_dir:
+        monitor_dir = Path.home() / ".openclaw" / "shared-context" / "monitor-tasks"
+    else:
+        monitor_dir = Path(monitor_dir)
+    signal_file = monitor_dir / "watcher-control-signal.json"
+    if signal_file.exists():
+        try:
+            signal_file.write_text("{}", encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _load_watcher_signal_direct() -> dict[str, Any]:
+    signal_file = Path.home() / ".openclaw" / "shared-context" / "monitor-tasks" / "watcher-control-signal.json"
+    return safe_read_json_file(signal_file, {})
 
 
 def build_learning_supervision_summary(
@@ -760,7 +951,7 @@ def build_self_check_supervision_summary(
     runtime_status_valid = False
     if runtime_status_path.exists():
         try:
-            runtime_status = json.loads(runtime_status_path.read_text(encoding="utf-8"))
+            runtime_status = safe_read_json_file(runtime_status_path, {})
             runtime_status_valid = (
                 isinstance(runtime_status, dict)
                 and bool(runtime_status.get("last_self_check_at"))
@@ -788,7 +979,7 @@ def build_self_check_supervision_summary(
     events_valid = False
     if events_path.exists():
         try:
-            events_payload = json.loads(events_path.read_text(encoding="utf-8"))
+            events_payload = safe_read_json_file(events_path, {})
             events_valid = isinstance(events_payload, dict) and isinstance(
                 events_payload.get("events") or [], list
             )
@@ -852,14 +1043,22 @@ def build_main_closure_supervision_summary(
     home = Path(str(target.get("home") or Path.home() / ".openclaw"))
     now = int(time.time())
     closure_dir = home / "shared-context" / "main-closure"
+    shared_state_runtime_status_path = (
+        SHARED_STATE_DIR / "main-closure-runtime-status.json"
+    )
+    shared_state_events_path = SHARED_STATE_DIR / "main-closure-events.json"
     runtime_status_path = closure_dir / "main-closure-runtime-status.json"
     events_path = closure_dir / "main-closure-events.json"
+    if not runtime_status_path.exists() and shared_state_runtime_status_path.exists():
+        runtime_status_path = shared_state_runtime_status_path
+    if not events_path.exists() and shared_state_events_path.exists():
+        events_path = shared_state_events_path
 
     runtime_status: dict[str, Any] = {}
     runtime_status_valid = False
     if runtime_status_path.exists():
         try:
-            runtime_status = json.loads(runtime_status_path.read_text(encoding="utf-8"))
+            runtime_status = safe_read_json_file(runtime_status_path, {})
             runtime_status_valid = isinstance(runtime_status, dict) and bool(
                 runtime_status.get("foreground_root_task_id")
                 or runtime_status.get("generated_at")
@@ -877,7 +1076,7 @@ def build_main_closure_supervision_summary(
     events_valid = False
     if events_path.exists():
         try:
-            events_payload = json.loads(events_path.read_text(encoding="utf-8"))
+            events_payload = safe_read_json_file(events_path, {})
             events_valid = isinstance(events_payload, dict) and isinstance(
                 events_payload.get("events") or [], list
             )
@@ -1248,6 +1447,16 @@ def parse_runtime_timestamp(line: str) -> tuple[str, float | None]:
         return raw, None
 
 
+MAX_TASK_QUESTION_LEN = 240
+
+
+def _clamp_task_question(text: str | None, limit: int = MAX_TASK_QUESTION_LEN) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    return raw[:limit]
+
+
 def extract_runtime_question(line: str) -> str | None:
     """Extract a user-visible question from runtime logs when possible."""
     sanitized = line
@@ -1259,7 +1468,7 @@ def extract_runtime_question(line: str) -> str | None:
             sanitized = sanitized.split('"}', 1)[0]
             sanitized = sanitized.strip()
             if sanitized:
-                return sanitized[:80]
+                return _clamp_task_question(sanitized)
     lower = line.lower()
     ignore = (
         "dispatching to agent",
@@ -1269,6 +1478,8 @@ def extract_runtime_question(line: str) -> str | None:
         "announce_skip",
         "guardian_followup",
         "guardian_escalation",
+        "fetched quoted message:",
+        "failed to fetch quoted message:",
     )
     if any(marker in lower for marker in ignore):
         return None
@@ -1276,15 +1487,15 @@ def extract_runtime_question(line: str) -> str | None:
     if " dm from " in sanitized_lower and ": " in sanitized:
         idx = sanitized.find(": ")
         if idx > 0:
-            return sanitized[idx + 2 :].strip()[:80]
+            return _clamp_task_question(sanitized[idx + 2 :].strip())
     if "message in" in sanitized_lower and ": " in sanitized:
         idx = sanitized.find(": ")
         if idx > 0:
-            return sanitized[idx + 2 :].strip()[:80]
+            return _clamp_task_question(sanitized[idx + 2 :].strip())
     if "feishu[default]:" in sanitized_lower and ": " in sanitized:
         idx = sanitized.find(": ")
         if idx > 0:
-            return sanitized[idx + 2 :].strip()[:80]
+            return _clamp_task_question(sanitized[idx + 2 :].strip())
     return None
 
 
@@ -1298,10 +1509,295 @@ def normalize_task_question(text: str | None) -> str:
         return "未知任务"
     if "received message from " in lower:
         return "未知任务"
+    # Filter out internal log lines that are not user messages
+    if "fetched quoted message:" in lower:
+        return "未知任务"
+    if "failed to fetch quoted message:" in lower:
+        return "未知任务"
+    # Filter out system recovery messages that should not create tasks
+    if "continue where you left off" in lower:
+        return "未知任务"
+    if "previous model attempt failed or timed out" in lower:
+        return "未知任务"
+    if "guardian_gateway_recovery" in lower:
+        return "未知任务"
+    if "guardian_task_control" in lower:
+        return "未知任务"
+    if "这不是用户新需求" in lower:
+        return "未知任务"
+    if "when reading heartbeat.md" in lower:
+        return "未知任务"
+    if "read heartbeat.md if it exists" in lower:
+        return "未知任务"
     if "feishu[default] dm from " in lower and ": " in raw:
         raw = raw.split(": ", 1)[1].strip()
     raw = raw.split('","_meta"', 1)[0].strip()
-    return raw[:120] if raw else "未知任务"
+    clamped = _clamp_task_question(raw)
+    return clamped if clamped else "未知任务"
+
+
+def _extract_user_question_from_transcript_text(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "未知任务"
+    # Handle Hangzhou: prefix patterns
+    if "\nHangzhou: " in raw:
+        extracted = raw.rsplit("\nHangzhou: ", 1)[1].strip()
+    elif raw.startswith("Hangzhou: "):
+        extracted = raw.split(": ", 1)[1].strip()
+    else:
+        extracted = raw
+    # If extracted starts with [Replying to: ...], skip the reply block and get the actual question
+    if extracted.startswith("[Replying to:"):
+        # Find the closing ] and get text after it
+        bracket_end = extracted.find("]")
+        if bracket_end >= 0 and bracket_end + 1 < len(extracted):
+            after_bracket = extracted[bracket_end + 1:].strip()
+            if after_bracket:
+                return normalize_task_question(after_bracket)
+        # If no text after ], fall through to line-based extraction
+        lines = [line.strip() for line in extracted.splitlines() if line.strip()]
+        for line in reversed(lines):
+            if line.startswith("[") or line.startswith("```"):
+                continue
+            if line.startswith("Conversation info") or line.startswith("Sender"):
+                continue
+            if line.startswith("Current time:"):
+                continue
+            if ": " in line and not line.lower().startswith("system:"):
+                return normalize_task_question(line.split(": ", 1)[1].strip())
+            return normalize_task_question(line)
+    return normalize_task_question(extracted)
+
+
+def _assistant_message_has_visible_reply(message: dict[str, Any]) -> bool:
+    for item in list(message.get("content") or []):
+        if item.get("type") != "text":
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if text in {"NO_REPLY", "HEARTBEAT_OK"}:
+            continue
+        return True
+    return False
+
+
+def _iter_session_user_turns(session_file: Path) -> list[dict[str, Any]]:
+    if not session_file.exists():
+        return []
+    try:
+        lines = session_file.read_text(encoding="utf-8", errors="ignore").splitlines()[
+            -400:
+        ]
+    except Exception:
+        return []
+
+    turns: list[dict[str, Any]] = []
+    current_user: dict[str, Any] | None = None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if payload.get("type") != "message":
+            continue
+        message = payload.get("message") or {}
+        role = str(message.get("role") or "")
+        if role == "user":
+            text_parts = []
+            for item in list(message.get("content") or []):
+                if item.get("type") == "text":
+                    text_parts.append(str(item.get("text") or ""))
+            question = _extract_user_question_from_transcript_text(
+                "\n".join(text_parts)
+            )
+            current_user = {
+                "question": question,
+                "timestamp": str(payload.get("timestamp") or ""),
+                "replied": False,
+            }
+            turns.append(current_user)
+            continue
+        if (
+            role == "assistant"
+            and current_user
+            and _assistant_message_has_visible_reply(message)
+        ):
+            current_user["replied"] = True
+    return turns
+
+
+def _latest_session_user_turn(session_file: Path) -> dict[str, Any] | None:
+    turns = _iter_session_user_turns(session_file)
+    return turns[-1] if turns else None
+
+
+def _session_question_has_visible_reply(session_file: Path, question: str | None) -> bool:
+    target = normalize_task_question(question)
+    if not target or target == "未知任务":
+        return False
+    for turn in _iter_session_user_turns(session_file):
+        if normalize_task_question(turn.get("question")) == target and bool(
+            turn.get("replied")
+        ):
+            return True
+    return False
+
+
+def recover_untracked_session_tasks(
+    session_store_path: Path | None = None,
+) -> list[str]:
+    session_store = session_store_path or SESSION_STORE_FILE
+    if not session_store.exists():
+        return []
+    try:
+        sessions_payload = safe_read_json_file(session_store, [])
+    except Exception:
+        return []
+
+    recovered: list[str] = []
+    sessions_map = sessions_payload
+    if isinstance(sessions_payload, dict) and isinstance(
+        sessions_payload.get("sessions"), dict
+    ):
+        sessions_map = sessions_payload.get("sessions") or {}
+    if not isinstance(sessions_map, dict):
+        return recovered
+
+    for session_key, session in sessions_map.items():
+        if not isinstance(session, dict):
+            continue
+        if not str(session_key or "").startswith("agent:main:feishu:"):
+            continue
+        if str(session.get("status") or "") != "running":
+            continue
+        session_file = Path(str(session.get("sessionFile") or ""))
+        latest_user = _latest_session_user_turn(session_file)
+        if not latest_user:
+            continue
+
+        # 如果最近一条用户消息已经拿到主脑可见回复，则不要再从会话转录里恢复成未闭环任务。
+        # 否则 Guardian 会把已答复的普通问答反复重建为 running/blocked，形成“追踪 3 次未闭环”噪音。
+        if bool(latest_user.get("replied")):
+            continue
+
+        question = normalize_task_question(latest_user.get("question"))
+        if question == "未知任务":
+            continue
+        try:
+            ts = datetime.fromisoformat(
+                str(latest_user.get("timestamp") or "").replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            ts = float(session.get("updatedAt") or time.time()) / 1000.0
+        ts_int = int(ts)
+
+        existing = STORE.get_latest_task_for_session(str(session_key))
+        if existing:
+            existing_question = normalize_task_question(
+                existing.get("question") or existing.get("last_user_message")
+            )
+            existing_updated = int(
+                existing.get("updated_at") or existing.get("created_at") or 0
+            )
+            existing_status = str(existing.get("status") or "")
+            # 同一会话同一问题，不要重复恢复出第二个任务。
+            if existing_question == question and existing_status in {"running", "background", "blocked", "completed"}:
+                continue
+            if existing_question == question and existing_updated >= ts_int:
+                continue
+
+        task_id = build_task_id(str(session_key), str(ts_int))
+        task = {
+            "task_id": task_id,
+            "session_key": str(session_key),
+            "env_id": active_env_id(),
+            "channel": infer_task_channel(str(session_key)),
+            "status": "running",
+            "current_stage": "处理中",
+            "question": question,
+            "last_user_message": question,
+            "started_at": ts_int,
+            "last_progress_at": ts_int,
+            "created_at": ts_int,
+            "updated_at": ts_int,
+            "latest_receipt": {},
+        }
+        if int(CONFIG.get("TASK_REGISTRY_MAX_ACTIVE", 1)) <= 1:
+            STORE.background_other_tasks_for_session(str(session_key), task_id)
+        STORE.upsert_task(task)
+        STORE.record_task_event(
+            task_id,
+            "dispatch_started",
+            {
+                "session_key": str(session_key),
+                "question": question,
+                "channel": task["channel"],
+                "timestamp": str(latest_user.get("timestamp") or ts_int),
+                "env_id": active_env_id(),
+                "source": "session_transcript_recovery",
+            },
+        )
+        STORE.repair_task_identity(task_id)
+        recovered.append(task_id)
+
+    if recovered:
+        write_task_registry_snapshot()
+    return recovered
+
+
+def load_openclaw_session_record(
+    session_key: str, session_store_path: Path | None = None
+) -> dict[str, Any] | None:
+    if not session_key:
+        return None
+    session_store = session_store_path or SESSION_STORE_FILE
+    if not session_store.exists():
+        return None
+    try:
+        sessions_payload = safe_read_json_file(session_store, [])
+    except Exception:
+        return None
+    sessions_map = sessions_payload
+    if isinstance(sessions_payload, dict) and isinstance(
+        sessions_payload.get("sessions"), dict
+    ):
+        sessions_map = sessions_payload.get("sessions") or {}
+    if not isinstance(sessions_map, dict):
+        return None
+    session = sessions_map.get(session_key)
+    return session if isinstance(session, dict) else None
+
+
+def should_defer_guardian_followup(session_key: str, message: str) -> bool:
+    if not session_key or not message.startswith("GUARDIAN_"):
+        return False
+    session = load_openclaw_session_record(session_key)
+    if not session:
+        return False
+    if str(session.get("status") or "") != "running":
+        return False
+    session_file = Path(str(session.get("sessionFile") or ""))
+    latest_user = _latest_session_user_turn(session_file)
+    if not latest_user:
+        return False
+    question = normalize_task_question(latest_user.get("question"))
+    if question.startswith("GUARDIAN_"):
+        return False
+    try:
+        latest_ts = datetime.fromisoformat(
+            str(latest_user.get("timestamp") or "").replace("Z", "+00:00")
+        ).timestamp()
+    except Exception:
+        latest_ts = float(session.get("updatedAt") or 0) / 1000.0
+    grace_seconds = int(CONFIG.get("GUARDIAN_FOLLOWUP_ACTIVE_SESSION_GRACE", 900))
+    if grace_seconds <= 0:
+        return False
+    return (time.time() - latest_ts) < grace_seconds
 
 
 def extract_pipeline_marker(line: str) -> str | None:
@@ -1314,14 +1810,14 @@ def extract_pipeline_marker(line: str) -> str | None:
 
 def extract_pipeline_receipt(line: str) -> dict[str, str] | None:
     """Extract and validate a structured PIPELINE_RECEIPT payload from runtime logs.
-    
+
     Supports two formats:
     1. Old format: PIPELINE_RECEIPT: agent=... | phase=... | action=...
     2. JSON format: **PIPELINE_RECEIPT** followed by JSON block with "type": "PIPELINE_RECEIPT"
     """
     marker = "PIPELINE_RECEIPT:"
     json_marker = "**PIPELINE_RECEIPT**"
-    
+
     # Try JSON format first
     if json_marker in line:
         # Look for JSON block after the marker
@@ -1332,6 +1828,7 @@ def extract_pipeline_receipt(line: str) -> dict[str, str] | None:
                 json_str = line[json_start:]
                 # Try to parse as JSON
                 import json
+
                 data = json.loads(json_str)
                 if isinstance(data, dict) and data.get("type") == "PIPELINE_RECEIPT":
                     receipt = {
@@ -1346,7 +1843,7 @@ def extract_pipeline_receipt(line: str) -> dict[str, str] | None:
                     return normalize_pipeline_receipt(receipt, timestamp=ts_raw)
         except (json.JSONDecodeError, ValueError):
             pass
-    
+
     # Fall back to old format
     if marker not in line:
         return None
@@ -1518,6 +2015,23 @@ def blocked_reason_label(reason: str) -> str:
         "unknown": "内部执行异常",
     }
     return mapping.get(reason, "内部执行异常")
+
+
+def is_internal_system_problem(reason: str) -> bool:
+    """Whether this blocked reason is a watchdog/system-side issue that should not be escalated to the owner."""
+    value = str(reason or "").strip()
+    return value in {
+        "missing_pipeline_receipt",
+        "background_root_task_missing",
+        "control_followup_failed",
+        "blocked_control_followup_failed",
+        "session_lock",
+        "model_auth",
+        "model_unavailable",
+        "model_pool_failed",
+        "timeout",
+        "unknown",
+    }
 
 
 def format_duration_label(seconds: int) -> str:
@@ -1775,6 +2289,8 @@ def write_task_registry_snapshot() -> None:
         if lightweight_export
         else sync_shared_context_watcher_tasks(current_spec)
     )
+    if not watcher_summary:
+        watcher_summary = sync_shared_context_watcher_tasks(current_spec)
     restart_events = STORE.load_runtime_value(f"restart_events:{env_id}", [])
     if not isinstance(restart_events, list):
         restart_events = []
@@ -1890,13 +2406,32 @@ def write_task_registry_snapshot() -> None:
             "current_stage": facts_current.get("current_stage")
             if facts_current
             else None,
-            # 核心事实：execution_state, delivery_state, next_action
-            "execution_state": control_data.get("control_state") or "unknown",
-            "delivery_state": control_data.get("protocol", {}).get("final")
-            or "missing",
+            # 核心事实：msg_state, delivery_state, next_action
+            "msg_state": (facts_current or {})
+            .get("core_supervision", {})
+            .get("msg_state")
+            or (facts_current or {}).get("core_supervision", {}).get("workflow_state")
+            or "open",
+            "execution_state": (facts_current or {})
+            .get("core_supervision", {})
+            .get("msg_state")
+            or (facts_current or {}).get("core_supervision", {}).get("workflow_state")
+            or "open",
+            "delivery_state": (facts_current or {})
+            .get("core_supervision", {})
+            .get("delivery_state")
+            or "undelivered",
+            "delivery_attempts": int(
+                ((facts_current or {}).get("current_delivery_attempt") or {}).get(
+                    "attempt_no"
+                )
+                or 0
+            ),
             "next_action": control_data.get("next_action") or "none",
             "next_actor": control_data.get("next_actor") or "",
-            "is_closed": control_data.get("control_state") == "completed_verified",
+            "is_closed": bool(
+                (facts_current or {}).get("core_supervision", {}).get("is_terminal")
+            ),
             # 保留必要的审计字段
             "approved_summary": control_data.get("approved_summary"),
             "evidence_level": control_data.get("evidence_level"),
@@ -1997,14 +2532,8 @@ def write_task_registry_snapshot() -> None:
                 )
     data_dir = BASE_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "task-registry-summary.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (data_dir / "current-task-facts.json").write_text(
-        json.dumps(facts_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_json_file(data_dir / "task-registry-summary.json", payload)
+    atomic_write_json_file(data_dir / "current-task-facts.json", facts_payload)
     shared_dir = data_dir / "shared-state"
     shared_dir.mkdir(parents=True, exist_ok=True)
     control_plane = STORE.summarize_control_plane(env_id=env_id)
@@ -2276,6 +2805,34 @@ def write_task_registry_snapshot() -> None:
     monitor_dir = env_home / "shared-context" / "monitor-tasks"
     monitor_dir.mkdir(parents=True, exist_ok=True)
     watcher_items = STORE.list_watcher_tasks(env_id=env_id, limit=200)
+
+    def export_watcher_item(item: dict[str, Any]) -> dict[str, Any]:
+        exported = dict(item)
+        payload = dict(exported.get("payload") or {})
+        task_id = str(payload.get("task_id") or exported.get("task_id") or "")
+        question = normalize_task_question(
+            payload.get("question") or exported.get("question")
+        )
+        task_row = STORE.get_task(task_id) if task_id else None
+        task_question = normalize_task_question(
+            (task_row or {}).get("question") or (task_row or {}).get("last_user_message")
+        )
+        if task_question != "未知任务" and (
+            question == "未知任务"
+            or len(task_question) > len(question)
+            or task_question.startswith(question)
+        ):
+            question = task_question
+        if question != "未知任务":
+            exported["question"] = question
+            payload["question"] = question
+        if task_id:
+            exported["task_id"] = task_id
+            payload["task_id"] = task_id
+        exported["payload"] = payload
+        return exported
+
+    watcher_items = [export_watcher_item(item) for item in watcher_items]
     tasks_lines = [json.dumps(item, ensure_ascii=False) for item in watcher_items]
     if not tasks_lines and facts_current:
         tasks_lines = [
@@ -2529,9 +3086,7 @@ def capture_control_plane_learnings(outcomes: list[dict]) -> list[dict]:
         )
         title = f"control_observation:{problem_code}"
         detail = f"task={task_id};control_state={control_state or '-'};action={action};blocked_reason={blocked_reason or '-'}"
-        learning_key = derive_learning_key(
-            "control", env_id, task_id, problem_code
-        )
+        learning_key = derive_learning_key("control", env_id, task_id, problem_code)
         learning = record_learning(
             STORE,
             learning_key=learning_key,
@@ -2660,7 +3215,7 @@ def run_self_evolution_maintenance_cycle(*, dry_run: bool = False) -> dict[str, 
 
     这是自我进化的核心：不只是记录问题，而是主动解决。
     """
-    from self_evolution import run_self_evolution_cycle as _run_cycle
+    from learning_recorder import run_self_evolution_cycle as _run_cycle
 
     result = _run_cycle(BASE_DIR, STORE, recurrence_threshold=10, dry_run=dry_run)
 
@@ -2686,6 +3241,7 @@ def check_heartbeat_and_guardrail() -> dict[str, Any]:
     2. 检测超时任务
     3. 执行 Guardrail 恢复策略
     4. 生成可观测性报告
+    5. Guardrail 硬规则检查
     """
     watcher = get_task_watcher()
     result = watcher.check_all_tasks()
@@ -2717,12 +3273,162 @@ def check_heartbeat_and_guardrail() -> dict[str, Any]:
                         "error",
                     )
 
+    # Guardrail 硬规则检查
+    guardrail_violations = _check_guardrail_hard_rules()
+    result["guardrail_violations"] = guardrail_violations
+
     # 记录健康状态
     health_status = result.get("health_status", "healthy")
     if health_status != "healthy":
         STORE.save_runtime_value("last_degraded_at", int(time.time() * 1000))
 
     return result
+
+
+def _check_guardrail_hard_rules() -> list[dict[str, Any]]:
+    """Guardrail 硬规则检查
+
+    规则：
+    1. 没有 completed/blocked 终态就不能挂成完成
+    2. 没有 visible_completion 就不能算已交付
+    3. 收到回执后 10 分钟内必须转成用户可见反馈
+    """
+    violations = []
+    now = int(time.time())
+
+    # 检查所有 running 任务
+    tasks = STORE.list_tasks(limit=500)
+    for task in tasks:
+        if task.get("status") not in ("running", "blocked"):
+            continue
+
+        task_id = task.get("task_id")
+        control = STORE.derive_task_control_state(task_id)
+        core_supervision = STORE.derive_core_task_supervision(task_id)
+
+        # 规则1：没有终态就不能挂成完成
+        control_state = str(control.get("control_state") or "")
+        if control_state in ("completed_verified", "completed_not_delivered"):
+            # 检查是否真的有终态证据
+            has_terminal_receipt = bool(
+                (control.get("contract") or {}).get("required_receipts")
+            )
+            has_visible_completion = bool(
+                core_supervision.get("visible_completion_seen")
+            )
+            if not has_terminal_receipt and not has_visible_completion:
+                violation = {
+                    "task_id": task_id,
+                    "rule": "no_terminal_state_without_evidence",
+                    "control_state": control_state,
+                    "message": f"任务 {task_id} 状态为 {control_state} 但没有终态证据",
+                }
+                violations.append(violation)
+                # 强制执行：回退状态
+                STORE.update_task_fields(
+                    task_id,
+                    status="blocked",
+                    current_stage="Guardrail 拦截：没有终态证据",
+                    blocked_reason="guardrail_no_terminal_evidence",
+                    updated_at=now,
+                )
+                STORE.record_task_event(
+                    task_id,
+                    "guardrail_enforcement",
+                    {
+                        "rule": "no_terminal_state_without_evidence",
+                        "action": "status_reverted_to_blocked",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+
+        # 规则2：没有 visible_completion 就不能算已交付
+        delivery_state = str(control.get("delivery_state") or "")
+        if delivery_state == "delivered":
+            has_visible_completion = bool(
+                core_supervision.get("visible_completion_seen")
+            )
+            if not has_visible_completion:
+                violation = {
+                    "task_id": task_id,
+                    "rule": "no_delivery_without_visible_completion",
+                    "delivery_state": delivery_state,
+                    "message": f"任务 {task_id} 标记为已送达但没有 visible_completion 事件",
+                }
+                violations.append(violation)
+                # 强制执行：回退 delivery_state
+                STORE.update_task_fields(
+                    task_id,
+                    current_stage="Guardrail 拦截：没有送达证据",
+                    updated_at=now,
+                )
+                STORE.record_task_event(
+                    task_id,
+                    "guardrail_enforcement",
+                    {
+                        "rule": "no_delivery_without_visible_completion",
+                        "action": "delivery_state_reverted",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+
+        # 规则3：收到回执后 10 分钟内必须转成用户可见反馈
+        action = STORE.get_open_control_action(task_id)
+        if action:
+            last_followup = int(action.get("last_followup_at") or 0)
+            action_status = str(action.get("status") or "")
+            if last_followup > 0 and action_status == "sent":
+                minutes_since_followup = (now - last_followup) / 60
+                if minutes_since_followup > 10:
+                    violation = {
+                        "task_id": task_id,
+                        "rule": "no_user_visible_feedback_within_10min",
+                        "minutes_since_followup": minutes_since_followup,
+                        "message": f"任务 {task_id} 回执已发送 {minutes_since_followup:.1f} 分钟但没有用户可见反馈",
+                    }
+                    violations.append(violation)
+                    # 强制执行：创建 followup action
+                    STORE.create_control_action(
+                        task_id,
+                        task.get("env_id", "primary"),
+                        "require_user_visible_feedback",
+                        control_state=control_state,
+                        status="pending",
+                        summary=f"Guardrail 强制：回执发送 {minutes_since_followup:.1f} 分钟后没有用户可见反馈",
+                        details={
+                            "guardrail_triggered": True,
+                            "rule": "no_user_visible_feedback_within_10min",
+                            "minutes_since_followup": minutes_since_followup,
+                        },
+                    )
+                    STORE.record_task_event(
+                        task_id,
+                        "guardrail_enforcement",
+                        {
+                            "rule": "no_user_visible_feedback_within_10min",
+                            "action": "followup_action_created",
+                            "minutes_since_followup": minutes_since_followup,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
+
+    # 记录违规
+    if violations:
+        STORE.save_runtime_value("guardrail_violations", {
+            "ts": now,
+            "count": len(violations),
+            "violations": violations[:20],
+        })
+        log(f"Guardrail 检测到 {len(violations)} 个违规并已强制执行", "WARNING")
+
+        # 发送通知
+        notify(
+            "Guardrail 强制执行",
+            f"检测到 {len(violations)} 个违规并已自动处理",
+            "warning",
+        )
+
+    return violations
 
 
 def record_heartbeat(
@@ -2843,6 +3549,8 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     - 不需要人工干预
     - 自动沉淀、自动改进
     """
+    # 已禁用：旧数据 + 模板化输出导致反复播报旧问题，不是真进化
+    return {"status": "disabled_reason_fake_evolution", "promoted": 0, "reviewed": 0}
     if not CONFIG.get("ENABLE_EVOLUTION_PLANE", True):
         return {"status": "disabled", "promoted": 0, "reviewed": 0}
     now = int(time.time())
@@ -2859,7 +3567,7 @@ def run_reflection_cycle(force: bool = False) -> dict[str, Any]:
     report = generate_daily_evolution_report(STORE, now=now)
 
     # 2. 主动检查并解决重复问题
-    from self_evolution import spawn_reflection_agent
+    from learning_recorder import spawn_reflection_agent
 
     resolution_result = check_and_resolve_learnings(
         STORE,
@@ -2974,7 +3682,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
     last_closed_dispatch: dict[str, Any] | None = None
     touched_task_ids: set[str] = set()
     touched_session_keys: set[str] = set()
-    
+
     # Buffer for multi-line JSON receipts
     json_receipt_buffer: list[str] = []
     in_json_receipt = False
@@ -3008,11 +3716,16 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
 
     def process_json_receipt_buffer() -> None:
         """Process accumulated multi-line JSON receipt."""
-        nonlocal json_receipt_buffer, in_json_receipt, json_receipt_ts_raw, json_receipt_ts
+        nonlocal \
+            json_receipt_buffer, \
+            in_json_receipt, \
+            json_receipt_ts_raw, \
+            json_receipt_ts
         if not json_receipt_buffer:
             return
         try:
             import json
+
             json_str = "\n".join(json_receipt_buffer)
             # Find the JSON object
             json_start = json_str.find("{")
@@ -3021,7 +3734,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 # Find the end of JSON (last closing brace before any markdown)
                 json_end = json_str.rfind("}")
                 if json_end >= 0:
-                    json_str = json_str[:json_end+1]
+                    json_str = json_str[: json_end + 1]
                 data = json.loads(json_str)
                 if isinstance(data, dict) and data.get("type") == "PIPELINE_RECEIPT":
                     receipt = {
@@ -3044,7 +3757,9 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                             elif action == "blocked":
                                 dispatch["status"] = "blocked"
                                 dispatch["current_stage"] = "阻塞"
-                            dispatch["last_progress_at"] = int(json_receipt_ts or time.time())
+                            dispatch["last_progress_at"] = int(
+                                json_receipt_ts or time.time()
+                            )
                             dispatch["updated_at"] = int(json_receipt_ts or time.time())
                             STORE.update_task_fields(
                                 dispatch["task_id"],
@@ -3058,9 +3773,14 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                             STORE.record_task_event(
                                 dispatch["task_id"],
                                 "pipeline_receipt",
-                                {"receipt": receipt, "timestamp": data.get("timestamp", "")},
+                                {
+                                    "receipt": receipt,
+                                    "timestamp": data.get("timestamp", ""),
+                                },
                             )
-                            log(f"已识别 JSON 回执: task_id={receipt.get('task_id')} status={receipt.get('action')}")
+                            log(
+                                f"已识别 JSON 回执: task_id={receipt.get('task_id')} status={receipt.get('action')}"
+                            )
         except Exception as e:
             log(f"解析 JSON 回执失败: {e}", "WARNING")
         finally:
@@ -3076,7 +3796,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
             json_receipt_buffer = []
             json_receipt_ts_raw, json_receipt_ts = parse_runtime_timestamp(line)
             continue
-        
+
         # Check for multi-line JSON receipt end
         if in_json_receipt:
             if "```" in line and json_receipt_buffer:
@@ -3089,7 +3809,7 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 if "}" in line:
                     process_json_receipt_buffer()
             continue
-        
+
         ts_raw, ts = parse_runtime_timestamp(line)
         if ts is None:
             continue
@@ -3112,6 +3832,14 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 or requester_open_id
                 or f"dispatch:{ts_raw}"
             )
+            # 如果这条会话的最新用户消息已经有可见回复，则不要再从日志里重建未闭环任务
+            # 否则会把已答复的普通问答反复重建为 running/blocked，形成“追踪 3 次未闭环”噪音
+            if session_key and session_key.startswith("agent:main:feishu:"):
+                session_rec = load_openclaw_session_record(session_key)
+                if session_rec:
+                    session_file = Path(str(session_rec.get("sessionFile") or ""))
+                    if _session_question_has_visible_reply(session_file, nearest_question):
+                        continue
             existing = STORE.get_latest_task_for_session(session_key)
             touched_session_keys.add(session_key)
             question_text = normalize_task_question(nearest_question)
@@ -3119,6 +3847,14 @@ def sync_runtime_task_registry(lines: list[str]) -> None:
                 question_text = normalize_task_question(
                     existing.get("last_user_message") or existing.get("question", "")
                 )
+            if existing:
+                existing_question = normalize_task_question(
+                    existing.get("last_user_message") or existing.get("question")
+                )
+                existing_status = str(existing.get("status") or "")
+                # 同一会话同一问题，不要重复从 runtime log 建第二个任务。
+                if existing_question == question_text and existing_status in {"running", "background", "blocked", "completed"}:
+                    continue
             existing_contract = (
                 STORE.get_task_contract(existing["task_id"]) if existing else None
             )
@@ -3393,30 +4129,28 @@ def lookup_openclaw_session_id(session_key: str) -> str | None:
 
 def cleanup_stale_session_locks(max_age_seconds: int = 300) -> int:
     """Clean up stale session lock files that are no longer held by any process.
-    
+
     Args:
         max_age_seconds: Lock files older than this are considered stale (default 5 minutes)
-    
+
     Returns:
         Number of lock files cleaned up
     """
     import json
+
     locks_dir = OPENCLAW_HOME / "agents"
     if not locks_dir.exists():
         return 0
-    
+
     cleaned = 0
     now = time.time()
-    
+
     for lock_file in locks_dir.rglob("*.lock"):
         try:
             # First check if any process is actually holding the lock using lsof
             try:
                 result = subprocess.run(
-                    ["lsof", str(lock_file)],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
+                    ["lsof", str(lock_file)], capture_output=True, text=True, timeout=5
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     # Some process is holding the lock, don't clean
@@ -3424,33 +4158,36 @@ def cleanup_stale_session_locks(max_age_seconds: int = 300) -> int:
             except Exception:
                 # lsof failed, fall back to other checks
                 pass
-            
+
             # Read lock file to get PID and creation time
             content = lock_file.read_text()
             lock_data = json.loads(content) if content.strip().startswith("{") else {}
-            
+
             # Check if lock is stale by age
             created_at = lock_data.get("createdAt", "")
             if created_at:
                 # Parse ISO timestamp
                 from datetime import datetime
+
                 try:
-                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    created_dt = datetime.fromisoformat(
+                        created_at.replace("Z", "+00:00")
+                    )
                     created_ts = created_dt.timestamp()
                     if now - created_ts < max_age_seconds:
                         # Lock is not old enough, skip
                         continue
                 except Exception:
                     pass
-            
+
             # Clean up stale lock (no process holding it AND old enough)
             lock_file.unlink()
             log(f"Cleaned up stale session lock: {lock_file}")
             cleaned += 1
-            
+
         except Exception as e:
             log(f"Error checking lock file {lock_file}: {e}", "WARNING")
-    
+
     return cleaned
 
 
@@ -3460,50 +4197,69 @@ def send_guardian_followup(
     """Send a marked system follow-up into an existing OpenClaw session."""
     # Clean up stale session locks before attempting to send
     cleanup_stale_session_locks(max_age_seconds=300)
-    
-    # Check if session has recent activity (within 60 seconds) - if so, skip followup
-    # because the agent is already actively processing
-    cache = STORE.load_runtime_value("openclaw_session_cache", {})
-    session_info = cache.get(session_key, {})
-    # Ensure session_info is a dict, not a string
-    if not isinstance(session_info, dict):
-        session_info = {}
-    last_activity = int(session_info.get("last_activity", 0) or 0)
-    now = int(time.time())
-    if last_activity > 0 and now - last_activity < 60:
-        log(f"会话正在活跃处理中，跳过追问: {session_key} (last_activity={last_activity}, age={now - last_activity}s)")
-        return True, "session_active"  # Treat as success, no need to followup
-    
+
+    if should_defer_guardian_followup(session_key, message):
+        log(f"守护追问延后，当前会话存在新近用户消息: {session_key}")
+        return True, "session_active"
+
     session_id = lookup_openclaw_session_id(session_key)
     if not session_id:
         log(f"守护追问失败，未找到会话: {session_key}", "ERROR")
         return False, "unknown"
 
+    channel, conversation_type, target = _parse_session_delivery_target(session_key)
+    configured_model = str(
+        CONFIG.get("GUARDIAN_FOLLOWUP_MODEL", "ollama/qwen3.5:35b")
+    ).strip()
+    provider_override = ""
+    model_override = configured_model
+    if "/" in configured_model:
+        provider_override, model_override = configured_model.split("/", 1)
+
+    params: dict[str, Any] = {
+        "message": message,
+        "sessionId": session_id,
+        "sessionKey": session_key,
+        "channel": channel or "feishu",
+        "timeout": int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120)),
+        "idempotencyKey": (f"guardian-followup-{session_id}-{int(time.time() * 1000)}"),
+        "provider": provider_override or None,
+        "model": model_override or None,
+    }
+
+    if deliver and session_key:
+        # 检查是否配置了群聊目标
+        guardian_target = str(CONFIG.get("GUARDIAN_MESSAGE_TARGET", "dm")).strip()
+        feishu_group_id = str(CONFIG.get("FEISHU_GROUP_CHAT_ID", "")).strip()
+
+        if guardian_target == "group" and feishu_group_id:
+            # 发送到群聊
+            params["replyChannel"] = "feishu"
+            params["replyTo"] = f"chat:{feishu_group_id}"
+        elif (
+            channel == "feishu"
+            and conversation_type == "direct"
+            and target.startswith("ou_")
+        ):
+            # 发送到私信（旧逻辑）
+            params["replyChannel"] = "feishu"
+            params["replyTo"] = f"user:{target}"
+        else:
+            params["deliver"] = True
+    elif deliver:
+        params["deliver"] = True
+
     args = [
         "openclaw",
+        "gateway",
+        "call",
         "agent",
-        "--session-id",
-        session_id,
-        "--message",
-        message,
         "--json",
-        "--timeout",
-        str(int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120))),
-        "--channel",
-        "feishu",  # 指定通道，避免多通道配置冲突
+        "--params",
+        json.dumps(
+            {k: v for k, v in params.items() if v is not None}, ensure_ascii=False
+        ),
     ]
-
-    # 从 session_key 中提取 open_id 用于 --reply-to
-    # session_key 格式: agent:main:feishu:direct:ou_xxx
-    if deliver and session_key:
-        parts = session_key.split(":")
-        if len(parts) >= 5 and parts[-1].startswith("ou_"):
-            open_id = parts[-1]
-            args.extend(["--reply-channel", "feishu", "--reply-to", f"user:{open_id}"])
-        else:
-            args.append("--deliver")
-    elif deliver:
-        args.append("--deliver")
 
     timeout = int(CONFIG.get("GUARDIAN_FOLLOWUP_TIMEOUT", 120)) + 30
     code, stdout, stderr = run_args(args, timeout=timeout, env=openclaw_runtime_env())
@@ -3533,6 +4289,406 @@ def send_feishu_progress_push(open_id: str, message: str) -> bool:
         return True
     log(f"进度推送失败({target}): {stderr or 'unknown error'}", "ERROR")
     return False
+
+
+def _parse_session_delivery_target(session_key: str) -> tuple[str, str, str]:
+    """Return (channel, conversation_type, target) from a session key."""
+    parts = str(session_key or "").split(":")
+    if len(parts) < 5:
+        return "feishu", "", ""
+    return str(parts[2] or "feishu"), str(parts[3] or ""), str(parts[4] or "")
+
+
+def _gateway_recovery_followup_id(root_task_id: str) -> str:
+    value = str(root_task_id or "").strip() or "unknown-root"
+    return f"guardian:gateway-restart:{value}"
+
+
+def mark_gateway_restart_recovery_window(recovered_at: int | None = None) -> None:
+    now = int(recovered_at or time.time())
+    STORE.save_runtime_value(
+        "gateway_restart_recovery_tracker",
+        {
+            "active": True,
+            "recovered_at": now,
+            "last_cycle_at": 0,
+            "pending_tasks": 0,
+            "updated_at": now,
+        },
+    )
+
+
+def _is_terminal_or_completed_legacy_task(task: dict[str, Any]) -> bool:
+    status = str(task.get("status") or "").strip()
+    stage = str(task.get("current_stage") or "").strip().lower()
+    completed_at = int(task.get("completed_at") or 0)
+    blocked_reason = str(task.get("blocked_reason") or "").strip()
+    if status in {"completed", "cancelled", "no_reply"}:
+        return True
+    if completed_at > 0 and (
+        "completed" in stage
+        or stage.startswith("guardian_recovery:completed")
+        or blocked_reason == "missing_pipeline_receipt"
+    ):
+        return True
+    return False
+
+
+def _report_unclosed_task_to_owner_after_gateway_restart(
+    task: dict[str, Any],
+    *,
+    attempts: int,
+    total: int,
+    idle: int,
+    workflow_state: str,
+    followup_id: str,
+    now_ts: int,
+) -> bool:
+    if _is_terminal_or_completed_legacy_task(task):
+        return False
+    session_key = str(task.get("session_key") or "")
+    question = str(task.get("question") or task.get("last_user_message") or "未知任务")
+    stage = str(task.get("current_stage") or workflow_state or "处理中")
+
+    # 分析原因
+    blocked_reason = task.get("blocked_reason") or ""
+    latest_receipt = task.get("latest_receipt_json") or {}
+
+    # 判断主脑响应类型
+    if blocked_reason == "missing_pipeline_receipt":
+        reason = "主脑已回复但未发送结构化回执"
+        need_owner = "否（系统问题）"
+        suggestion = "等待系统自动修复回执协议问题"
+        # 系统问题不再打扰主人
+        return False
+    elif blocked_reason and is_internal_system_problem(blocked_reason):
+        return False
+    elif blocked_reason:
+        reason = f"阻塞原因：{blocked_reason}"
+        need_owner = "是"
+        suggestion = "请主人确认是否继续推进，或提供更多信息"
+    else:
+        reason = "主脑未响应追问"
+        need_owner = "是"
+        suggestion = "请主人确认任务是否仍需推进"
+
+    # 获取主脑最后响应
+    last_response = (
+        task.get("last_agent_response") or task.get("last_main_response") or "无记录"
+    )
+    if len(str(last_response)) > 100:
+        last_response = str(last_response)[:100] + "..."
+
+    message = (
+        f"主人，任务“{question[:50]}”追踪 {attempts} 次未闭环。\n"
+        f"原因：{reason}\n"
+        f"主脑最后响应：{last_response}\n"
+        f"需要主人拍板：{need_owner}\n"
+        f"建议操作：{suggestion}\n"
+        f"阶段：{stage}，静默 {format_duration_label(idle)}"
+    )
+
+    delivered = False
+    channel, conversation_type, target = _parse_session_delivery_target(session_key)
+    if (
+        channel == "feishu"
+        and conversation_type == "direct"
+        and target.startswith("ou_")
+    ):
+        delivered = send_feishu_progress_push(target, message)
+    if not delivered and session_key:
+        delivered, _ = send_guardian_followup(
+            session_key,
+            f"GUARDIAN_OWNER_REPORT: {message}",
+        )
+    if not delivered:
+        notify("未闭环任务告警", message, "warning")
+
+    STORE.record_task_event(
+        task["task_id"],
+        "gateway_restart_recovery_escalated",
+        {
+            "attempts": attempts,
+            "session_key": session_key,
+            "workflow_state": workflow_state,
+            "delivery_channel": channel,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
+    STORE.update_followup(
+        followup_id,
+        current_state="escalated",
+        updated_at=now_ts,
+        metadata_updates={
+            "owner_reported_at": now_ts,
+            "summary": message,
+            "attempts": attempts,
+            "gateway_restart_attempts": attempts,
+            "last_followup_at": now_ts,
+            "last_gateway_restart_followup_at": now_ts,
+        },
+    )
+    record_change_log(
+        "anomaly",
+        "Gateway 重启后三次追踪未闭环，已上报主人",
+        {
+            "task_id": task["task_id"],
+            "question": question,
+            "attempts": attempts,
+            "workflow_state": workflow_state,
+            "idle": idle,
+            "duration": total,
+        },
+    )
+    return delivered
+
+
+def continue_gateway_restart_recovery_chase(
+    now_ts: int | None = None,
+) -> list[dict[str, Any]]:
+    tracker = STORE.load_runtime_value("gateway_restart_recovery_tracker", {})
+    if not isinstance(tracker, dict) or not tracker.get("active"):
+        return []
+
+    now_value = int(now_ts or time.time())
+    recovered_at = int(tracker.get("recovered_at") or 0)
+    env_id = current_env_spec()["id"]
+    max_attempts = max(3, int(CONFIG.get("GUARDIAN_GATEWAY_RECOVERY_MAX_ATTEMPTS", 3)))
+    cooldown = int(CONFIG.get("GUARDIAN_GATEWAY_RECOVERY_FOLLOWUP_COOLDOWN", 300))
+    outcomes: list[dict[str, Any]] = []
+    pending_tasks = 0
+
+    for task in STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100))):
+        if task.get("env_id") != env_id:
+            continue
+
+        started_at = int(task.get("started_at") or task.get("created_at") or 0)
+        updated_at = int(task.get("updated_at") or 0)
+        if recovered_at and started_at > recovered_at and updated_at > recovered_at:
+            continue
+
+        core = STORE.get_core_closure_snapshot_for_task(
+            task["task_id"], allow_legacy_projection=True
+        )
+        if not isinstance(core, dict):
+            core = {}
+
+        workflow_state = str(
+            core.get("msg_state") or core.get("workflow_state") or "open"
+        )
+        delivery_state = str(core.get("delivery_state") or "undelivered")
+        has_core_projection = bool(core.get("has_core_projection"))
+        task_marked_terminal = bool(task.get("completed_at")) or str(
+            task.get("status") or ""
+        ) in {
+            "completed",
+            "cancelled",
+        }
+        is_terminal = bool(core.get("is_terminal")) or task_marked_terminal
+        if not has_core_projection:
+            is_terminal = task_marked_terminal
+
+        root_task_id = str(core.get("root_task_id") or f"legacy-root:{task['task_id']}")
+        followup_id = _gateway_recovery_followup_id(root_task_id)
+        existing = STORE.get_followup(followup_id)
+
+        if is_terminal:
+            if existing and str(existing.get("current_state") or "") not in {
+                "resolved",
+                "closed",
+            }:
+                STORE.update_followup(
+                    followup_id,
+                    current_state="resolved",
+                    resolved_at=now_value,
+                    updated_at=now_value,
+                    metadata_updates={
+                        "resolved_by": "workflow_closed",
+                        "resolved_workflow_state": workflow_state
+                        or str(task.get("status") or ""),
+                    },
+                )
+            continue
+
+        pending_tasks += 1
+        idle = max(
+            0,
+            now_value
+            - int(task.get("last_progress_at") or task.get("updated_at") or now_value),
+        )
+        total = max(0, now_value - int(task.get("started_at") or now_value))
+        question = str(
+            task.get("question") or task.get("last_user_message") or "未知任务"
+        )
+
+        if not existing:
+            STORE.upsert_followup(
+                {
+                    "followup_id": followup_id,
+                    "root_task_id": root_task_id,
+                    "workflow_run_id": str(
+                        (core.get("current_workflow_run") or {}).get("workflow_run_id")
+                        or ""
+                    ),
+                    "followup_type": "gateway_restart_recovery",
+                    "trigger_reason": "gateway_restart_unclosed_task",
+                    "current_state": "open",
+                    "suggested_action": "resume_and_report_progress",
+                    "created_by": "guardian",
+                    "created_at": now_value,
+                    "updated_at": now_value,
+                    "metadata": {
+                        "source": "guardian_gateway_recovery",
+                        "task_id": task["task_id"],
+                        "session_key": str(task.get("session_key") or ""),
+                        "question": question,
+                        "summary": "Gateway 重启后检测到任务未闭环，继续追踪。",
+                        "gateway_restart_attempts": 0,
+                        "last_gateway_restart_followup_at": 0,
+                        "owner_reported_at": 0,
+                        "recovered_at": recovered_at,
+                        "attempts": 0,
+                    },
+                }
+            )
+            existing = STORE.get_followup(followup_id)
+
+        metadata = dict((existing or {}).get("metadata") or {})
+        attempts = int(
+            metadata.get("gateway_restart_attempts") or metadata.get("attempts") or 0
+        )
+        last_followup_at = int(
+            metadata.get("last_gateway_restart_followup_at")
+            or metadata.get("last_followup_at")
+            or 0
+        )
+        owner_reported_at = int(metadata.get("owner_reported_at") or 0)
+        if owner_reported_at:
+            continue
+
+        if attempts >= max_attempts:
+            if last_followup_at and now_value - last_followup_at < cooldown:
+                continue
+            _report_unclosed_task_to_owner_after_gateway_restart(
+                task,
+                attempts=attempts,
+                total=total,
+                idle=idle,
+                workflow_state=workflow_state or str(task.get("status") or ""),
+                followup_id=followup_id,
+                now_ts=now_value,
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "owner_reported",
+                    "attempts": attempts,
+                }
+            )
+            continue
+
+        if last_followup_at and now_value - last_followup_at < cooldown:
+            continue
+
+        recovery_message = (
+            "GUARDIAN_GATEWAY_RECOVERY: 这是 Gateway 重启后的未闭环任务恢复追踪。"
+            "请不要创建新任务。"
+            f"当前任务={question}；当前阶段={task.get('current_stage') or workflow_state or '处理中'}；"
+            f"已静默={format_duration_label(idle)}；累计运行={format_duration_label(total)}。"
+            "请继续当前任务，并明确同步当前进展或阻塞原因。"
+        )
+        ok, error_kind = send_guardian_followup(
+            str(task.get("session_key") or ""), recovery_message
+        )
+        if ok and error_kind == "session_active":
+            STORE.update_followup(
+                followup_id,
+                updated_at=now_value,
+                metadata_updates={
+                    "last_session_active_at": now_value,
+                    "summary": "会话当前活跃，等待当前处理链先自行收口。",
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "session_active",
+                    "attempts": attempts,
+                }
+            )
+            continue
+
+        next_attempts = attempts + 1
+        STORE.update_followup(
+            followup_id,
+            current_state="open",
+            updated_at=now_value,
+            metadata_updates={
+                "gateway_restart_attempts": next_attempts,
+                "attempts": next_attempts,
+                "last_gateway_restart_followup_at": now_value,
+                "last_followup_at": now_value,
+                "last_error": error_kind or "",
+                "summary": "Gateway 重启后继续追踪未闭环任务。",
+            },
+        )
+        STORE.record_task_event(
+            task["task_id"],
+            "gateway_restart_recovery_followup",
+            {
+                "attempt": next_attempts,
+                "ok": ok,
+                "error_kind": error_kind or "",
+                "workflow_state": workflow_state,
+                "timestamp": datetime.now().isoformat(),
+            },
+        )
+        record_change_log(
+            "pipeline",
+            "Gateway 重启后继续追踪未闭环任务",
+            {
+                "task_id": task["task_id"],
+                "question": question,
+                "attempt": next_attempts,
+                "ok": ok,
+                "error_kind": error_kind or "",
+                "workflow_state": workflow_state,
+                "idle": idle,
+                "duration": total,
+            },
+        )
+        action = "followup_sent" if ok else "followup_failed"
+        if not ok and next_attempts >= max_attempts:
+            _report_unclosed_task_to_owner_after_gateway_restart(
+                task,
+                attempts=next_attempts,
+                total=total,
+                idle=idle,
+                workflow_state=workflow_state or str(task.get("status") or ""),
+                followup_id=followup_id,
+                now_ts=now_value,
+            )
+            action = "owner_reported"
+        outcomes.append(
+            {
+                "task_id": task["task_id"],
+                "action": action,
+                "attempts": next_attempts,
+                "error_kind": error_kind or "",
+            }
+        )
+
+    tracker["last_cycle_at"] = now_value
+    tracker["pending_tasks"] = pending_tasks
+    tracker["updated_at"] = now_value
+    tracker["active"] = (
+        pending_tasks > 0
+        and any(item.get("action") not in {"owner_reported"} for item in outcomes)
+        if outcomes
+        else pending_tasks > 0
+    )
+    STORE.save_runtime_value("gateway_restart_recovery_tracker", tracker)
+    return outcomes
 
 
 def check_session_has_response(session_key: str, since_timestamp: int) -> bool:
@@ -3616,7 +4772,11 @@ def deliver_guardian_progress_update(
             "WARNING",
         )
 
-    if open_id and send_feishu_progress_push(open_id, fallback_message):
+    if (
+        open_id
+        and not is_internal_system_problem(blocked_reason)
+        and send_feishu_progress_push(open_id, fallback_message)
+    ):
         return "feishu", blocked_reason
     return None, blocked_reason
 
@@ -4312,7 +5472,11 @@ def push_runtime_progress_updates() -> list[dict]:
                 f"已静默 {format_duration_label(idle)}，累计运行 {format_duration_label(duration)}。"
                 "系统已尝试自动恢复；若后续仍无结果，建议重新发起该任务。"
             )
-            if open_id and send_feishu_progress_push(open_id, blocked_message):
+            if (
+                open_id
+                and not is_internal_system_problem(blocked_reason)
+                and send_feishu_progress_push(open_id, blocked_message)
+            ):
                 attach_guardian_progress_fact(
                     session_key,
                     event_type="guardian_blocked_notice",
@@ -4527,9 +5691,13 @@ def enforce_task_registry_control_plane() -> list[dict]:
     cooldown = int(CONFIG.get("TASK_CONTROL_FOLLOWUP_COOLDOWN", 300))
     max_attempts = max(1, int(CONFIG.get("TASK_CONTROL_MAX_ATTEMPTS", 2)))
     intrusive_control = True
+    watcher_summary = STORE.load_runtime_value(f"watcher_summary:{env_id}", {})
+    direct_watcher_signal = _load_watcher_signal_direct()
+    if isinstance(watcher_summary, dict) and direct_watcher_signal:
+        watcher_summary = {**watcher_summary, "watcher_signal": direct_watcher_signal}
     outcomes: list[dict] = []
 
-    for task in STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 100))):
+    for task in STORE.list_tasks(limit=int(CONFIG.get("TASK_REGISTRY_RETENTION", 500))):
         if task.get("env_id") != env_id:
             continue
 
@@ -4543,7 +5711,14 @@ def enforce_task_registry_control_plane() -> list[dict]:
         # Ensure core_supervision is a dict, not a string
         if not isinstance(core_supervision, dict):
             core_supervision = {}
-        workflow_state = str(core.get("workflow_state") or "")
+        workflow_state = str(
+            core.get("msg_state") or core.get("workflow_state") or "open"
+        )
+        delivery_state = str(
+            core_supervision.get("delivery_state")
+            or core.get("delivery_state")
+            or "undelivered"
+        )
         root_task_id = str((core.get("root_task") or {}).get("root_task_id") or "")
         native_core_task = (
             core_supervision.get("truth_level") == "core_projection"
@@ -4552,16 +5727,21 @@ def enforce_task_registry_control_plane() -> list[dict]:
         )
         if (
             native_core_task
-            and workflow_state
-            in {"accepted", "routed", "queued", "started", "completed"}
+            and workflow_state in {"open", "completed"}
             and not core_supervision.get("needs_followup")
             and not core_supervision.get("is_blocked")
             and not core_supervision.get("is_delivery_pending")
         ):
             continue
-        if workflow_state in {"delivered", "failed", "cancelled", "dlq"}:
+        if workflow_state in {"completed", "failed", "blocked"} and delivery_state in {
+            "delivered",
+            "owner_escalated",
+        }:
             continue
-        if workflow_state in {"delivery_pending"}:
+        if (
+            workflow_state in {"completed", "failed", "blocked"}
+            and delivery_state == "undelivered"
+        ):
             continue
 
         control = STORE.derive_task_control_state(task["task_id"])
@@ -4584,6 +5764,35 @@ def enforce_task_registry_control_plane() -> list[dict]:
             bool(recovery) and next_action == "manual_or_session_recovery"
         )
 
+        # 对主脑 Feishu 会话：如果最近一条用户消息已经拿到主脑可见回复，
+        # 则更早的普通问答任务不应再继续留在 running/background/blocked。
+        # 否则它们会在 background 后再次落到 background_root_task_missing，形成旧任务噪音。
+        session_key = str(task.get("session_key") or "")
+        if session_key.startswith("agent:main:feishu:"):
+            session_rec = load_openclaw_session_record(session_key)
+            if session_rec:
+                session_file = Path(str(session_rec.get("sessionFile") or ""))
+                task_question = normalize_task_question(
+                    task.get("question") or task.get("last_user_message")
+                )
+                if _session_question_has_visible_reply(session_file, task_question):
+                    STORE.update_task_fields(
+                        task["task_id"],
+                        status="completed",
+                        current_stage="已完成",
+                        blocked_reason="",
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                    outcomes.append(
+                        {
+                            "task_id": task["task_id"],
+                            "action": "completed_answered_task",
+                            "control_state": control_state,
+                        }
+                    )
+                    continue
+
         # P0 修复：不再只检查 required_receipts，而是检查 control_state
         # 即使是 single_agent 合同，如果 control_state 是 received_only 且 idle 超过阈值，也应该 blocked
         has_required_receipts = bool(contract.get("required_receipts") or [])
@@ -4605,9 +5814,12 @@ def enforce_task_registry_control_plane() -> list[dict]:
             or bool(core_supervision.get("needs_followup"))
             or bool(core_supervision.get("is_blocked"))
         )
+        watcher_signal = _watcher_signal_needs_action(watcher_summary, task["task_id"])
 
         if not has_required_receipts and not needs_control_action:
-            continue
+            # 即使 next_action=none，如果有 watcher 信号，也要处理
+            if not watcher_signal:
+                continue
 
         idle = max(
             0, now - int(task.get("last_progress_at") or task.get("updated_at") or now)
@@ -4643,7 +5855,99 @@ def enforce_task_registry_control_plane() -> list[dict]:
 
         attempts = int((action or {}).get("attempts", 0))
         last_followup_at = int((action or {}).get("last_followup_at", 0))
+        watcher_alert = _watcher_alert_for_task(watcher_summary, task["task_id"])
         phase = _infer_heartbeat_phase_for_task(task)
+        if watcher_signal.get("needs_delivery_retry"):
+            if not action_id:
+                # 即使 reconcile 返回 None，也强制创建一个新 action
+                STORE.create_control_action(
+                    task["task_id"],
+                    env_id,
+                    "delivery_retry",
+                    control_state=control_state,
+                    status="pending",
+                    summary="Watcher 检测到完成但未送达，已触发 delivery retry。",
+                    details={"watcher_signal": watcher_signal, "watcher_triggered": True, "delivery_followup": True},
+                )
+                action = STORE.get_open_control_action(task["task_id"]) or {}
+                action_id = int(action.get("id") or 0)
+            if action_id:
+                details = dict(action.get("details") or {})
+                details["watcher_signal"] = watcher_signal
+                details["delivery_followup"] = True
+                STORE.update_control_action(
+                    action_id,
+                    status="pending",
+                    attempts=attempts + 1,
+                    last_followup_at=now,
+                    summary="Watcher 检测到完成但未送达，已触发 delivery retry。",
+                    control_state=control_state,
+                    details=details,
+                )
+                STORE.record_task_event(
+                    task["task_id"],
+                    "delivery_retry_triggered_by_watcher",
+                    {
+                        "reason": watcher_signal.get("reason"),
+                        "ts": watcher_signal.get("ts"),
+                        "control_state": control_state,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "delivery_retry_by_watcher",
+                        "control_state": control_state,
+                    }
+                )
+                _clear_watcher_signal_if_processed(watcher_summary)
+                continue
+        if watcher_signal.get("needs_receipt_or_block"):
+            if not action_id:
+                # 即使 reconcile 返回 None，也强制创建一个新 action
+                STORE.create_control_action(
+                    task["task_id"],
+                    env_id,
+                    "require_receipt_or_block",
+                    control_state=control_state,
+                    status="pending",
+                    summary="Watcher 检测到缺少回执，已触发 receipt 追证。",
+                    details={"watcher_signal": watcher_signal, "watcher_triggered": True},
+                )
+                action = STORE.get_open_control_action(task["task_id"]) or {}
+                action_id = int(action.get("id") or 0)
+            if action_id:
+                details = dict(action.get("details") or {})
+                details["watcher_signal"] = watcher_signal
+                STORE.update_control_action(
+                    action_id,
+                    status="pending",
+                    attempts=attempts + 1,
+                    last_followup_at=now,
+                    summary="Watcher 检测到缺少回执，已触发 receipt 追证。",
+                    control_state=control_state,
+                    details=details,
+                )
+                STORE.record_task_event(
+                    task["task_id"],
+                    "receipt_check_triggered_by_watcher",
+                    {
+                        "reason": watcher_signal.get("reason"),
+                        "ts": watcher_signal.get("ts"),
+                        "control_state": control_state,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "receipt_check_by_watcher",
+                        "control_state": control_state,
+                    }
+                )
+                _clear_watcher_signal_if_processed(watcher_summary)
+                continue
         profile = infer_duration_profile(phase=phase, task=task, control=control)
         timing = resolve_timing_window(phase=phase, profile=profile)
         first_window = (
@@ -4652,6 +5956,60 @@ def enforce_task_registry_control_plane() -> list[dict]:
             else timing.heartbeat_interval
         )
         hard_timeout = timing.hard_timeout
+        if task.get("status") == "background":
+            orphaned_background = (
+                not root_task_id
+                or root_task_id.startswith("legacy-root:")
+                or not STORE.get_root_task(root_task_id)
+            )
+            if orphaned_background and (
+                idle >= max(60, hard_timeout // 2) or total >= hard_timeout
+            ):
+                STORE.update_task_fields(
+                    task["task_id"],
+                    status="blocked",
+                    current_stage="后台任务失去 root task 绑定",
+                    blocked_reason="background_root_task_missing",
+                    updated_at=now,
+                )
+                STORE.record_task_event(
+                    task["task_id"],
+                    "control_blocked",
+                    {
+                        "reason": "background_root_task_missing",
+                        "control_state": control_state,
+                        "idle": idle,
+                        "total": total,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "blocked",
+                        "blocked_reason": "background_root_task_missing",
+                        "control_state": control_state,
+                    }
+                )
+                continue
+        if watcher_alert and action_id:
+            details = dict(action.get("details") or {})
+            details["watcher_alert"] = watcher_alert
+            details["watcher_reason"] = str(
+                ((watcher_alert.get("current") or {}).get("reason") or "")
+            )
+            details["watcher_next_action"] = str(
+                ((watcher_alert.get("current") or {}).get("next_action") or "")
+            )
+            STORE.update_control_action(
+                action_id,
+                summary=str(
+                    ((watcher_alert.get("current") or {}).get("reason") or approved_summary or "")
+                ),
+                control_state=control_state,
+                details=details,
+            )
+            action = STORE.get_open_control_action(task["task_id"]) or action
         soft_or_hard_stage = "soft" if attempts == 0 else "hard"
         immediate_followup_states = {
             "blocked_unverified",
@@ -4753,6 +6111,25 @@ def enforce_task_registry_control_plane() -> list[dict]:
         should_block = (
             attempts >= max_attempts or total >= hard_timeout or idle >= hard_timeout
         )
+        # received_only 任务如果没有证据，用更短的 timeout
+        received_only_no_evidence = (
+            control_state == "received_only"
+            and not core_supervision.get("visible_completion_seen")
+            and not bool((control.get("contract") or {}).get("required_receipts"))
+        )
+        if received_only_no_evidence and idle >= max(120, timing.first_ack_sla * 2):
+            should_block = True
+        delivery_followup_needed = (
+            next_action in {"await_delivery_confirmation", "delivery_retry"}
+            or (
+                control_state == "completed_verified"
+                and delivery_state not in {"delivered", "owner_escalated", "delivery_confirmed"}
+            )
+            or (
+                bool(core_supervision.get("visible_completion_seen"))
+                and delivery_state not in {"delivered", "owner_escalated", "delivery_confirmed"}
+            )
+        )
         if recovery_candidate and not intrusive_control:
             summary = str(
                 core_supervision.get("followup_summary")
@@ -4842,40 +6219,15 @@ def enforce_task_registry_control_plane() -> list[dict]:
             question = str(
                 task.get("question") or task.get("last_user_message") or "未知任务"
             )
-            # 新增：陈旧任务年龄检查，避免对过时任务发送恢复消息
+            # LRN-20260323-005: 不再因为任务过时就放弃追踪
+            # 所有任务都要有结论、有回复
             stale_task_max_age = int(CONFIG.get("GUARDIAN_STALE_TASK_MAX_AGE", 3600))
             if total >= stale_task_max_age:
                 log(
-                    f"检测到过时任务，抑制流水线恢复：{task['task_id']} (idle={format_duration_label(idle)}, total={format_duration_label(total)})",
+                    f"检测到过时任务，继续追踪（不再抑制）：{task['task_id']} (idle={format_duration_label(idle)}, total={format_duration_label(total)})",
                     "INFO",
                 )
-                STORE.update_task_fields(
-                    task["task_id"],
-                    status="blocked",
-                    current_stage="已抑制（过时任务）",
-                    blocked_reason="stale_task_suppressed",
-                    updated_at=now,
-                )
-                STORE.record_task_event(
-                    task["task_id"],
-                    "recovery_suppressed",
-                    {
-                        "reason": "stale_task",
-                        "duration": total,
-                        "idle": idle,
-                        "threshold": stale_task_max_age,
-                        "timestamp": datetime.now().isoformat(),
-                    },
-                )
-                outcomes.append(
-                    {
-                        "task_id": task["task_id"],
-                        "action": "suppressed",
-                        "suppressed_reason": "stale_task",
-                        "control_state": control_state,
-                    }
-                )
-                continue
+                # 不再抑制，继续追踪
             if now - last_followup_at < cooldown:
                 continue
             next_attempts = attempts + 1
@@ -5126,7 +6478,149 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 )
             continue
 
+        if delivery_followup_needed:
+            delivery_timeout = total >= max(hard_timeout, timing.heartbeat_interval * 2)
+            delivery_summary = (
+                "最终结论已形成，但当前没有送达确认，控制面已转入 delivery retry。"
+            )
+            self_check_key = f"self_check_summary:{env_id}"
+            self_check = STORE.load_runtime_value(self_check_key, {})
+            self_check["delivery_retry_count"] = int(self_check.get("delivery_retry_count") or 0) + 1
+            if control_state == "completed_verified" and delivery_state not in {"delivered", "owner_escalated", "delivery_confirmed"}:
+                self_check["completed_not_delivered_count"] = int(self_check.get("completed_not_delivered_count") or 0) + 1
+            STORE.save_runtime_value(self_check_key, self_check)
+            if delivery_timeout:
+                STORE.update_task_fields(
+                    task["task_id"],
+                    status="blocked",
+                    current_stage="等待送达确认超时",
+                    blocked_reason="delivery_confirmation_timeout",
+                    updated_at=now,
+                )
+                STORE.record_task_event(
+                    task["task_id"],
+                    "control_blocked",
+                    {
+                        "reason": "delivery_confirmation_timeout",
+                        "control_state": control_state,
+                        "idle": idle,
+                        "total": total,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+                outcomes.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "blocked",
+                        "blocked_reason": "delivery_confirmation_timeout",
+                        "control_state": control_state,
+                    }
+                )
+                if action_id:
+                    details = dict(action.get("details") or {})
+                    details.update(
+                        {
+                            "duration_profile": profile.value,
+                            "phase": phase.value,
+                            "first_ack_sla": timing.first_ack_sla,
+                            "heartbeat_interval": timing.heartbeat_interval,
+                            "hard_timeout": timing.hard_timeout,
+                            "followup_stage": "hard",
+                            "delivery_followup": True,
+                            "watcher_alert": watcher_alert or {},
+                            "watcher_reason": str(
+                                ((watcher_alert.get("current") or {}).get("reason") or "")
+                            ),
+                            "watcher_next_action": str(
+                                ((watcher_alert.get("current") or {}).get("next_action") or "")
+                            ),
+                            "status_template": "最终结果已形成，但送达确认超时；当前已 blocked，需补送达或人工确认。",
+                        }
+                    )
+                    STORE.update_control_action(
+                        action_id,
+                        status="blocked",
+                        summary="最终结果已形成，但送达确认超时，控制面已判阻塞。",
+                        control_state=control_state,
+                        details=details,
+                    )
+                else:
+                    update_native_followup(
+                        state="open",
+                        metadata_updates={
+                            "summary": "最终结果已形成，但送达确认超时，控制面已判阻塞。",
+                            "delivery_followup": True,
+                            "followup_stage": "hard",
+                            "status_template": "最终结果已形成，但送达确认超时；当前已 blocked，需补送达或人工确认。",
+                        },
+                    )
+                continue
+
+            STORE.record_task_event(
+                task["task_id"],
+                "delivery_retry_needed",
+                {
+                    "control_state": control_state,
+                    "idle": idle,
+                    "total": total,
+                    "delivery_state": delivery_state,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            outcomes.append(
+                {
+                    "task_id": task["task_id"],
+                    "action": "delivery_retry",
+                    "control_state": control_state,
+                }
+            )
+            if action_id:
+                details = dict(action.get("details") or {})
+                details.update(
+                    {
+                        "duration_profile": profile.value,
+                        "phase": phase.value,
+                        "first_ack_sla": timing.first_ack_sla,
+                        "heartbeat_interval": timing.heartbeat_interval,
+                        "hard_timeout": timing.hard_timeout,
+                        "followup_stage": soft_or_hard_stage,
+                        "delivery_followup": True,
+                        "watcher_alert": watcher_alert or {},
+                        "watcher_reason": str(
+                            ((watcher_alert.get("current") or {}).get("reason") or "")
+                        ),
+                        "watcher_next_action": str(
+                            ((watcher_alert.get("current") or {}).get("next_action") or "")
+                        ),
+                        "status_template": "最终结果已形成，但还没有送达确认；控制面已转入 delivery retry。",
+                    }
+                )
+                STORE.update_control_action(
+                    action_id,
+                    status="pending",
+                    attempts=attempts + 1,
+                    last_followup_at=now,
+                    summary=delivery_summary,
+                    control_state=control_state,
+                    details=details,
+                )
+            else:
+                update_native_followup(
+                    state="open",
+                    suggested_action="delivery_retry",
+                    metadata_updates={
+                        "summary": delivery_summary,
+                        "delivery_followup": True,
+                        "followup_stage": soft_or_hard_stage,
+                        "last_followup_at": now,
+                        "status_template": "最终结果已形成，但还没有送达确认；控制面已转入 delivery retry。",
+                    },
+                )
+            continue
+
         if should_block:
+            if _is_terminal_or_completed_legacy_task(task):
+                continue
             blocked_reason = "missing_pipeline_receipt"
             if attempts >= max_attempts and not task.get("session_key"):
                 blocked_reason = "control_followup_failed"
@@ -5191,6 +6685,13 @@ def enforce_task_registry_control_plane() -> list[dict]:
                             timing=timing,
                             heartbeat_ok=False,
                         ),
+                        "watcher_alert": watcher_alert or {},
+                        "watcher_reason": str(
+                            ((watcher_alert.get("current") or {}).get("reason") or "")
+                        ),
+                        "watcher_next_action": str(
+                            ((watcher_alert.get("current") or {}).get("next_action") or "")
+                        ),
                     }
                 )
                 STORE.update_control_action(
@@ -5204,7 +6705,7 @@ def enforce_task_registry_control_plane() -> list[dict]:
                 update_native_followup(
                     state="open",
                     metadata_updates={
-                        "summary": "任务缺少结构化回执，控制面已判阻塞。",
+                        "summary": "任务缺少结构化回执或可见送达确认，控制面已判阻塞。",
                         "duration_profile": profile.value,
                         "phase": phase.value,
                         "first_ack_sla": timing.first_ack_sla,
@@ -5957,6 +7458,7 @@ def _record_restart_event(
 
 def main():
     raise_nofile_limit()
+    ensure_single_guardian_instance()
     load_config()
     load_alerts()
     load_versions()
@@ -5990,6 +7492,7 @@ def main():
             if process_running and not gateway_was_healthy:
                 log("Gateway 从异常变为正常")
                 gateway_was_healthy = True
+                mark_gateway_restart_recovery_window(int(now))
 
                 # 检查是否有配置变更
                 if has_config_changes():
@@ -6055,6 +7558,9 @@ def main():
                 else:
                     log("Gateway 持续异常")
 
+            if process_running and gateway_healthy:
+                continue_gateway_restart_recovery_chase(int(now))
+
             # 性能告警
             if metrics["cpu"] > CONFIG.get("CPU_THRESHOLD", 90):
                 if should_alert("high_cpu"):
@@ -6090,6 +7596,10 @@ def main():
                         sync_runtime_task_registry(handle.readlines()[-4000:])
                 except Exception as exc:
                     log(f"同步任务注册表失败: {exc}", "ERROR")
+            try:
+                recover_untracked_session_tasks()
+            except Exception as exc:
+                log(f"恢复未登记会话任务失败: {exc}", "ERROR")
 
             scan_pipeline_progress_events()
             scan_runtime_anomalies()
@@ -6141,9 +7651,27 @@ def main():
             break
         except Exception as e:
             import traceback
+
             log(f"监控循环异常: {e}\n{traceback.format_exc()}", "ERROR")
             time.sleep(10)
 
 
 if __name__ == "__main__":
     main()
+
+
+def emit_pipeline_receipt_if_missing(task: dict, control: dict | None = None) -> dict:
+    """为缺失回执的任务生成结构化建议，不直接发送消息，由上层控制面决定如何投递。"""
+    control = control or STORE.derive_task_control_state(task.get("task_id"))
+    return {
+        "type": "PIPELINE_RECEIPT",
+        "task_id": task.get("task_id"),
+        "stage": "blocked" if str(task.get("status") or "") == "blocked" else "confirmed",
+        "summary": control.get("next_action") or "receipt_required",
+        "details": {
+            "control_state": control.get("control_state"),
+            "delivery_state": control.get("delivery_state"),
+            "next_action": control.get("next_action"),
+        },
+        "generated_by": "self_evolution_engine",
+    }

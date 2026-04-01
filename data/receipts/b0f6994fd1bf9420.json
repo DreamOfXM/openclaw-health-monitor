@@ -1,0 +1,17 @@
+{
+  "event": "PIPELINE_RECEIPT",
+  "task_id": "b0f6994fd1bf9420",
+  "stage": "blocked",
+  "agent": "main",
+  "timestamp": "2026-03-26T14:11:38.268212+08:00",
+  "summary": "阻塞原因：信号日期为2026-03-26，按T+1规则应在2026-03-27执行，但市场数据只有2026-03-26，导致无法成交。",
+  "evidence": {
+    "root_cause": "T+1执行规则与数据日期不匹配",
+    "signals_date": "2026-03-26",
+    "market_data_dates": [
+      "2026-03-26"
+    ],
+    "execution_date_needed": "2026-03-27",
+    "fix_direction": "信号生成需提前一天，或市场数据需包含T+1"
+  }
+}

@@ -22,7 +22,16 @@ def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+        if not raw or not raw.strip():
+            return default
+        text = raw.strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            if text[-1:] not in {"}", "]"}:
+                return default
+            return default
     except Exception:
         return default
 
@@ -35,6 +44,28 @@ def _tail_lines(path: Path, limit: int = 120) -> list[str]:
     except Exception:
         return []
     return lines[-limit:]
+
+
+def _validate_runtime_projection(
+    *,
+    task_id: str,
+    root_task_id: str,
+    workflow_run_id: str,
+    workflow_state: str,
+    delivery_state: str,
+    control_state: str,
+) -> dict[str, Any] | None:
+    """Return a quarantine hint when the projected runtime state is internally inconsistent."""
+    terminal_states = {"failed", "cancelled", "dlq", "delivered"}
+    if control_state and not task_id:
+        return {"reason": "missing_task_id", "detail": "control_state exists without task_id"}
+    if task_id and not root_task_id and workflow_state not in terminal_states:
+        return {"reason": "missing_root_task_id", "detail": "active task is missing root_task_id"}
+    if workflow_state in terminal_states and delivery_state == "undelivered" and control_state not in {"blocked", "failed", "completed_verified"}:
+        return {"reason": "terminal_without_delivery_path", "detail": "terminal workflow has no valid delivery/control state"}
+    if workflow_run_id and not root_task_id:
+        return {"reason": "orphan_workflow_run", "detail": "workflow_run_id exists without root_task_id"}
+    return None
 
 
 def detect_recurrence_problem_code(candidate: dict[str, Any]) -> str:
@@ -69,6 +100,10 @@ def detect_recurrence_problem_code(candidate: dict[str, Any]) -> str:
         return "task_blocked_user_visible"
     if anomaly == "openclaw_unreachable":
         return "openclaw_unreachable"
+    if anomaly == "execution_finished_result_uncommitted":
+        return "no_visible_result_timeout"
+    if anomaly == "runtime_projection_invalid":
+        return "task_closure_missing"
     if anomaly == "no_visible_result_timeout":
         return "no_visible_result_timeout"
     return "task_closure_missing"
@@ -231,6 +266,14 @@ class RecoveryWatchdog:
         hard_followup = int(timing.get("hard_followup") or self.config.get("RECOVERY_WATCHDOG_FOLLOWUP_SECONDS", 180) or 180)
         core_supervision = dict(control.get("core_supervision") or {})
         needs_followup = bool(core_supervision.get("needs_followup") or current_root.get("needs_followup"))
+        projection_issue = _validate_runtime_projection(
+            task_id=task_id,
+            root_task_id=root_task_id,
+            workflow_run_id=workflow_run_id,
+            workflow_state=workflow_state,
+            delivery_state=delivery_state,
+            control_state=control_state,
+        )
 
         def build_recent_events() -> list[dict[str, Any]]:
             events: list[dict[str, Any]] = []
@@ -366,6 +409,33 @@ class RecoveryWatchdog:
                 "retry_delivery_once",
                 delivery_failure=True,
             )
+        if projection_issue:
+            add_candidate(
+                "runtime_projection_invalid",
+                "high",
+                f"runtime projection is inconsistent: {projection_issue['detail']}",
+                "quarantine_projection_and_rebuild",
+                projection_issue=projection_issue,
+            )
+
+        is_execution_finished = workflow_state in {"completed", "delivery_pending"} or finalization_state in {"ready", "completed", "finalized"}
+        if (
+            task_id
+            and age_seconds >= timeout_seconds
+            and not is_delivered
+            and not is_blocked
+            and is_execution_finished
+        ):
+            add_candidate(
+                "execution_finished_result_uncommitted",
+                "high",
+                f"task {task_id} finished execution but result is not committed/visible yet",
+                "commit_result_or_retry_delivery",
+                age_seconds=age_seconds,
+                timeout_seconds=timeout_seconds,
+                finalization_state=finalization_state,
+            )
+
         if (
             task_id
             and age_seconds >= timeout_seconds
@@ -380,6 +450,7 @@ class RecoveryWatchdog:
                 "cancelled",
                 "dlq",
             }
+            and not is_execution_finished
         ):
             add_candidate(
                 "no_visible_result_timeout",
@@ -388,6 +459,19 @@ class RecoveryWatchdog:
                 "main_recheck_or_block",
                 age_seconds=age_seconds,
                 timeout_seconds=timeout_seconds,
+            )
+
+        orphan_followup = bool(task_id and needs_followup and (not root_task_id or workflow_state in {"failed", "cancelled", "dlq", "delivered"}))
+        if orphan_followup and not is_delivered and heartbeat_age >= hard_followup:
+            add_candidate(
+                "followup_pending_without_main_recovery",
+                "critical",
+                f"task {task_id} has orphaned followup state without recoverable main/root binding",
+                "requeue_orphan_followup",
+                heartbeat_age_seconds=heartbeat_age,
+                followup_stage=followup_stage,
+                root_task_id=root_task_id or None,
+                workflow_state=workflow_state,
             )
 
         if task_id and not is_delivered and control_state in {"received_only", "progress_only"} and needs_followup and heartbeat_age >= hard_followup:
@@ -736,6 +820,20 @@ class RecoveryWatchdog:
             "evidence": item.get("evidence") or {},
         }
         incident_type = str(item.get("incident_type") or item.get("anomaly_type") or "unknown")
+        recommended_action = str(item.get("recommended_action") or "")
+        action_clause = ""
+        if recommended_action == "requeue_orphan_followup":
+            action_clause = (
+                "This followup is orphaned from its main/root binding. Rebind or explicitly requeue the followup instead of waiting for main recovery. "
+            )
+        elif recommended_action == "commit_result_or_retry_delivery":
+            action_clause = (
+                "Treat execution as finished but result not committed. Prefer commit/reindex/retry-delivery work before declaring timeout. "
+            )
+        elif recommended_action == "quarantine_projection_and_rebuild":
+            action_clause = (
+                "The projected runtime state is internally inconsistent. Quarantine the broken projection, rebuild facts from authoritative state, and do not let it flow into replay/reporting unchanged. "
+            )
         blocking_clause = (
             "If incident_type == blocked_not_delivered, you must produce a user-visible blocked explanation in this same recovery path unless delivery is already confirmed. "
             "Do not stop at internal acknowledgement, and do not leave the task in blocked-but-silent state. "
@@ -744,9 +842,9 @@ class RecoveryWatchdog:
             "Internal watchdog recovery hint. This is a control-plane pushback, not a user request. "
             "You must re-evaluate the active task and make exactly one adjudication: accept_repair, observe_only, dismiss, or need_more_evidence. "
             "If you accept_repair, do the smallest safe action: retry delivery, resume execution, or send a user-visible blocked explanation. "
-            + blocking_clause +
-            "Do not leave this hint as pending bookkeeping only, and do not claim closure until a real reply reached the user. "
-            "If the task is already truly closed and delivered, reply ONLY with NO_REPLY.\n\n"
+            + action_clause
+            + blocking_clause
+            + "Do not leave this hint as pending bookkeeping only, and do not claim closure until a real reply reached the user. If the task is already truly closed and delivered, reply ONLY with NO_REPLY.\n\n"
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
 

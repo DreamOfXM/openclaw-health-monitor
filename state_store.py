@@ -168,12 +168,14 @@ SELF_EVOLUTION_PROBLEM_CODES = {
     "task_closure_missing",
     "guardian_crash",
     "gateway_unhealthy",
+    "openclaw_unreachable",
     "model_timeout",
     "failover_exhausted",
     "channel_inflight_stuck",
     "purity_gate_failed",
     "run_tracking_warning",
     "tool_interrupted_no_reply",
+    "no_visible_result_timeout",
     "unknown_problem",
 }
 
@@ -228,6 +230,41 @@ DEFAULT_PHASE_POLICIES = {
     "verification": "short",
     "risk_assessment": "short",
 }
+
+TERMINAL_MSG_STATES = {"completed", "failed", "blocked"}
+TERMINAL_DELIVERY_STATES = {"delivered", "owner_escalated"}
+
+
+def normalize_msg_state(value: Any) -> str:
+    state = str(value or "").strip().lower()
+    if state in {"", "accepted", "routed", "queued", "started", "open"}:
+        return "open"
+    if state in {"completed", "delivered", "delivery_pending"}:
+        return "completed"
+    if state == "blocked":
+        return "blocked"
+    if state in {"failed", "cancelled", "dlq", "delivery_failed", "ambiguous_success"}:
+        return "failed"
+    if state == "background":
+        return "background"
+    return state or "open"
+
+
+def normalize_delivery_state(value: Any) -> str:
+    state = str(value or "").strip().lower()
+    if state in {"delivered", "delivery_confirmed", "confirmed", "channel_ack"}:
+        return "delivered"
+    if state in {"owner_escalated", "watchdog_exhausted", "escalated"}:
+        return "owner_escalated"
+    return "undelivered"
+
+
+def is_resolved_msg_state(value: Any) -> bool:
+    return normalize_msg_state(value) in TERMINAL_MSG_STATES
+
+
+def is_closed_delivery_state(value: Any) -> bool:
+    return normalize_delivery_state(value) in TERMINAL_DELIVERY_STATES
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -697,19 +734,23 @@ class MonitorStateStore:
                 dedupe_map[marker] = int(row["id"])
                 pending_updates.append((event_key, int(row["id"])))
 
-            if needs_rebuild:
-                conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
+            # 先删除唯一索引，避免更新时冲突
+            conn.execute("DROP INDEX IF EXISTS idx_task_events_dedupe")
+            
             if duplicate_ids:
                 placeholders = ",".join("?" for _ in duplicate_ids)
                 conn.execute(
                     f"DELETE FROM task_events WHERE id IN ({placeholders})",
                     duplicate_ids,
                 )
+            
+            # 更新 event_key（此时索引已删除，不会冲突）
             for event_key, row_id in pending_updates:
                 conn.execute(
                     "UPDATE task_events SET event_key = ? WHERE id = ?",
                     (event_key, row_id),
                 )
+            
             if needs_rebuild:
                 conn.execute(
                     """
@@ -721,12 +762,14 @@ class MonitorStateStore:
                     )
                     """
                 )
-                conn.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_dedupe
-                    ON task_events(task_id, event_type, event_key)
-                    """
-                )
+            
+            # 最后重新创建唯一索引
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_dedupe
+                ON task_events(task_id, event_type, event_key)
+                """
+            )
 
     def _load_kv(self, namespace: str, key: str) -> Any | None:
         with self._connection() as conn:
@@ -1026,7 +1069,7 @@ class MonitorStateStore:
             "workflow_type": workflow.get("workflow_type", "direct_main"),
             "intent_type": workflow.get("intent_type", ""),
             "contract_type": workflow.get("contract_type", ""),
-            "current_state": workflow.get("current_state", "accepted"),
+            "current_state": normalize_msg_state(workflow.get("current_state", "open")),
             "state_reason": normalized_reason,
             "current_step_run_id": workflow.get("current_step_run_id", ""),
             "created_at": int(workflow.get("created_at", now)),
@@ -1161,7 +1204,7 @@ class MonitorStateStore:
             "decision_state": record.get("decision_state", "pending_decision"),
             "final_status": record.get("final_status", ""),
             "trigger_reason": normalized_reason,
-            "delivery_state": record.get("delivery_state", ""),
+            "delivery_state": normalize_delivery_state(record.get("delivery_state", "undelivered")),
             "delivery_attempt_no": int(record.get("delivery_attempt_no", 0)),
             "delivery_channel": record.get("delivery_channel", ""),
             "last_delivery_error": record.get("last_delivery_error", ""),
@@ -1224,7 +1267,9 @@ class MonitorStateStore:
             "channel": attempt.get("channel", ""),
             "target": attempt.get("target", ""),
             "confirmation_level": attempt.get("confirmation_level", ""),
-            "current_state": attempt.get("current_state", "delivery_pending"),
+            "current_state": normalize_delivery_state(
+                attempt.get("current_state", attempt.get("delivery_state", "undelivered"))
+            ),
             "state_reason": normalized_reason,
             "idempotency_key": attempt.get("idempotency_key", ""),
             "created_at": int(attempt.get("created_at", now)),
@@ -1606,7 +1651,7 @@ class MonitorStateStore:
                 "decision_state": row["decision_state"] or "",
                 "final_status": row["final_status"] or "",
                 "trigger_reason": row["trigger_reason"] or "",
-                "delivery_state": row["delivery_state"] or "",
+                "delivery_state": normalize_delivery_state(row["delivery_state"] or ""),
                 "delivery_attempt_no": int(row["delivery_attempt_no"] or 0),
                 "delivery_channel": row["delivery_channel"] or "",
                 "last_delivery_error": row["last_delivery_error"] or "",
@@ -1635,7 +1680,7 @@ class MonitorStateStore:
             "decision_state": row["decision_state"] or "",
             "final_status": row["final_status"] or "",
             "trigger_reason": row["trigger_reason"] or "",
-            "delivery_state": row["delivery_state"] or "",
+            "delivery_state": normalize_delivery_state(row["delivery_state"] or ""),
             "delivery_attempt_no": int(row["delivery_attempt_no"] or 0),
             "delivery_channel": row["delivery_channel"] or "",
             "last_delivery_error": row["last_delivery_error"] or "",
@@ -1670,7 +1715,7 @@ class MonitorStateStore:
                 "channel": row["channel"] or "",
                 "target": row["target"] or "",
                 "confirmation_level": row["confirmation_level"] or "",
-                "current_state": row["current_state"] or "",
+                "current_state": normalize_delivery_state(row["current_state"] or ""),
                 "state_reason": row["state_reason"] or "",
                 "idempotency_key": row["idempotency_key"] or "",
                 "created_at": int(row["created_at"] or 0),
@@ -1698,7 +1743,7 @@ class MonitorStateStore:
             "channel": row["channel"] or "",
             "target": row["target"] or "",
             "confirmation_level": row["confirmation_level"] or "",
-            "current_state": row["current_state"] or "",
+            "current_state": normalize_delivery_state(row["current_state"] or ""),
             "state_reason": row["state_reason"] or "",
             "idempotency_key": row["idempotency_key"] or "",
             "created_at": int(row["created_at"] or 0),
@@ -1754,7 +1799,7 @@ class MonitorStateStore:
             "step_run_id": row["step_run_id"] or "",
             "followup_type": row["followup_type"] or "",
             "trigger_reason": row["trigger_reason"] or "",
-            "current_state": row["current_state"] or "",
+            "current_state": normalize_msg_state(row["current_state"] or ""),
             "suggested_action": row["suggested_action"] or "",
             "created_by": row["created_by"] or "",
             "created_at": int(row["created_at"] or 0),
@@ -2076,8 +2121,9 @@ class MonitorStateStore:
                 "current_delivery_attempt": None,
                 "current_followups": [],
                 "has_core_projection": False,
-                "workflow_state": "",
-                "delivery_state": "",
+                "workflow_state": "open",
+                "msg_state": "open",
+                "delivery_state": "undelivered",
                 "delivery_confirmation_level": "",
                 "finalization_state": "",
                 "final_status": "",
@@ -2099,12 +2145,12 @@ class MonitorStateStore:
         ]
         current_finalizer = finalizers[0] if finalizers else None
         current_delivery_attempt = deliveries[0] if deliveries else None
-        workflow_state = str((workflow or {}).get("current_state") or "")
-        delivery_state = str(
+        msg_state = normalize_msg_state((workflow or {}).get("current_state") or "open")
+        delivery_state = normalize_delivery_state(
             (current_delivery_attempt or {}).get("current_state")
             or (current_delivery_attempt or {}).get("delivery_state")
             or (current_finalizer or {}).get("delivery_state")
-            or ""
+            or "undelivered"
         )
         visible_completion_seen = self.has_task_event(task_id, "visible_completion")
         delivery_confirmation_level = str(
@@ -2113,10 +2159,22 @@ class MonitorStateStore:
         )
         finalization_state = str((current_finalizer or {}).get("decision_state") or "")
         final_status = str((current_finalizer or {}).get("final_status") or "")
-        delivery_confirmed = delivery_state in {"delivery_confirmed", "confirmed", "delivered"}
-        is_terminal = workflow_state in {"delivered", "failed", "cancelled", "dlq"} or delivery_confirmed
-        is_blocked = workflow_state in {"blocked", "delivery_failed", "failed", "dlq"}
-        is_delivery_pending = workflow_state == "delivery_pending" and not delivery_confirmed
+        
+        # 检查 core_events 中是否有 delivery_confirmed 事件
+        core_delivery_confirmed = False
+        if current_workflow_run_id:
+            core_events = self.list_core_events(workflow_run_id=current_workflow_run_id, limit=100)
+            for ev in core_events:
+                if ev.get("event_type") == "delivery_confirmed":
+                    core_delivery_confirmed = True
+                    delivery_state = "delivered"
+                    delivery_confirmation_level = "delivery_confirmed"
+                    break
+        
+        delivery_confirmed = delivery_state == "delivered" or core_delivery_confirmed
+        is_terminal = msg_state in TERMINAL_MSG_STATES and delivery_state in TERMINAL_DELIVERY_STATES
+        is_blocked = msg_state == "blocked"
+        is_delivery_pending = msg_state in TERMINAL_MSG_STATES and delivery_state == "undelivered"
         return {
             "root_task_id": root_task_id,
             "root_task": root,
@@ -2125,7 +2183,8 @@ class MonitorStateStore:
             "current_delivery_attempt": current_delivery_attempt,
             "current_followups": followups,
             "has_core_projection": True,
-            "workflow_state": workflow_state,
+            "workflow_state": msg_state,
+            "msg_state": msg_state,
             "delivery_state": delivery_state,
             "delivery_confirmation_level": delivery_confirmation_level,
             "finalization_state": finalization_state,
@@ -2133,7 +2192,7 @@ class MonitorStateStore:
             "is_terminal": is_terminal,
             "is_blocked": is_blocked,
             "is_delivery_pending": is_delivery_pending,
-            "needs_followup": bool(followups) and not delivery_confirmed,
+            "needs_followup": bool(followups) or (msg_state in TERMINAL_MSG_STATES and delivery_state == "undelivered"),
             "visible_completion_seen": visible_completion_seen,
             "delivery_confirmed": delivery_confirmed,
             "legacy_projection_used": legacy_projection_used,
@@ -2221,8 +2280,9 @@ class MonitorStateStore:
         if not snapshot.get("has_core_projection"):
             return {
                 "truth_level": "derived",
-                "workflow_state": "",
-                "delivery_state": "",
+                "workflow_state": "open",
+                "msg_state": "open",
+                "delivery_state": "undelivered",
                 "delivery_confirmation_level": "",
                 "finalization_state": "",
                 "final_status": "",
@@ -2239,7 +2299,7 @@ class MonitorStateStore:
                 "blocked_reason": "",
             }
 
-        workflow_state = str(snapshot.get("workflow_state") or "")
+        msg_state = normalize_msg_state(snapshot.get("msg_state") or snapshot.get("workflow_state") or "open")
         workflow_updated_at = int((snapshot.get("current_workflow_run") or {}).get("updated_at") or 0)
         followups: list[dict[str, Any]] = []
         for item in list(snapshot.get("current_followups") or []):
@@ -2250,7 +2310,7 @@ class MonitorStateStore:
                 source == "legacy_control_action"
                 and workflow_updated_at
                 and updated_at <= workflow_updated_at
-                and workflow_state in {"started", "completed", "delivery_pending", "delivered"}
+                and msg_state in {"open", "completed"}
             ):
                 continue
             followups.append(item)
@@ -2258,13 +2318,14 @@ class MonitorStateStore:
         followup_type = str(lead_followup.get("followup_type") or "")
         next_action = str(lead_followup.get("suggested_action") or "").strip()
         next_actor = self._core_followup_next_actor(lead_followup) if lead_followup else ""
-        followup_summary = self._core_followup_summary(lead_followup, workflow_state) if lead_followup else ""
+        followup_summary = self._core_followup_summary(lead_followup, msg_state) if lead_followup else ""
         blocked_reason = (
             str((snapshot.get("current_finalizer") or {}).get("last_delivery_error") or "").strip()
             or str((snapshot.get("current_workflow_run") or {}).get("state_reason") or "").strip()
             or str((lead_followup or {}).get("trigger_reason") or "").strip()
         )
-        delivery_confirmed = bool(snapshot.get("delivery_confirmed"))
+        delivery_state = normalize_delivery_state(snapshot.get("delivery_state") or "undelivered")
+        delivery_confirmed = delivery_state == "delivered"
         if delivery_confirmed:
             next_action = ""
             next_actor = ""
@@ -2276,25 +2337,25 @@ class MonitorStateStore:
             or "retry" in next_action
         )
         control_state = ""
-        if workflow_state == "delivered" or delivery_confirmed:
+        if msg_state == "completed" and delivery_state in TERMINAL_DELIVERY_STATES:
             control_state = "completed_verified"
-        elif workflow_state == "delivery_pending":
-            if delivery_confirmed:
-                control_state = "completed_verified"
-            else:
-                control_state = "delivery_pending"
-        elif workflow_state in {"blocked", "delivery_failed", "failed", "dlq", "cancelled"}:
+        elif msg_state in TERMINAL_MSG_STATES and delivery_state == "undelivered":
+            control_state = "delivery_pending" if msg_state == "completed" else "blocked_unverified"
+        elif msg_state in {"blocked", "failed"}:
             control_state = (
                 "blocked_control_followup_failed"
                 if blocked_reason in {"control_followup_failed", "followup.control_followup_failed"}
                 else "blocked_unverified"
             )
+        elif msg_state == "background":
+            control_state = "progress_only"
         elif followups:
             control_state = "progress_only"
         return {
             "truth_level": "core_projection",
-            "workflow_state": workflow_state,
-            "delivery_state": str(snapshot.get("delivery_state") or ""),
+            "workflow_state": msg_state,
+            "msg_state": msg_state,
+            "delivery_state": delivery_state,
             "delivery_confirmation_level": str(snapshot.get("delivery_confirmation_level") or ""),
             "finalization_state": str(snapshot.get("finalization_state") or ""),
             "final_status": str(snapshot.get("final_status") or ""),
@@ -2318,14 +2379,14 @@ class MonitorStateStore:
         if not workflow:
             return {
                 "workflow_run_id": workflow_run_id,
-                "current_state": "missing",
+                "current_state": "open",
                 "state_reason": "workflow_not_found",
                 "finalized": False,
                 "delivered": False,
                 "events_applied": 0,
             }
         events = self.list_core_events(workflow_run_id=workflow_run_id, limit=1000)
-        state = str(workflow.get("current_state") or "accepted")
+        state = normalize_msg_state(workflow.get("current_state") or "open")
         state_reason = str(workflow.get("state_reason") or "")
         finalized = False
         delivered = False
@@ -2335,7 +2396,7 @@ class MonitorStateStore:
         current_step_event_ts = 0
         finalized_at = 0
         terminal_at = 0
-        delivery_state = ""
+        delivery_state = "undelivered"
         delivery_confirmation_level = ""
         followup_ids_to_resolve: set[str] = set()
         for event in events:
@@ -2350,16 +2411,16 @@ class MonitorStateStore:
                 current_step_run_id = step_run_id
                 current_step_event_ts = event_ts
             if event_type in {"request_accepted", "workflow_accepted"}:
-                state = "accepted"
+                state = "open"
                 state_reason = str(payload.get("reason") or event_type)
             elif event_type == "workflow_routed":
-                state = "routed"
+                state = "open"
                 state_reason = str(payload.get("reason") or "workflow_routed")
             elif event_type in {"workflow_queued", "manual_retry_requested", "workflow_resumed"}:
-                state = "queued"
+                state = "open"
                 state_reason = str(payload.get("reason") or event_type)
             elif event_type in {"step_started", "receipt_adopted_started"}:
-                state = "started"
+                state = "open"
                 state_reason = str(payload.get("reason") or event_type)
             elif event_type == "receipt_adopted_completed":
                 state = "completed"
@@ -2371,60 +2432,51 @@ class MonitorStateStore:
                 state = "failed"
                 state_reason = str(payload.get("reason") or "workflow_failed")
             elif event_type == "workflow_cancelled":
-                state = "cancelled"
+                state = "failed"
                 state_reason = str(payload.get("reason") or "workflow_cancelled")
             elif event_type == "ambiguous_success_detected":
-                state = "ambiguous_success"
+                state = "failed"
                 state_reason = str(payload.get("reason") or "ambiguous_success")
             elif event_type == "finalizer_finalized":
                 finalized = True
                 finalization_id = str(payload.get("finalization_id") or finalization_id)
                 finalized_at = max(finalized_at, event_ts)
-                if state == "completed":
-                    state = "delivery_pending"
-                    state_reason = str(payload.get("reason") or "finalizer_finalized")
+                state_reason = str(payload.get("reason") or state_reason or "finalizer_finalized")
             elif event_type in {"delivery_sent", "delivery_observed"}:
                 delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
-                delivery_state = event_type
+                delivery_state = "undelivered"
                 delivery_confirmation_level = event_type
-                if finalized and state in {"completed", "delivery_pending"}:
-                    state = "delivery_pending"
-                    state_reason = str(payload.get("reason") or event_type)
             elif event_type == "delivery_confirmed":
                 delivered = True
                 delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
-                delivery_state = "delivery_confirmed"
+                delivery_state = "delivered"
                 delivery_confirmation_level = "delivery_confirmed"
-                state = "delivered"
-                state_reason = str(payload.get("reason") or "delivery_confirmed")
+                state_reason = str(payload.get("reason") or state_reason or "delivery_confirmed")
                 terminal_at = max(terminal_at, event_ts)
             elif event_type == "delivery_failed":
                 delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
-                delivery_state = "delivery_failed"
+                delivery_state = "undelivered"
                 delivery_confirmation_level = "delivery_failed"
-                state = "delivery_failed"
-                state_reason = str(payload.get("reason") or "delivery_failed")
-                terminal_at = max(terminal_at, event_ts)
+                state_reason = str(payload.get("reason") or state_reason or "delivery_failed")
             elif event_type == "delivery_dlq_entered":
                 delivery_attempt_id = str(payload.get("delivery_attempt_id") or delivery_attempt_id)
-                delivery_state = "delivery_dlq_entered"
+                delivery_state = "owner_escalated"
                 delivery_confirmation_level = "delivery_failed"
-                state = "dlq"
-                state_reason = str(payload.get("reason") or "delivery_dlq_entered")
-                terminal_at = max(terminal_at, event_ts)
-            elif event_type in {"workflow_failed", "workflow_cancelled"}:
+                state_reason = str(payload.get("reason") or state_reason or "delivery_dlq_entered")
                 terminal_at = max(terminal_at, event_ts)
             elif event_type in {"followup_resolved", "followup_closed"}:
                 followup_id = str(payload.get("followup_id") or event.get("followup_id") or "")
                 if followup_id:
                     followup_ids_to_resolve.add(followup_id)
+        state = normalize_msg_state(state)
+        delivery_state = normalize_delivery_state(delivery_state)
         projection = {
             "workflow_run_id": workflow_run_id,
             "root_task_id": workflow.get("root_task_id") or "",
             "current_state": state,
             "state_reason": state_reason,
             "finalized": finalized,
-            "delivered": delivered,
+            "delivered": delivery_state == "delivered",
             "finalization_id": finalization_id,
             "delivery_attempt_id": delivery_attempt_id,
             "current_step_run_id": current_step_run_id,
@@ -2450,15 +2502,15 @@ class MonitorStateStore:
                     {
                         **existing_finalizer,
                         "decision_state": "finalized" if finalized else existing_finalizer.get("decision_state", ""),
-                        "delivery_state": delivery_state or existing_finalizer.get("delivery_state", ""),
+                        "delivery_state": delivery_state or existing_finalizer.get("delivery_state", "undelivered"),
                         "last_delivery_error": state_reason
-                        if delivery_state in {"delivery_failed", "delivery_dlq_entered"}
+                        if delivery_state == "undelivered"
                         else existing_finalizer.get("last_delivery_error", ""),
                         "finalized_at": finalized_at or int(existing_finalizer.get("finalized_at") or 0),
                         "updated_at": int(time.time()),
                     }
                 )
-        if state in {"delivered", "failed", "cancelled", "dlq"}:
+        if state in TERMINAL_MSG_STATES and delivery_state in TERMINAL_DELIVERY_STATES:
             for item in self.list_followups(root_task_id=str(workflow.get("root_task_id") or ""), limit=100):
                 if str(item.get("workflow_run_id") or "") != workflow_run_id:
                     continue
@@ -2489,12 +2541,12 @@ class MonitorStateStore:
                 "state_reason": state_reason,
                 "current_step_run_id": current_step_run_id,
                 "updated_at": int(time.time()),
-                "terminal_at": terminal_at if state in {"delivered", "failed", "cancelled", "dlq"} and terminal_at else int(workflow.get("terminal_at") or 0),
+                "terminal_at": terminal_at if state in TERMINAL_MSG_STATES and delivery_state in TERMINAL_DELIVERY_STATES and terminal_at else int(workflow.get("terminal_at") or 0),
                 "metadata": {
                     **(workflow.get("metadata") or {}),
                     "projection": {
                         "finalized": finalized,
-                        "delivered": delivered,
+                        "delivered": delivery_state == "delivered",
                         "delivery_state": delivery_state,
                         "delivery_confirmation_level": delivery_confirmation_level,
                         "current_step_run_id": current_step_run_id,
@@ -2511,11 +2563,7 @@ class MonitorStateStore:
             if str(root.get("superseded_by_root_task_id") or ""):
                 root_status = "superseded"
                 root_active = False
-            elif state == "cancelled":
-                root_status = "cancelled"
-                root_active = False
-                root_terminal_at = max(root_terminal_at, terminal_at)
-            elif state in {"delivered", "failed", "dlq"}:
+            elif state in TERMINAL_MSG_STATES and delivery_state in TERMINAL_DELIVERY_STATES:
                 root_status = "closed"
                 root_active = False
                 root_terminal_at = max(root_terminal_at, terminal_at)
@@ -2938,7 +2986,15 @@ class MonitorStateStore:
                 """
                 SELECT * FROM managed_tasks
                 WHERE session_key = ?
-                ORDER BY updated_at DESC, created_at DESC
+                ORDER BY
+                    CASE
+                        WHEN status = 'running' THEN 0
+                        WHEN status = 'background' THEN 1
+                        WHEN status = 'blocked' THEN 2
+                        ELSE 3
+                    END,
+                    created_at DESC,
+                    updated_at DESC
                 LIMIT 1
                 """,
                 (session_key,),
@@ -3417,6 +3473,44 @@ class MonitorStateStore:
                 params,
             )
 
+    def create_control_action(
+        self,
+        task_id: str,
+        env_id: str,
+        action_type: str,
+        *,
+        control_state: str = "unknown",
+        status: str = "pending",
+        summary: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = int(time.time())
+        details_json = json.dumps(details or {}, ensure_ascii=False)
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO task_control_actions(
+                    task_id, env_id, action_type, control_state, status,
+                    required_receipts_json, summary, attempts, last_followup_at,
+                    last_error, details_json, created_at, updated_at, resolved_at
+                )
+                VALUES (?, ?, ?, ?, ?, '[]', ?, 0, 0, '', ?, ?, ?, 0)
+                """,
+                (
+                    task_id,
+                    env_id,
+                    action_type,
+                    control_state,
+                    status,
+                    summary,
+                    details_json,
+                    now,
+                    now,
+                ),
+            )
+            action_id = cursor.lastrowid
+        return self.get_open_control_action(task_id) or {"id": action_id, "task_id": task_id}
+
     @staticmethod
     def _task_label_invalid(text: str | None) -> bool:
         raw = (text or "").strip()
@@ -3614,8 +3708,9 @@ class MonitorStateStore:
             workflow = dict(core_snapshot.get("current_workflow_run") or {})
             finalizer = dict(core_snapshot.get("current_finalizer") or {})
             delivery_attempt = dict(core_snapshot.get("current_delivery_attempt") or {})
-            workflow_state = str(core_supervision.get("workflow_state") or "")
-            active_phase = str(workflow.get("phase") or workflow_state or task.get("current_stage") or "")
+            msg_state = normalize_msg_state(core_supervision.get("msg_state") or core_supervision.get("workflow_state") or "open")
+            delivery_state = normalize_delivery_state(core_supervision.get("delivery_state") or "undelivered")
+            active_phase = str(workflow.get("phase") or msg_state or task.get("current_stage") or "")
             timing = self._resolve_timing_metadata(contract_view, active_phase)
             step_updated_at = int(workflow.get("updated_at") or task.get("last_progress_at") or task.get("started_at") or 0)
             now = int(time.time())
@@ -3628,17 +3723,13 @@ class MonitorStateStore:
                 followup_stage = "soft"
             control_state = str(core_supervision.get("control_state") or "")
             if not control_state:
-                if workflow_state in {"accepted", "routed"}:
-                    control_state = "received_only"
-                elif workflow_state in {"queued", "started"}:
+                if msg_state == "open":
                     control_state = "progress_only"
-                elif workflow_state == "delivered":
+                elif msg_state == "completed" and delivery_state in TERMINAL_DELIVERY_STATES:
                     control_state = "completed_verified"
-                elif workflow_state == "delivery_pending":
+                elif msg_state == "completed":
                     control_state = "delivery_pending"
-                elif workflow_state == "completed":
-                    control_state = "progress_only"
-                elif workflow_state in {"blocked", "delivery_failed", "failed", "dlq", "cancelled"}:
+                elif msg_state in {"blocked", "failed"}:
                     control_state = (
                         "blocked_control_followup_failed"
                         if str(core_supervision.get("blocked_reason") or "") in {"control_followup_failed", "followup.control_followup_failed"}
@@ -3646,15 +3737,22 @@ class MonitorStateStore:
                     )
                 else:
                     control_state = "received_only"
+            # 如果有 visible_completion 事件，至少应该是 delivery_pending
+            visible_completion_seen = bool(core_supervision.get("visible_completion_seen"))
+            if visible_completion_seen and control_state == "received_only":
+                if delivery_state in TERMINAL_DELIVERY_STATES:
+                    control_state = "completed_verified"
+                else:
+                    control_state = "delivery_pending"
             delivery_confirmed = bool(core_supervision.get("delivery_confirmed"))
             approved_summary = (
                 str(core_supervision.get("followup_summary") or "").strip()
                 or str(finalizer.get("user_visible_summary") or "").strip()
                 or (
                     "主闭环已完成并确认送达。"
-                    if workflow_state == "delivered" or delivery_confirmed
+                    if msg_state == "completed" and delivery_state in TERMINAL_DELIVERY_STATES
                     else "主闭环最终结论已形成，当前等待送达确认。"
-                    if workflow_state == "delivery_pending"
+                    if msg_state in TERMINAL_MSG_STATES and delivery_state == "undelivered"
                     else "主闭环当前处于阻塞状态。"
                     if core_supervision.get("is_blocked")
                     else "主闭环已进入原生工作流。"
@@ -3662,28 +3760,28 @@ class MonitorStateStore:
             )
             next_action = str(core_supervision.get("next_action") or "")
             next_actor = str(core_supervision.get("next_actor") or "")
-            if workflow_state == "delivered" or delivery_confirmed:
+            if msg_state in TERMINAL_MSG_STATES and delivery_state in TERMINAL_DELIVERY_STATES:
                 next_action = "none"
                 next_actor = ""
-            elif workflow_state in {"completed", "delivery_pending"} and not next_action:
+            elif msg_state in TERMINAL_MSG_STATES and delivery_state == "undelivered" and not next_action:
                 next_action = "await_delivery_confirmation"
-                next_actor = "main"
+                next_actor = "watchdog"
             elif core_supervision.get("is_blocked") and not next_action:
                 next_action = "manual_or_session_recovery"
             # Phase 4 简化：删除 claim_level
             protocol_status = {
                 "request": "seen",
                 "confirmed": "seen",
-                "final": "seen" if workflow_state in {"completed", "delivery_pending", "delivered"} else "missing",
+                "final": "seen" if msg_state in TERMINAL_MSG_STATES else "missing",
                 "blocked": "seen" if core_supervision.get("is_blocked") else "missing",
                 "ack_id": str((workflow.get("current_step_run_id") or workflow.get("workflow_run_id") or task_id) or ""),
             }
             native_state = {
                 "source": "core_events",
                 "dispatch_started": True,
-                "dispatch_completed": workflow_state not in {"accepted", "routed", "queued", ""},
-                "pipeline_progress_seen": workflow_state in {"started", "completed", "delivery_pending", "delivered"},
-                "pipeline_receipt_seen": workflow_state in {"started", "completed", "delivery_pending", "delivered", "blocked"},
+                "dispatch_completed": msg_state != "open",
+                "pipeline_progress_seen": msg_state in {"open", "completed", "blocked", "failed"},
+                "pipeline_receipt_seen": msg_state in TERMINAL_MSG_STATES,
                 "latest_receipt": {},
                 "status": str(task.get("status") or ""),
                 "stage": active_phase,
@@ -3695,11 +3793,11 @@ class MonitorStateStore:
                 "next_actor": next_actor,
                 "missing_receipts": [],
                 "contract_id": str(contract_view.get("id") or "single_agent"),
-                "v2_state": workflow_state or "unknown",
+                "v2_state": msg_state or "unknown",
             }
             # Phase 4 简化：删除 claim_level 和 public_control_state
             evidence_summary = (
-                f"workflow_state={workflow_state or 'unknown'}; finalization_state={core_snapshot.get('finalization_state') or '-'}; "
+                f"workflow_state={msg_state or 'unknown'}; finalization_state={core_snapshot.get('finalization_state') or '-'}; "
                 f"delivery_state={core_snapshot.get('delivery_state') or '-'}; delivery_confirmation={core_snapshot.get('delivery_confirmation_level') or '-'}; "
                 f"next_actor={next_actor or '-'}; action={next_action or '-'}; phase={active_phase or '-'}; "
                 f"heartbeat_age={heartbeat_age}; followup_stage={followup_stage}"
@@ -3725,7 +3823,7 @@ class MonitorStateStore:
                 "native_state": native_state,
                 "derived_state": derived_state,
                 "v2_truth": {
-                    "state": workflow_state or "unknown",
+                    "state": msg_state or "unknown",
                     "reason": str(workflow.get("state_reason") or ""),
                 },
                 "heuristic_state": {},
@@ -3876,10 +3974,12 @@ class MonitorStateStore:
         task_blocked_reason = blocked_reason
         blocked_state_locked = False
         task_status = str(task.get("status") or "")
+        contract_id = str(contract.get("id") or "single_agent")
+        single_agent_terminal_reply = contract_id == "single_agent" and flags["dispatch_completed"]
         
-        # Bug 修复：如果 task.status == "blocked"，control_state 必须是 blocked_*
-        # 这是看门狗检测的必要条件
-        if task_status == "blocked":
+        # Bug 修复：如果 single-agent 已有结论性 dispatch_complete，
+        # 不再允许因为缺少 pipeline receipt 被反向锁成 blocked。
+        if task_status == "blocked" and not single_agent_terminal_reply:
             if blocked_reason == "missing_pipeline_receipt":
                 control_state = "blocked_unverified"
                 approved_summary = "任务缺少结构化流水线回执，守护系统已判定为阻塞。"
@@ -3899,13 +3999,13 @@ class MonitorStateStore:
                 next_action = "manual_or_session_recovery"
                 next_actor = "guardian"
                 blocked_state_locked = True
-        elif blocked_reason == "missing_pipeline_receipt":
+        elif blocked_reason == "missing_pipeline_receipt" and not single_agent_terminal_reply:
             control_state = "blocked_unverified"
             approved_summary = "任务缺少结构化流水线回执，守护系统已判定为阻塞。"
             next_action = "manual_or_session_recovery"
             next_actor = "guardian"
             blocked_state_locked = True
-        elif blocked_reason == "control_followup_failed":
+        elif blocked_reason == "control_followup_failed" and not single_agent_terminal_reply:
             control_state = "blocked_control_followup_failed"
             approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
             next_action = "manual_or_session_recovery"
@@ -4030,14 +4130,31 @@ class MonitorStateStore:
             next_action = "require_receipt_or_block"
             next_actor = "guardian"
         elif flags["dispatch_started"] and flags["dispatch_completed"]:
-            control_state = "received_only"
-            approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
-            next_action = "require_receipt_or_block"
-            next_actor = "guardian"
+            if str(contract.get("id") or "single_agent") == "single_agent":
+                control_state = "completed_verified"
+                approved_summary = "single-agent 任务已形成并发出结论性回复。"
+                next_action = "none"
+                next_actor = ""
+            else:
+                control_state = "received_only"
+                approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
+                next_action = "require_receipt_or_block"
+                next_actor = "guardian"
 
         if task.get("status") == "completed" and evidence_level == "weak":
-            approved_summary = "任务状态显示已完成，但缺少可验证结构化证据。"
-            next_action = "require_receipt_or_block"
+            if str(contract.get("id") or "single_agent") == "single_agent":
+                control_state = "completed_verified"
+                approved_summary = "single-agent 任务状态已完成，按主脑终态回复视为闭环。"
+                next_action = "none"
+                next_actor = ""
+            else:
+                approved_summary = "任务状态显示已完成，但缺少可验证结构化证据。"
+                next_action = "require_receipt_or_block"
+                next_actor = "guardian"
+        elif task.get("status") == "blocked" and evidence_level == "weak" and str(contract.get("id") or "single_agent") == "single_agent":
+            control_state = "blocked_unverified"
+            approved_summary = "single-agent 任务已进入 blocked 终态。"
+            next_action = "manual_or_session_recovery"
             next_actor = "guardian"
 
         contract_id = str(contract.get("id") or "single_agent")
@@ -4214,7 +4331,22 @@ class MonitorStateStore:
             "terminal_state_seen": bool(protocol_status["final"] == "seen" or protocol_status["blocked"] == "seen"),
         }
 
-    def get_current_task(self, *, env_id: str | None = None) -> dict[str, Any] | None:
+    def get_current_task(self, *, env_id: str | None = None, session_key: str | None = None) -> dict[str, Any] | None:
+        # 优先返回当前会话的前台任务
+        if session_key:
+            binding = self.get_foreground_binding(session_key)
+            if binding:
+                root_task_id = str(binding.get("foreground_root_task_id") or "")
+                if root_task_id:
+                    # 找到这个 root_task 对应的 task
+                    tasks = self.list_tasks(limit=100)
+                    for task in tasks:
+                        core = self.get_core_closure_snapshot_for_task(task["task_id"], allow_legacy_projection=False)
+                        task_root = str(((core or {}).get("root_task") or {}).get("root_task_id") or "")
+                        if task_root == root_task_id:
+                            return task
+        
+        # 没有前台绑定，按状态和时间排序
         query = """
             SELECT * FROM managed_tasks
             WHERE status IN ('running', 'blocked', 'background')
@@ -4464,13 +4596,14 @@ class MonitorStateStore:
     def background_other_tasks_for_session(self, session_key: str, keep_task_id: str) -> None:
         now = int(time.time())
         with self._connection() as conn:
+            # 后台化时同时设置 root_task_id，避免被判定为孤儿任务
             conn.execute(
                 """
                 UPDATE managed_tasks
-                SET status = 'background', backgrounded_at = ?, updated_at = ?
+                SET status = 'background', backgrounded_at = ?, updated_at = ?, root_task_id = ?
                 WHERE session_key = ? AND task_id != ? AND status IN ('running', 'blocked')
                 """,
-                (now, now, session_key, keep_task_id),
+                (now, now, keep_task_id, session_key, keep_task_id),
             )
 
     def record_task_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> bool:

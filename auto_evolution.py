@@ -427,6 +427,140 @@ def verify_rule_effectiveness(
     }
 
 
+def cleanup_learnings_archive(workspace_dir: Path, days_threshold: int = 7) -> dict[str, Any]:
+    """
+    清理 LEARNINGS.md 中已解决的条目，归档到 archive/ 目录。
+    
+    Args:
+        workspace_dir: 工作区目录
+        days_threshold: resolved 状态保留天数
+    
+    Returns:
+        清理结果
+    """
+    import shutil
+    from datetime import datetime, timedelta
+    
+    learnings_path = workspace_dir / ".learnings" / "LEARNINGS.md"
+    archive_dir = workspace_dir / ".learnings" / "archive"
+    
+    if not learnings_path.exists():
+        return {"status": "skipped", "reason": "LEARNINGS.md not found"}
+    
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    
+    content = learnings_path.read_text(encoding="utf-8")
+    
+    # Find all entries
+    pattern = r'## \[LRN-[^\]]+\][\s\S]*?(?=## \[LRN-|$)'
+    entries = re.findall(pattern, content)
+    
+    resolved_entries = []
+    active_entries = []
+    
+    cutoff_date = datetime.now() - timedelta(days=days_threshold)
+    
+    for entry in entries:
+        # Extract logged date
+        logged_match = re.search(r'\*\*Logged\*\*:\s*(\d{4}-\d{2}-\d{2})', entry)
+        logged_date = None
+        if logged_match:
+            try:
+                logged_date = datetime.strptime(logged_match.group(1), "%Y-%m-%d")
+            except ValueError:
+                logged_date = datetime.now()
+        
+        if '**Status**: resolved' in entry or '**Status**: promoted' in entry:
+            # Only archive if older than threshold
+            if logged_date and logged_date < cutoff_date:
+                resolved_entries.append(entry)
+            else:
+                # Keep recent resolved entries for reference
+                active_entries.append(entry)
+        else:
+            active_entries.append(entry)
+    
+    if not resolved_entries:
+        return {
+            "status": "no_change",
+            "active_entries": len(active_entries),
+            "resolved_entries": 0,
+        }
+    
+    # Write archive
+    archive_date = datetime.now().strftime('%Y-%m-%d')
+    archive_path = archive_dir / f"LEARNINGS-archive-{archive_date}.md"
+    
+    # If archive already exists for today, append
+    if archive_path.exists():
+        existing = archive_path.read_text(encoding="utf-8")
+        archive_content = existing + "\n\n---\n\n" + "\n".join(resolved_entries)
+    else:
+        archive_content = f"# LEARNINGS Archive - {archive_date}\n\n"
+        archive_content += f"Archived {len(resolved_entries)} resolved/promoted entries.\n\n"
+        archive_content += "---\n\n"
+        archive_content += "\n".join(resolved_entries)
+    
+    archive_path.write_text(archive_content, encoding="utf-8")
+    
+    # Write active entries back
+    new_content = "# 学习记录\n\n> 只保留活跃问题。已解决的记录归档到 archive/ 目录。\n\n---\n\n"
+    new_content += "\n".join(active_entries)
+    
+    learnings_path.write_text(new_content, encoding="utf-8")
+    
+    return {
+        "status": "cleaned",
+        "active_entries": len(active_entries),
+        "resolved_entries": len(resolved_entries),
+        "archive_path": str(archive_path),
+        "bytes_saved": len(content) - len(new_content),
+    }
+
+
+def cleanup_agents_auto_constraints(workspace_dir: Path) -> dict[str, Any]:
+    """
+    清理 AGENTS.md 中的 AUTO- 约束（已固化的）。
+    
+    Args:
+        workspace_dir: 工作区目录
+    
+    Returns:
+        清理结果
+    """
+    agents_path = workspace_dir / "AGENTS.md"
+    
+    if not agents_path.exists():
+        return {"status": "skipped", "reason": "AGENTS.md not found"}
+    
+    content = agents_path.read_text(encoding="utf-8")
+    
+    # Find AUTO- constraints
+    auto_pattern = r'\n### AUTO-[^\n]+[\s\S]*?(?=\n### |\n---\n\*最后更新|$)'
+    auto_matches = list(re.finditer(auto_pattern, content))
+    
+    # Find MC- constraints (morning meeting auto-generated)
+    mc_pattern = r'\n### MC-[^\n]+[\s\S]*?(?=\n### |\n---\n\*最后更新|$)'
+    mc_matches = list(re.finditer(mc_pattern, content))
+    
+    if not auto_matches and not mc_matches:
+        return {"status": "no_change", "auto_count": 0, "mc_count": 0}
+    
+    # Remove AUTO- and MC- constraints
+    new_content = content
+    for match in reversed(auto_matches + mc_matches):
+        new_content = new_content[:match.start()] + new_content[match.end():]
+    
+    agents_path.write_text(new_content, encoding="utf-8")
+    
+    return {
+        "status": "cleaned",
+        "auto_count": len(auto_matches),
+        "mc_count": len(mc_matches),
+        "bytes_saved": len(content) - len(new_content),
+    }
+
+
 def scan_system_health(base_dir: Path) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     guardian_err = base_dir / "logs" / "guardian.launchd.err.log"
@@ -457,7 +591,7 @@ def scan_system_health(base_dir: Path) -> list[dict[str, Any]]:
 
 
 # ============================================================================
-# 完整的进化周期
+# 完整的进化周期（证据驱动版）
 # ============================================================================
 
 def run_evolution_cycle(
@@ -469,12 +603,18 @@ def run_evolution_cycle(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """
-    运行一次完整的进化周期。
+    运行一次完整的进化周期（证据驱动，默认执行）。
+    
+    新协议：
+    1. 只输出证据，不输出意向
+    2. 默认直接执行，不再请示
+    3. 每条反思必须绑定真实动作句柄（文件/函数/任务 ID）
+    4. 只允许三种终态：fixed / blocked / queued
     
     流程：
     1. 扫描重复问题
     2. 生成候选规则
-    3. 采纳规则
+    3. 采纳规则（默认执行）
     4. 验证效果
     5. 更新状态
     
@@ -486,7 +626,7 @@ def run_evolution_cycle(
         dry_run: 是否只模拟运行
     
     Returns:
-        进化周期结果
+        进化周期结果（只包含已执行动作和验证结果）
     """
     now = int(time.time())
     
@@ -498,6 +638,7 @@ def run_evolution_cycle(
         "rules_adopted": 0,
         "rules_verified": 0,
         "details": [],
+        "evidence_only": True,  # 新协议：只输出证据
     }
     
     # 0. 扫描系统健康问题（guardian 崩溃 / 工具中断未回复）
@@ -628,6 +769,21 @@ def run_evolution_cycle(
     if not dry_run:
         store.save_runtime_value("auto_evolution_last_cycle_at", now)
     
+    # 6. 定期清理（每周一次）
+    last_cleanup = store.load_runtime_value("auto_evolution_last_cleanup_at") or 0
+    cleanup_interval = 7 * 24 * 3600  # 7 天
+    
+    if now - last_cleanup > cleanup_interval and workspace_dir and not dry_run:
+        # 清理 LEARNINGS.md
+        learnings_result = cleanup_learnings_archive(workspace_dir)
+        result["learnings_cleanup"] = learnings_result
+        
+        # 清理 AGENTS.md 中的 AUTO- 约束
+        agents_result = cleanup_agents_auto_constraints(workspace_dir)
+        result["agents_cleanup"] = agents_result
+        
+        store.save_runtime_value("auto_evolution_last_cleanup_at", now)
+    
     return result
 
 
@@ -655,7 +811,7 @@ if __name__ == "__main__":
     
     if args.report:
         # 生成报告
-        from self_evolution import generate_daily_evolution_report, render_learnings_markdown
+        from learning_recorder import generate_daily_evolution_report, render_learnings_markdown
         
         report = generate_daily_evolution_report(store)
         print(json.dumps(report, ensure_ascii=False, indent=2))

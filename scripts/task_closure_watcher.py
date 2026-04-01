@@ -7,8 +7,12 @@ import json
 import time
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "task-closure"
-FACTS_FILE = Path(__file__).parent.parent / "data" / "current-task-facts.json"
+BASE_DIR = Path(__file__).parent.parent
+DATA_DIR = BASE_DIR / "data" / "task-closure"
+FACTS_FILE = BASE_DIR / "data" / "current-task-facts.json"
+MONITOR_DIR = Path.home() / ".openclaw" / "shared-context" / "monitor-tasks"
+WATCHER_LOG = MONITOR_DIR / "watcher.log"
+AUDIT_LOG = MONITOR_DIR / "audit.log"
 
 
 def _load_facts() -> dict:
@@ -103,7 +107,14 @@ def check_current_task():
     }
 
 
+def _append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 def main():
+    started_at = int(time.time())
     print("=== 任务闭环看门狗 ===")
     print(f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -125,6 +136,41 @@ def main():
 
     if not current and not undelivered:
         print("\n[正常] 所有任务都已送达")
+
+    record = {
+        "ts": started_at,
+        "iso_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at)),
+        "current": current,
+        "undelivered_count": len(undelivered),
+        "undelivered_preview": undelivered[:5],
+        "healthy": not current and not undelivered,
+    }
+    _append_jsonl(WATCHER_LOG, record)
+    if current or undelivered:
+        _append_jsonl(
+            AUDIT_LOG,
+            {
+                "ts": started_at,
+                "event": "task_closure_watcher_alert",
+                "current": current,
+                "undelivered_count": len(undelivered),
+            },
+        )
+
+    # 写一个简单的控制信号文件，供 guardian 下次同步时读取
+    control_signal = {
+        "ts": started_at,
+        "needs_delivery_retry": bool(current and current.get("reason") in {
+            "completed_not_delivered",
+            "visible_completion_without_delivery_confirmation",
+        }),
+        "needs_receipt_or_block": bool(current and current.get("reason") == "followup_pending_without_delivery"),
+        "task_id": (current or {}).get("task_id"),
+        "reason": (current or {}).get("reason"),
+    }
+    signal_file = MONITOR_DIR / "watcher-control-signal.json"
+    signal_file.parent.mkdir(parents=True, exist_ok=True)
+    signal_file.write_text(json.dumps(control_signal, ensure_ascii=False), encoding="utf-8")
 
     return 0
 

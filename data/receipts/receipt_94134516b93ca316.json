@@ -1,0 +1,18 @@
+{
+  "kind": "PIPELINE_RECEIPT",
+  "task_id": "94134516b93ca316",
+  "session_key": "agent:main:feishu:direct:ou_2b6d39ab847fff83c5427b16882a0d9f",
+  "timestamp": "2026-03-27T00:44:28.856259",
+  "status": "completed",
+  "summary": "系统架构稳定性修复：Qbot主链路统一、坏cron配置修复、守护进程恢复、主脑约束落地",
+  "changes": [
+    "jobs.json 已修复，9个Qbot任务统一飞书群",
+    "4个坏cron配置已改agentTurn+glm-5",
+    "Qbot旁路发送已砍",
+    "AGENTS.md 新增空承诺禁令/终态约束/结果优先格式",
+    "LEARNINGS.md 沉淀本次问题",
+    "守护进程依赖requests已确认可用"
+  ],
+  "blocked": false,
+  "next_action": null
+}

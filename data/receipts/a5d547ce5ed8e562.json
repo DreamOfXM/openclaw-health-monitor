@@ -1,0 +1,12 @@
+{
+  "event": "PIPELINE_RECEIPT",
+  "task_id": "a5d547ce5ed8e562",
+  "stage": "completed",
+  "agent": "main",
+  "timestamp": "2026-03-26T11:59:36.192404+08:00",
+  "summary": "/compact 命令已执行，会话历史已压缩",
+  "evidence": {
+    "action": "compact",
+    "result": "session_history_compacted"
+  }
+}

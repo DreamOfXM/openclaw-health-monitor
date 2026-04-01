@@ -1,0 +1,10 @@
+{
+  "kind": "PIPELINE_RECEIPT",
+  "task_id": "35cb3e032ffab064",
+  "session_key": "agent:main:feishu:direct:ou_2b6d39ab847fff83c5427b16882a0d9f",
+  "timestamp": "2026-03-27T00:50:32.736055",
+  "status": "completed",
+  "agent": "main",
+  "summary": "系统架构稳定性修复完成：守护进程恢复、Qbot统一、cron修复、约束落地",
+  "blocked": false
+}
