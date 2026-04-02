@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 
 BASE_DIR = Path(__file__).parent.parent
-WORKSPACE_DIR = BASE_DIR.parent / "workspace-xiaoyi"
+WORKSPACE_DIR = Path("/Users/hangzhou/.openclaw/workspace-xiaoyi")
 MEMORY_FILE = WORKSPACE_DIR / "MEMORY.md"
 LEARNINGS_FILE = WORKSPACE_DIR / ".learnings" / "LEARNINGS.md"
 MEMORY_DIR = WORKSPACE_DIR / "memory"
