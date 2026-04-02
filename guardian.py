@@ -7630,6 +7630,8 @@ def main():
             
             # Task Watcher：监控异步任务
             try:
+                import sys
+                sys.path.insert(0, str(BASE_DIR / "scripts"))
                 from task_watcher import TaskWatcher
                 watcher = TaskWatcher()
                 watcher_result = watcher.watch_tasks()
@@ -7650,6 +7652,8 @@ def main():
             
             # 每天运行一次自我进化验证（记录指标，追踪问题数量变化）
             try:
+                import sys
+                sys.path.insert(0, str(BASE_DIR / "scripts"))
                 from verify_self_evolution import run_verification, save_metrics, should_run_today, mark_run_today
                 if should_run_today():
                     metrics = run_verification()
