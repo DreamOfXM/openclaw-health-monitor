@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
 """
-Communication Guardrail - 通信护栏
+通信 Guardrail - 5 条硬性拦截规则
 
-功能：
-1. 5 条硬性拦截规则
-2. 在系统入口拦截错误路径
-3. 误用 message → reject
-4. 身份伪造 → reject
-5. ack_id 重发 → block
+在系统入口拦截错误路径：
+1. 必须有明确的 source 和 target
+2. 禁止身份伪造
+3. ack_id 重发检查
+4. 消息类型检查
+5. final 后禁止继续发送
 
-这是自我进化系统的核心组件：
-- 系统级约束
-- 不依赖 Agent 自觉遵守
-- 强制执行
-
-使用：
-    from comm_guardrail import CommGuardrail
-    
-    guardrail = CommGuardrail()
-    result = guardrail.check_message(message)
-    if result["action"] == "reject":
-        # 拒绝消息
-        pass
+这是自我进化系统的核心通信约束。
 """
 
 import json
@@ -93,7 +81,7 @@ class CommGuardrail:
         return True
     
     def check_message(self, message: dict[str, Any]) -> dict[str, Any]:
-        """检查消息是否符合规则"""
+        """检查消息是否符合 5 条规则"""
         result = {
             "action": "allow",
             "rule": None,
@@ -127,7 +115,7 @@ class CommGuardrail:
         if msg_type and msg_type not in valid_types:
             result["action"] = "reject"
             result["rule"] = "invalid_message_type"
-            result["reason"] = f"无效的消息类型: {msg_type}"
+            result["reason"] = f"无效的消息类型：{msg_type}"
             self._log_violation(result["rule"], message, result["action"])
             return result
         
@@ -176,7 +164,7 @@ def main():
     """主入口"""
     guardrail = CommGuardrail()
     stats = guardrail.get_stats()
-    print(json.dumps(stats, ensure_ascii=False))
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
