@@ -7688,15 +7688,6 @@ def main():
             except Exception as exc:
                 log(f"记忆管理失败: {exc}", "ERROR")
 
-            # Agent 自我进化循环（每小时）
-            try:
-                import sys
-                sys.path.insert(0, str(BASE_DIR / "scripts"))
-                from agent_evolution_cycle import run_evolution_cycle
-                run_evolution_cycle()
-            except Exception as exc:
-                log(f"Agent 自我进化循环失败：{exc}", "ERROR")
-
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:
                 last_check_time = now
