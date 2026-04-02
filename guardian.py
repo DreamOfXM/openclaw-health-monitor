@@ -7658,6 +7658,25 @@ def main():
                     log(f"自我进化验证: background_root_missing={metrics['background_root_missing']}, pending_actions={metrics['pending_actions']}, blocked_actions={metrics['blocked_actions']}")
             except Exception as exc:
                 log(f"自我进化验证失败: {exc}", "ERROR")
+            
+            # 定期检查机制（每小时）
+            try:
+                from periodic_check import run_daily_check
+                run_daily_check()
+            except Exception as exc:
+                log(f"定期检查失败: {exc}", "ERROR")
+            
+            # 记忆管理机制（每小时）
+            try:
+                from memory_management import check_memory_conflicts, suggest_memory_cleanup
+                conflicts = check_memory_conflicts()
+                if conflicts:
+                    log(f"发现记忆冲突: {len(conflicts)} 个")
+                suggestions = suggest_memory_cleanup()
+                if suggestions:
+                    log(f"记忆清理建议: {len(suggestions)} 个")
+            except Exception as exc:
+                log(f"记忆管理失败: {exc}", "ERROR")
 
             # 自动更新检查（每小时）
             if now - last_check_time > 3600:
