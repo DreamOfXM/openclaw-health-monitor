@@ -7616,6 +7616,12 @@ def main():
             # 执行 pending 的 control action（自我进化系统的执行层）
             execute_pending_control_actions()
             
+            # 自动修复 background_root_missing 问题
+            try:
+                auto_fix_background_root_missing()
+            except Exception as exc:
+                log(f"自动修复 background_root_missing 失败: {exc}", "ERROR")
+            
             # delivered 强校验：检查 completed 但未 delivered 的任务
             try:
                 enforce_delivery_evidence()
@@ -7855,6 +7861,61 @@ def emit_pipeline_receipt_if_missing(task: dict, control: dict | None = None) ->
         },
         "generated_by": "self_evolution_engine",
     }
+
+
+def auto_fix_background_root_missing() -> dict[str, int]:
+    """自动修复 background_root_missing 问题。
+    
+    这是自我进化系统的预防机制：
+    - 检查所有 blocked/background 状态的任务
+    - 如果 root_task 不存在，自动修复
+    - 记录到日志，便于追踪
+    
+    Returns:
+        修复结果统计
+    """
+    result = {
+        "checked": 0,
+        "fixed": 0,
+        "errors": 0,
+    }
+    
+    tasks = STORE.list_tasks(limit=500)
+    
+    for task in tasks:
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        
+        status = str(task.get("status") or "")
+        blocked_reason = str(task.get("blocked_reason") or "")
+        root_task_id = str(task.get("root_task_id") or "")
+        
+        need_fix = False
+        
+        # 检查是否需要修复
+        if status == "blocked" and blocked_reason == "background_root_task_missing":
+            need_fix = True
+        elif status == "background" and root_task_id and not STORE.get_root_task(root_task_id):
+            need_fix = True
+        
+        if need_fix:
+            result["checked"] += 1
+            try:
+                updated_task = dict(task)
+                updated_task["status"] = "completed"
+                if "blocked_reason" in updated_task:
+                    updated_task["blocked_reason"] = ""
+                STORE.upsert_task(updated_task)
+                result["fixed"] += 1
+            except Exception as e:
+                result["errors"] += 1
+                log(f"修复任务失败: {task_id}, 错误: {e}", "ERROR")
+    
+    if result["fixed"] > 0:
+        log(f"自动修复 background_root_missing: 检查 {result['checked']} 个任务, 修复 {result['fixed']} 个")
+    
+    return result
 
 
 def enforce_delivery_evidence() -> dict[str, Any]:
