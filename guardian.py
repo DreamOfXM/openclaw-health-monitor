@@ -7622,6 +7622,26 @@ def main():
             except Exception as exc:
                 log(f"delivered 强校验失败: {exc}", "ERROR")
             
+            # Task Watcher：监控异步任务
+            try:
+                from task_watcher import TaskWatcher
+                watcher = TaskWatcher()
+                watcher_result = watcher.watch_tasks()
+                if watcher_result["checked"] > 0:
+                    log(f"Task Watcher: 检查 {watcher_result['checked']} 个任务, 完成 {watcher_result['completed']}, 超时 {watcher_result['timeout']}")
+            except Exception as exc:
+                log(f"Task Watcher 失败: {exc}", "ERROR")
+            
+            # Completion Bus：消费待投递的完成结果
+            try:
+                from completion_bus import CompletionBus
+                bus = CompletionBus()
+                bus_result = bus.consume_deliveries()
+                if bus_result["processed"] > 0:
+                    log(f"Completion Bus: 处理 {bus_result['processed']} 个投递, 成功 {bus_result['delivered']}, 失败 {bus_result['failed']}, DLQ {bus_result['dlq']}")
+            except Exception as exc:
+                log(f"Completion Bus 失败: {exc}", "ERROR")
+            
             # 每天运行一次自我进化验证（记录指标，追踪问题数量变化）
             try:
                 from verify_self_evolution import run_verification, save_metrics, should_run_today, mark_run_today
