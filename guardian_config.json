@@ -4,5 +4,6 @@
     "resend",
     "rebind",
     "notify_main"
-  ]
+  ],
+  "GUARDIAN_FOLLOWUP_MODEL": "gpt/gpt-5.4"
 }

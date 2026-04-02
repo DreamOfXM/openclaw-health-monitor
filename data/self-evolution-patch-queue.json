@@ -646,5 +646,46 @@
     "created_at": "2026-04-01T11:54:02.561423",
     "source_problem": "blocked:background_root_task_missing",
     "root_cause": "binding_repair"
+  },
+  {
+    "patch_id": "patch-1775054272-promote_stalled_received_only",
+    "action": "promote_stalled_received_only",
+    "description": "提升长期 received_only 任务为明确阻塞并补 action",
+    "code_changes": [
+      "guardian.py: 对长期 received_only 自动升级为 blocked_unverified",
+      "state_store.py: 为 stalled received_only 补建 control action"
+    ],
+    "verification_criteria": "检查长期 received_only 任务是否仍缺少阻塞或 action",
+    "status": "pending",
+    "created_at": "2026-04-01T22:37:52.867736",
+    "source_problem": "suspended:received_only",
+    "root_cause": "received_only_stall"
+  },
+  {
+    "patch_id": "patch-1775054272-auto_resolve_blocks",
+    "action": "auto_resolve_blocks",
+    "description": "自动处理阻塞任务",
+    "code_changes": [
+      "guardian.py: 增加 blocked 任务自动恢复逻辑"
+    ],
+    "verification_criteria": "检查 blocked 任务是否有恢复动作",
+    "status": "pending",
+    "created_at": "2026-04-01T22:37:52.869003",
+    "source_problem": "blocked:unverified",
+    "root_cause": "blocked"
+  },
+  {
+    "patch_id": "patch-1775054272-enforce_receipt_protocol",
+    "action": "enforce_receipt_protocol",
+    "description": "强制执行回执协议",
+    "code_changes": [
+      "guardian.py: 增加 receipt_check_by_watcher 触发",
+      "state_store.py: 增加 create_control_action 方法"
+    ],
+    "verification_criteria": "检查 received_only 任务是否都有 action",
+    "status": "pending",
+    "created_at": "2026-04-01T22:37:52.869300",
+    "source_problem": "blocked:missing_pipeline_receipt",
+    "root_cause": "receipt_missing"
   }
 ]

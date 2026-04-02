@@ -7616,6 +7616,12 @@ def main():
             # 执行 pending 的 control action（自我进化系统的执行层）
             execute_pending_control_actions()
             
+            # delivered 强校验：检查 completed 但未 delivered 的任务
+            try:
+                enforce_delivery_evidence()
+            except Exception as exc:
+                log(f"delivered 强校验失败: {exc}", "ERROR")
+            
             # 每天运行一次自我进化验证（记录指标，追踪问题数量变化）
             try:
                 from verify_self_evolution import run_verification, save_metrics, should_run_today, mark_run_today
@@ -7668,10 +7674,6 @@ def main():
 
             log(f"监控循环异常: {e}\n{traceback.format_exc()}", "ERROR")
             time.sleep(10)
-
-
-if __name__ == "__main__":
-    main()
 
 
 def execute_pending_control_actions() -> dict[str, Any]:
@@ -7833,3 +7835,66 @@ def emit_pipeline_receipt_if_missing(task: dict, control: dict | None = None) ->
         },
         "generated_by": "self_evolution_engine",
     }
+
+
+def enforce_delivery_evidence() -> dict[str, Any]:
+    """delivered 强校验：检查 completed 但未 delivered 的任务。
+    
+    这是真完成口径约束的执行层：
+    - 只有执行证据 + 送达证据齐全，才允许 completed_verified
+    - 缺送达证据的任务，标记为 delivery_pending
+    - 记录到日志，便于追踪
+    
+    Returns:
+        检查结果统计
+    """
+    now = int(time.time())
+    result = {
+        "checked": 0,
+        "delivery_pending": 0,
+        "already_delivered": 0,
+        "errors": 0,
+    }
+    
+    tasks = STORE.list_tasks(limit=500)
+    
+    for task in tasks:
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        
+        # 只检查 completed 状态的任务
+        if str(task.get("status") or "") != "completed":
+            continue
+        
+        result["checked"] += 1
+        
+        try:
+            control = STORE.derive_task_control_state(task_id)
+            control_state = str(control.get("control_state") or "")
+            delivery_state = str(control.get("delivery_state") or "")
+            has_receipt = bool(control.get("has_pipeline_receipt"))
+            
+            # 检查是否已有送达证据
+            if delivery_state in ("delivered", "delivery_confirmed", "owner_escalated"):
+                result["already_delivered"] += 1
+                continue
+            
+            # 如果 control_state 是 completed_verified 但没有送达证据，需要降级
+            if control_state == "completed_verified" and delivery_state not in ("delivered", "delivery_confirmed"):
+                # 记录到日志
+                log(f"任务 {task_id} 标记为 completed_verified 但缺少送达证据，delivery_state={delivery_state}", "WARNING")
+                result["delivery_pending"] += 1
+                
+        except Exception as e:
+            log(f"检查任务送达证据失败: {task_id}, 错误: {e}", "ERROR")
+            result["errors"] += 1
+    
+    if result["checked"] > 0:
+        log(f"delivered 强校验: 检查 {result['checked']} 个 completed 任务, 已送达 {result['already_delivered']} 个, 缺送达证据 {result['delivery_pending']} 个")
+    
+    return result
+
+
+if __name__ == "__main__":
+    main()

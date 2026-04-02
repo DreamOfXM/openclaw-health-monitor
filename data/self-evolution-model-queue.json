@@ -2975,5 +2975,177 @@
       "decider": "external_model_decider",
       "decided_at": "2026-04-01T11:56:25.078004"
     }
+  },
+  {
+    "request_id": "diag-1775054225-suspended-received_only",
+    "created_at": "2026-04-01T22:37:05.915053",
+    "problem": {
+      "pattern": "suspended:received_only",
+      "count": 219,
+      "severity": "high",
+      "task_ids": [
+        "44b8b1824ba7b9d9",
+        "3596d039527846a3",
+        "809c2ce7e848862c",
+        "a373f4df744a121a",
+        "d90c5211c1faf371"
+      ]
+    },
+    "root_cause": {
+      "category": "received_only_stall",
+      "root_cause": "received_only_stall",
+      "description": "任务长期停留在 received_only，缺少进一步动作",
+      "affected_component": "control_plane"
+    },
+    "proposed_fix": {
+      "action": "promote_stalled_received_only",
+      "description": "提升长期 received_only 任务为明确阻塞并补 action",
+      "code_changes": [
+        "guardian.py: 对长期 received_only 自动升级为 blocked_unverified",
+        "state_store.py: 为 stalled received_only 补建 control action"
+      ],
+      "verification": "检查长期 received_only 任务是否仍缺少阻塞或 action"
+    },
+    "risk": {
+      "risk": "medium",
+      "execution_mode": "model_review",
+      "reasons": [
+        "核心绑定/控制面修复需要模型复核"
+      ]
+    },
+    "questions": [
+      "这个问题更可能是协议缺陷、代码缺陷、流程缺陷还是任务误分类？",
+      "应该改代码、改协议、改提示词还是改控制面策略？",
+      "低风险可自动执行动作是什么？",
+      "高风险部分需要什么人工确认？"
+    ],
+    "status": "decided",
+    "decision": {
+      "decision": "approve_with_review",
+      "rationale": [
+        "允许执行默认修复，但必须追踪是否复发。"
+      ],
+      "apply_action": "promote_stalled_received_only",
+      "requires_human": false,
+      "recommended_changes": [
+        "guardian.py: 对长期 received_only 自动升级为 blocked_unverified",
+        "state_store.py: 为 stalled received_only 补建 control action"
+      ],
+      "next_step": "execute_fix_and_track"
+    }
+  },
+  {
+    "request_id": "diag-1775054225-blocked-unverified",
+    "created_at": "2026-04-01T22:37:05.915059",
+    "problem": {
+      "pattern": "blocked:unverified",
+      "count": 186,
+      "severity": "high",
+      "task_ids": [
+        "05bfe3a94d8f62ae",
+        "c28ad8964dd0440e",
+        "7792f307595902b6",
+        "58103bede2862088",
+        "254efacb5511dd2f"
+      ]
+    },
+    "root_cause": {
+      "category": "blocked",
+      "root_cause": "unresolved_block",
+      "description": "任务被阻塞但未处理",
+      "affected_component": "control_plane"
+    },
+    "proposed_fix": {
+      "action": "auto_resolve_blocks",
+      "description": "自动处理阻塞任务",
+      "code_changes": [
+        "guardian.py: 增加 blocked 任务自动恢复逻辑"
+      ],
+      "verification": "检查 blocked 任务是否有恢复动作"
+    },
+    "risk": {
+      "risk": "medium",
+      "execution_mode": "model_review",
+      "reasons": [
+        "高频阻塞可能涉及误判，需要模型复核"
+      ]
+    },
+    "questions": [
+      "这个问题更可能是协议缺陷、代码缺陷、流程缺陷还是任务误分类？",
+      "应该改代码、改协议、改提示词还是改控制面策略？",
+      "低风险可自动执行动作是什么？",
+      "高风险部分需要什么人工确认？"
+    ],
+    "status": "decided",
+    "decision": {
+      "decision": "approve_with_review",
+      "rationale": [
+        "允许执行默认修复，但必须追踪是否复发。"
+      ],
+      "apply_action": "auto_resolve_blocks",
+      "requires_human": false,
+      "recommended_changes": [
+        "guardian.py: 增加 blocked 任务自动恢复逻辑"
+      ],
+      "next_step": "execute_fix_and_track"
+    }
+  },
+  {
+    "request_id": "diag-1775054225-blocked-missing_pipeline_receipt",
+    "created_at": "2026-04-01T22:37:05.915061",
+    "problem": {
+      "pattern": "blocked:missing_pipeline_receipt",
+      "count": 29,
+      "severity": "high",
+      "task_ids": [
+        "ddf17e4972755e6a",
+        "a98fb078270753e8",
+        "d7da13539b6077e5",
+        "62ee92dad740f28d",
+        "c28ad8964dd0440e"
+      ]
+    },
+    "root_cause": {
+      "category": "receipt_missing",
+      "root_cause": "no_pipeline_receipt",
+      "description": "任务缺少结构化回执",
+      "affected_component": "receipt_protocol"
+    },
+    "proposed_fix": {
+      "action": "enforce_receipt_protocol",
+      "description": "强制执行回执协议",
+      "code_changes": [
+        "guardian.py: 增加 receipt_check_by_watcher 触发",
+        "state_store.py: 增加 create_control_action 方法"
+      ],
+      "verification": "检查 received_only 任务是否都有 action"
+    },
+    "risk": {
+      "risk": "medium",
+      "execution_mode": "auto_with_model_summary",
+      "reasons": [
+        "协议/投递类修复影响面较大，需要模型总结"
+      ]
+    },
+    "questions": [
+      "这个问题更可能是协议缺陷、代码缺陷、流程缺陷还是任务误分类？",
+      "应该改代码、改协议、改提示词还是改控制面策略？",
+      "低风险可自动执行动作是什么？",
+      "高风险部分需要什么人工确认？"
+    ],
+    "status": "decided",
+    "decision": {
+      "decision": "approve_auto_fix_with_summary",
+      "rationale": [
+        "协议/投递类问题允许自动修复，同时保留模型摘要。"
+      ],
+      "apply_action": "enforce_receipt_protocol",
+      "requires_human": false,
+      "recommended_changes": [
+        "guardian.py: 增加 receipt_check_by_watcher 触发",
+        "state_store.py: 增加 create_control_action 方法"
+      ],
+      "next_step": "execute_fix_and_emit_summary"
+    }
   }
 ]

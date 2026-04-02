@@ -1,7 +1,5 @@
 {
-  "ts": "2026-04-01T11:54:42.538714",
-  "status": "ok",
-  "remote": "origin",
-  "base": "main",
-  "results": []
+  "ts": "2026-04-01T22:38:00.275728",
+  "status": "disabled",
+  "env": "OPENCLAW_SELF_EVOLUTION_AUTO_PUSH_PR"
 }

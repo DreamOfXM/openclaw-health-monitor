@@ -4019,10 +4019,10 @@ class MonitorStateStore:
             pass
         elif contract.get("id") == "quant_guarded":
             if not missing_receipts and flags["dispatch_completed"]:
-                control_state = "completed_verified"
-                approved_summary = "量化/精算任务已收到完整结构化回执。"
-                next_action = "none"
-                next_actor = ""
+                control_state = "execution_verified"
+                approved_summary = "量化/精算任务已收到完整结构化回执，但当前还缺送达证据。"
+                next_action = "await_delivery_confirmation"
+                next_actor = "guardian"
             elif flags["calculator_blocked"] or flags["verifier_blocked"] or flags["risk_blocked"]:
                 control_state = "analysis_blocked"
                 approved_summary = "精算/复核链路已阻塞。"
@@ -4045,10 +4045,10 @@ class MonitorStateStore:
                 next_actor = "verifier"
         elif contract.get("id") in {"delivery_pipeline", "a_share_delivery_pipeline"}:
             if not missing_receipts and flags["dispatch_completed"]:
-                control_state = "completed_verified"
-                approved_summary = "产品、开发、测试链路都已收到结构化回执。"
-                next_action = "none"
-                next_actor = ""
+                control_state = "execution_verified"
+                approved_summary = "产品、开发、测试链路都已收到结构化回执，但当前还缺送达证据。"
+                next_action = "await_delivery_confirmation"
+                next_actor = "main"
             elif not missing_receipts:
                 control_state = "test_running"
                 approved_summary = "测试回执已完成，但主链路交付完成态尚未确认。"
@@ -4095,10 +4095,10 @@ class MonitorStateStore:
                 next_action = "await_test_receipt"
                 next_actor = "test"
         elif flags["test_completed"]:
-            control_state = "completed_verified"
-            approved_summary = "测试回执已完成，任务具备强证据完成状态。"
-            next_action = "none"
-            next_actor = ""
+            control_state = "execution_verified"
+            approved_summary = "测试回执已完成，任务具备强执行证据，但当前还缺送达证据。"
+            next_action = "await_delivery_confirmation"
+            next_actor = "guardian"
         elif flags["test_blocked"]:
             control_state = "test_blocked"
             approved_summary = "测试阶段已阻塞。"
@@ -4131,10 +4131,10 @@ class MonitorStateStore:
             next_actor = "guardian"
         elif flags["dispatch_started"] and flags["dispatch_completed"]:
             if str(contract.get("id") or "single_agent") == "single_agent":
-                control_state = "completed_verified"
-                approved_summary = "single-agent 任务已形成并发出结论性回复。"
-                next_action = "none"
-                next_actor = ""
+                control_state = "execution_verified"
+                approved_summary = "single-agent 任务已形成结论性回复，但当前还缺送达证据。"
+                next_action = "await_delivery_confirmation"
+                next_actor = "guardian"
             else:
                 control_state = "received_only"
                 approved_summary = "任务已接收并执行过，但没有结构化流水线证据。"
@@ -4143,10 +4143,10 @@ class MonitorStateStore:
 
         if task.get("status") == "completed" and evidence_level == "weak":
             if str(contract.get("id") or "single_agent") == "single_agent":
-                control_state = "completed_verified"
-                approved_summary = "single-agent 任务状态已完成，按主脑终态回复视为闭环。"
-                next_action = "none"
-                next_actor = ""
+                control_state = "delivery_pending"
+                approved_summary = "single-agent 任务状态显示已完成，但缺少可验证执行证据与送达证据。"
+                next_action = "await_delivery_confirmation"
+                next_actor = "guardian"
             else:
                 approved_summary = "任务状态显示已完成，但缺少可验证结构化证据。"
                 next_action = "require_receipt_or_block"
@@ -4282,8 +4282,8 @@ class MonitorStateStore:
                     approved_summary = core_supervision.get("followup_summary") or approved_summary
                     next_action = "manual_or_session_recovery" if core_supervision.get("is_blocked") else next_action
             elif core_supervision.get("is_delivery_pending"):
-                control_state = "completed_verified"
-                approved_summary = core_supervision.get("followup_summary") or "最终结论已形成，当前等待送达确认。"
+                control_state = "delivery_pending"
+                approved_summary = core_supervision.get("followup_summary") or "最终结论已形成，但当前仍在等待送达确认。"
                 next_action = "await_delivery_confirmation"
                 next_actor = next_actor or "main"
             elif core_supervision.get("needs_followup"):
@@ -4300,6 +4300,24 @@ class MonitorStateStore:
             next_action = "manual_or_session_recovery"
             next_actor = next_actor or "guardian"
             approved_summary = "守护系统尝试接回任务，但控制追问失败，任务已判定为阻塞。"
+
+        delivery_state_for_guard = normalize_delivery_state(
+            (core_supervision.get("delivery_state") if isinstance(core_supervision, dict) else "")
+            or (v2_truth.get("delivery_state") if isinstance(v2_truth, dict) else "")
+            or "undelivered"
+        )
+        has_execution_evidence = evidence_level in {"strong", "moderate"} or bool(flags["dispatch_completed"])
+        has_delivery_evidence = delivery_state_for_guard in TERMINAL_DELIVERY_STATES
+        if control_state == "completed_verified" and not (has_execution_evidence and has_delivery_evidence):
+            control_state = "delivery_pending" if has_execution_evidence else "received_only"
+            if has_execution_evidence:
+                approved_summary = "任务已有执行证据，但送达证据不足，已降级为 delivery_pending。"
+                next_action = "await_delivery_confirmation"
+                next_actor = next_actor or "guardian"
+            else:
+                approved_summary = "任务缺少执行证据与送达证据，禁止标记 completed_verified。"
+                next_action = "require_receipt_or_block"
+                next_actor = "guardian"
         return {
             "evidence_level": evidence_level,
             "evidence_summary": evidence_summary,
