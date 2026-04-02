@@ -7642,6 +7642,8 @@ def main():
             
             # Completion Bus：消费待投递的完成结果
             try:
+                import sys
+                sys.path.insert(0, str(BASE_DIR / "scripts"))
                 from completion_bus import CompletionBus
                 bus = CompletionBus()
                 bus_result = bus.consume_deliveries()
@@ -7665,6 +7667,8 @@ def main():
             
             # 定期检查机制（每小时）
             try:
+                import sys
+                sys.path.insert(0, str(BASE_DIR / "scripts"))
                 from periodic_check import run_daily_check
                 run_daily_check()
             except Exception as exc:
@@ -7672,6 +7676,8 @@ def main():
             
             # 记忆管理机制（每小时）
             try:
+                import sys
+                sys.path.insert(0, str(BASE_DIR / "scripts"))
                 from memory_management import check_memory_conflicts, suggest_memory_cleanup
                 conflicts = check_memory_conflicts()
                 if conflicts:
