@@ -72,7 +72,7 @@ def check_system_status() -> dict[str, Any]:
 
 def check_memory() -> dict[str, Any]:
     """检查记忆"""
-    memory_dir = BASE_DIR.parent / "workspace-xiaoyi" / "memory"
+    memory_dir = Path("/Users/hangzhou/.openclaw/workspace-xiaoyi/memory")
     
     stats = {
         "memory_files": 0,
@@ -95,7 +95,7 @@ def check_memory() -> dict[str, Any]:
 
 def check_rules() -> dict[str, Any]:
     """检查规则"""
-    agents_file = BASE_DIR.parent / "workspace-xiaoyi" / "AGENTS.md"
+    agents_file = Path("/Users/hangzhou/.openclaw/workspace-xiaoyi/AGENTS.md")
     
     stats = {
         "rules_count": 0,
