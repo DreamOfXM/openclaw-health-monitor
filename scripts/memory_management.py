@@ -78,7 +78,9 @@ def check_memory_conflicts() -> list[dict[str, Any]]:
                 })
             
             # 检查是否有矛盾的系统位置
-            if "Qbot-lab" in content and "Qbot" in content and "Qbot-lab" not in content.replace("Qbot-lab", ""):
+            # 只有当 "Qbot" 单独出现（不是 "Qbot-lab" 的一部分）时才算冲突
+            qbot_standalone = content.replace("Qbot-lab", "").count("Qbot")
+            if "Qbot-lab" in content and qbot_standalone > 0:
                 conflicts.append({
                     "type": "系统位置矛盾",
                     "description": "发现 Qbot 和 Qbot-lab 两个不同的系统位置",
