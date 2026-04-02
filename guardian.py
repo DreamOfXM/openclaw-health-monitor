@@ -7917,6 +7917,9 @@ def auto_fix_background_root_missing() -> dict[str, int]:
             need_fix = True
         elif status == "background" and root_task_id and not STORE.get_root_task(root_task_id):
             need_fix = True
+        elif status == "blocked":
+            # 也修复普通的 blocked 任务
+            need_fix = True
         
         if need_fix:
             result["checked"] += 1
