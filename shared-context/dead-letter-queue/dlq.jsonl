@@ -1,0 +1,2 @@
+{"request_id": "test-001", "reason": "投递失败", "original_message": {"message": "测试消息"}, "attempts": 3, "created_at": 1775106214, "iso_time": "2026-04-02T13:03:34.001165", "status": "retry", "retry_at": 1775106214}
+{"request_id": "test-002", "reason": "超时", "original_message": {"message": "测试消息2"}, "attempts": 5, "created_at": 1775106214, "iso_time": "2026-04-02T13:03:34.001332", "status": "resolved", "resolved_at": 1775106214}

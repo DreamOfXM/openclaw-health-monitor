@@ -1,0 +1,5 @@
+{"request_id": "test-request-001", "from_state": "accepted", "to_state": "accepted", "actor": "main", "reason": "测试请求", "timestamp": 1775106170, "iso_time": "2026-04-02T13:02:50.693648", "metadata": {}}
+{"request_id": "test-request-001", "from_state": "accepted", "to_state": "confirmed", "actor": "builder", "reason": "确认接受", "timestamp": 1775106170, "iso_time": "2026-04-02T13:02:50.694096", "metadata": {}}
+{"request_id": "test-request-001", "from_state": "confirmed", "to_state": "in_progress", "actor": "builder", "reason": "开始执行", "timestamp": 1775106170, "iso_time": "2026-04-02T13:02:50.694273", "metadata": {}}
+{"request_id": "test-request-001", "from_state": "in_progress", "to_state": "completed", "actor": "builder", "reason": "执行完成", "timestamp": 1775106170, "iso_time": "2026-04-02T13:02:50.694468", "metadata": {}}
+{"request_id": "test-request-001", "from_state": "completed", "to_state": "delivered", "actor": "main", "reason": "已送达", "timestamp": 1775106170, "iso_time": "2026-04-02T13:02:50.694838", "metadata": {}}
