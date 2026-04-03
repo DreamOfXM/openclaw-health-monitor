@@ -1552,6 +1552,70 @@ class MonitorStateStore:
             }
         )
 
+    def _sync_watcher_from_core_event(self, event: dict[str, Any], *, created_at: int) -> None:
+        root_task_id = str(event.get("root_task_id") or "")
+        if not root_task_id:
+            return
+        root = self.get_root_task(root_task_id)
+        if not root:
+            return
+        metadata = dict(root.get("metadata") or {})
+        legacy_task_id = str(metadata.get("legacy_task_id") or "")
+        if not legacy_task_id:
+            return
+        watcher_task_id = self._legacy_watcher_task_id(legacy_task_id)
+        watcher = self.get_watcher_task(watcher_task_id)
+        if not watcher:
+            self.sync_legacy_task_watcher_projection(
+                legacy_task_id,
+                root_task_id=root_task_id,
+                workflow_run_id=str(event.get("workflow_run_id") or self._legacy_workflow_run_id(legacy_task_id)),
+            )
+            watcher = self.get_watcher_task(watcher_task_id)
+        if not watcher:
+            return
+        event_type = str(event.get("event_type") or "")
+        next_state = str(watcher.get("current_state") or "checking")
+        completed_at = int(watcher.get("completed_at") or 0)
+        delivered_at = int(watcher.get("delivered_at") or 0)
+        if event_type in {"receipt_adopted_completed", "workflow_completed"}:
+            next_state = "completed"
+            completed_at = max(completed_at, created_at)
+        elif event_type == "finalizer_finalized":
+            next_state = "completed"
+            completed_at = max(completed_at, created_at)
+        elif event_type == "delivery_confirmed":
+            next_state = "delivered"
+            completed_at = max(completed_at, created_at)
+            delivered_at = max(delivered_at, created_at)
+        else:
+            return
+        payload = dict(watcher.get("payload") or {})
+        payload.update(
+            {
+                "root_task_id": root_task_id,
+                "workflow_run_id": str(event.get("workflow_run_id") or payload.get("workflow_run_id") or ""),
+                "last_core_event_type": event_type,
+                "last_core_event_ts": created_at,
+            }
+        )
+        self.upsert_watcher_task(
+            {
+                "watcher_task_id": watcher_task_id,
+                "env_id": str(watcher.get("env_id") or "primary"),
+                "source_agent": str(watcher.get("source_agent") or "main"),
+                "target_agent": str(watcher.get("target_agent") or "main"),
+                "intent": str(watcher.get("intent") or "legacy_task_closure"),
+                "current_state": next_state,
+                "completed_at": completed_at,
+                "delivered_at": delivered_at,
+                "last_checked_at": created_at,
+                "error_count": int(watcher.get("error_count") or 0),
+                "in_dlq": bool(watcher.get("in_dlq")),
+                "payload": payload,
+            }
+        )
+
     def record_core_event(self, event: dict[str, Any]) -> bool:
         now = int(time.time())
         event_type = str(event.get("event_type") or "")
@@ -1562,6 +1626,7 @@ class MonitorStateStore:
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         event_id = str(event["event_id"])
         idempotency_key = str(event.get("idempotency_key") or "")
+        event_ts = int(event.get("event_ts") or now)
         with self._connection() as conn:
             cursor = conn.execute(
                 """
@@ -1579,14 +1644,20 @@ class MonitorStateStore:
                     str(event.get("delivery_attempt_id") or ""),
                     str(event.get("followup_id") or ""),
                     event_type,
-                    int(event.get("event_ts") or now),
+                    event_ts,
                     int(event.get("event_seq") or 0),
                     idempotency_key,
                     payload_json,
                     now,
                 ),
             )
-        return bool(getattr(cursor, "rowcount", 0))
+        inserted = bool(getattr(cursor, "rowcount", 0))
+        if inserted:
+            try:
+                self._sync_watcher_from_core_event(event, created_at=event_ts)
+            except Exception:
+                pass
+        return inserted
 
     def list_core_events(
         self,
@@ -2146,6 +2217,11 @@ class MonitorStateStore:
         current_finalizer = finalizers[0] if finalizers else None
         current_delivery_attempt = deliveries[0] if deliveries else None
         msg_state = normalize_msg_state((workflow or {}).get("current_state") or "open")
+        # 如果任务状态是 completed，但 workflow 状态不是，使用任务状态
+        # 这样可以确保 completed 任务被正确识别
+        task = self.get_task(task_id)
+        if task and task.get("status") == "completed" and msg_state != "completed":
+            msg_state = "completed"
         delivery_state = normalize_delivery_state(
             (current_delivery_attempt or {}).get("current_state")
             or (current_delivery_attempt or {}).get("delivery_state")
@@ -2617,6 +2693,68 @@ class MonitorStateStore:
     def _legacy_followup_id(task_id: str, source: str, suffix: str) -> str:
         return f"legacy-followup:{task_id}:{source}:{suffix}"
 
+    @staticmethod
+    def _legacy_watcher_task_id(task_id: str) -> str:
+        return f"legacy-watcher:{task_id}"
+
+    @staticmethod
+    def _legacy_watcher_state(task: dict[str, Any]) -> str:
+        status = str(task.get("status") or "")
+        if status == "completed":
+            return "completed"
+        if status == "blocked":
+            return "blocked"
+        if status == "background":
+            return "checking"
+        if status == "no_reply":
+            return "completed"
+        return "checking"
+
+    def sync_legacy_task_watcher_projection(
+        self,
+        task_id: str,
+        *,
+        root_task_id: str | None = None,
+        workflow_run_id: str | None = None,
+    ) -> None:
+        task = self.get_task(task_id)
+        if not task:
+            return
+        watcher_task_id = self._legacy_watcher_task_id(task_id)
+        root_id = root_task_id or self._legacy_root_task_id(task_id)
+        workflow_id = workflow_run_id or self._legacy_workflow_run_id(task_id)
+        completed_at = int(task.get("completed_at") or 0)
+        payload = {
+            "source": "legacy_task_registry",
+            "legacy_task_id": task_id,
+            "root_task_id": root_id,
+            "workflow_run_id": workflow_id,
+            "session_key": str(task.get("session_key") or ""),
+            "channel": str(task.get("channel") or ""),
+            "question": str(task.get("question") or task.get("last_user_message") or ""),
+            "current_stage": str(task.get("current_stage") or ""),
+            "blocked_reason": str(task.get("blocked_reason") or ""),
+            "status": str(task.get("status") or ""),
+            "created_at": int(task.get("created_at") or 0),
+            "updated_at": int(task.get("updated_at") or 0),
+        }
+        self.upsert_watcher_task(
+            {
+                "watcher_task_id": watcher_task_id,
+                "env_id": str(task.get("env_id") or "primary"),
+                "source_agent": "main",
+                "target_agent": str(task.get("session_key") or "") or "main",
+                "intent": "legacy_task_closure",
+                "current_state": self._legacy_watcher_state(task),
+                "completed_at": completed_at,
+                "delivered_at": 0,
+                "last_checked_at": int(task.get("updated_at") or 0),
+                "error_count": 1 if str(task.get("status") or "") == "blocked" else 0,
+                "in_dlq": False,
+                "payload": payload,
+            }
+        )
+
     def purge_legacy_task_projection(self, task_id: str) -> None:
         root_task_id = self._legacy_root_task_id(task_id)
         workflow_run_id = self._legacy_workflow_run_id(task_id)
@@ -2698,6 +2836,11 @@ class MonitorStateStore:
             "metadata": {"source": "legacy_task_registry", "legacy_task_id": task_id},
         }
         self.upsert_root_task(root_task)
+        self.sync_legacy_task_watcher_projection(
+            task_id,
+            root_task_id=root_task_id,
+            workflow_run_id=workflow_run_id,
+        )
         self.upsert_workflow_run(
             {
                 "workflow_run_id": workflow_run_id,
@@ -3704,7 +3847,8 @@ class MonitorStateStore:
         contract_view.setdefault("mode", "observation_template")
         root_task = dict(core_snapshot.get("root_task") or {})
         native_root_task_id = str(root_task.get("root_task_id") or "")
-        if native_root_task_id and not native_root_task_id.startswith("legacy-root:"):
+        # 支持 legacy 任务：不再排除 legacy-root: 前缀
+        if native_root_task_id:
             workflow = dict(core_snapshot.get("current_workflow_run") or {})
             finalizer = dict(core_snapshot.get("current_finalizer") or {})
             delivery_attempt = dict(core_snapshot.get("current_delivery_attempt") or {})
@@ -4646,8 +4790,11 @@ class MonitorStateStore:
             except sqlite3.IntegrityError:
                 return False
         inserted = bool(getattr(cursor, "rowcount", 0))
-        if inserted and self.get_task(task_id):
+        task = self.get_task(task_id) if inserted else None
+        if inserted and task:
             try:
+                if event_type == "dispatch_started":
+                    self.sync_legacy_task_watcher_projection(task_id)
                 snapshot = self.get_core_closure_snapshot_for_task(task_id, allow_legacy_projection=False)
                 root_task_id = str((snapshot.get("root_task") or {}).get("root_task_id") or "")
                 if not root_task_id or root_task_id.startswith("legacy-root:"):
@@ -5170,6 +5317,14 @@ class MonitorStateStore:
         with self._connection() as conn:
             rows = conn.execute(query, params).fetchall()
         return [task for row in rows if (task := self._row_to_watcher_task(row))]
+
+    def get_watcher_task(self, watcher_task_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM watcher_tasks WHERE watcher_task_id = ?",
+                (watcher_task_id,),
+            ).fetchone()
+        return self._row_to_watcher_task(row) if row else None
 
     def summarize_watcher_tasks(self, *, env_id: str | None = None) -> dict[str, Any]:
         tasks = self.list_watcher_tasks(env_id=env_id, limit=500)

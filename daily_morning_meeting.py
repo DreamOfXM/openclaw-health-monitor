@@ -102,27 +102,23 @@ class MorningMeeting:
             'points': wealth_points,
         })
 
-        a_share_data = self._load_a_share_data() or {}
-        risk_state = str(a_share_data.get('risk_state', 'unknown'))
-        trade_count = int(self._to_float(a_share_data.get('trade_count', 0)))
-        daily_pnl = a_share_data.get('daily_pnl', {}) if isinstance(a_share_data, dict) else {}
-        equity = self._to_float(daily_pnl.get('equity', 0)) if isinstance(daily_pnl, dict) else 0.0
-        drawdown = self._to_float(daily_pnl.get('daily_drawdown', 0)) if isinstance(daily_pnl, dict) else 0.0
-        a_share_points = [
-            f'今日成交 {trade_count} 笔，风险状态 {risk_state}',
-            f'总资产 {equity:.1f} 元，日内回撤 {drawdown * 100:.2f}%',
-        ]
+        domain_points: list[str] = []
+        running_projects = [p for p in (projects_data.get('projects', []) if isinstance(projects_data, dict) else []) if p.get('status') == 'running']
+        for proj in running_projects[:3]:
+            domain_points.append(
+                f"项目域 {proj.get('name', '未知项目')}（{proj.get('type', 'unknown')}）：下一步 {str(proj.get('next_action', '待补'))[:50]}"
+            )
         signals = data.get('signals', {})
-        signal_status = str(signals.get('status', 'unknown'))
-        if signal_status == 'no_signals':
-            a_share_points.append('今日量化信号尚未生成，需先补齐信号再讨论调仓')
-        else:
-            a_share_points.append(f'信号状态：{signal_status}')
+        missing_domains = list(signals.get('missing_domains', []) or [])
+        if missing_domains:
+            domain_points.append(f"缺少结构化输入的任务域：{', '.join(missing_domains[:5])}")
+        if not domain_points:
+            domain_points.append('当前没有需要单独升级为晨会主议题的任务域')
         sections.append({
-            'title': 'A股讨论',
-            'agent_mode': '该议题要求讨论利好、利空、策略是否调整；需要时直接调整而不是只提建议',
-            'summary': '讨论利好因素、不利因素、策略调整与执行动作。',
-            'points': a_share_points,
+            'title': '任务域讨论',
+            'agent_mode': '按当前运行中的项目域讨论，不允许默认把单一项目写成系统主线',
+            'summary': '根据运行中的项目域，讨论其下一步、阻塞与是否需要资源倾斜。',
+            'points': domain_points,
         })
 
         return sections
@@ -255,13 +251,13 @@ class MorningMeeting:
             for k, v in sorted(problems.items(), key=lambda x: -x[1]["count"])
         ]
         
-        # A股信号
-        signals = self._get_a_share_signals()
+        # 任务域输入（默认不绑定单一项目）
+        domain_inputs = self._get_domain_inputs()
         
         return {
             "tasks": tasks_data,
             "problems": problems_list,
-            "signals": signals,
+            "signals": domain_inputs,
         }
     
     def _analyze_root_causes(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -296,12 +292,13 @@ class MorningMeeting:
                     "evidence": f"出现 {p['count']} 次",
                 })
         
-        # 分析信号
-        if data["signals"].get("status") == "no_signals":
+        # 分析任务域输入
+        missing_domains = list((data.get("signals") or {}).get("missing_domains") or [])
+        if missing_domains:
             analysis["signal_issues"].append({
-                "issue": "今日信号未生成",
-                "root_cause": "Qbot 日报可能没有运行",
-                "evidence": "信号文件不存在",
+                "issue": "部分任务域输入缺失",
+                "root_cause": "通用上下文输入未按约定产出或缺少更新",
+                "evidence": f"缺失任务域: {', '.join(missing_domains[:5])}",
             })
         
         return analysis
@@ -343,14 +340,15 @@ class MorningMeeting:
                     "execute": lambda pc=p["problem_code"]: self._fix_problem(pc),
                 })
         
-        # 行动3：生成A股日报
-        if data["signals"].get("status") == "no_signals":
+        # 行动3：补齐任务域输入
+        missing_domains = list((data.get("signals") or {}).get("missing_domains") or [])
+        if missing_domains:
             actions.append({
-                "action": "生成A股日报",
+                "action": "补齐缺失的任务域输入",
                 "type": "generate_report",
                 "priority": "high",
-                "details": "运行 Qbot 日报生成今日信号",
-                "execute": lambda: self._generate_qbot_report(),
+                "details": f"缺失任务域: {', '.join(missing_domains[:5])}",
+                "execute": lambda: self._refresh_domain_inputs(missing_domains),
             })
         
         # 行动4：更新约束规则
@@ -561,30 +559,23 @@ class MorningMeeting:
         monthly_target = self._to_float(summary.get("monthly_target", 0))
         monthly_achieved = self._to_float(summary.get("monthly_achieved", 0))
         gap = self._to_float(summary.get("gap_to_target", monthly_target - monthly_achieved))
-        conclusions.append(f"💰 致富主线：本月目标 {monthly_target:.1f} 元，当前 {monthly_achieved:.1f} 元，差距 {gap:.1f} 元")
+        conclusions.append(f"💰 资源主线：本月目标 {monthly_target:.1f} 元，当前 {monthly_achieved:.1f} 元，差距 {gap:.1f} 元")
 
-        a_share_data = self._load_a_share_data() or {}
-        trade_count = int(self._to_float(a_share_data.get("trade_count", 0)))
-        risk_state = str(a_share_data.get("risk_state", "unknown"))
-        conclusions.append(f"📈 A股主线：今日成交 {trade_count} 笔，当前风控状态 {risk_state}")
-
-        positions = a_share_data.get("positions", []) if isinstance(a_share_data, dict) else []
-        for pos in positions[:3]:
-            symbol = pos.get("symbol", "")
-            pnl = self._to_float(pos.get("unrealized_pnl", 0))
-            conclusions.append(f"   - {symbol}：浮盈 {pnl:+.1f} 元")
-
-        daily_pnl = a_share_data.get("daily_pnl", {}) if isinstance(a_share_data, dict) else {}
-        if isinstance(daily_pnl, dict) and daily_pnl:
-            equity = self._to_float(daily_pnl.get("equity", 0))
-            drawdown = self._to_float(daily_pnl.get("daily_drawdown", 0))
-            conclusions.append(f"   - 总资产 {equity:.1f} 元，回撤 {drawdown * 100:.2f}%")
+        running_projects = [p for p in (projects_data.get("projects", []) if isinstance(projects_data, dict) else []) if p.get("status") == "running"]
+        if running_projects:
+            top_project = running_projects[0]
+            conclusions.append(
+                f"📦 当前主项目域：{top_project.get('name', '未知项目')}（{top_project.get('type', 'unknown')}），下一步 {top_project.get('next_action', '待补')}"
+            )
+        missing_domains = list((data.get("signals") or {}).get("missing_domains") or [])
+        if missing_domains:
+            conclusions.append(f"🧩 当前缺失输入的任务域：{', '.join(missing_domains[:5])}")
 
         conclusions.append("🤝 工作方式：以上三大议题都必须让相关子 agent 参与讨论，不允许变成我的独角戏")
         return conclusions
 
     def _load_projects_data(self) -> dict[str, Any] | None:
-        """加载赚钱项目追踪数据"""
+        """加载项目追踪数据"""
         projects_path = self.workspace_dir / "projects.json"
         if not projects_path.exists():
             return None
@@ -592,6 +583,50 @@ class MorningMeeting:
             return json.loads(projects_path.read_text(encoding="utf-8"))
         except Exception:
             return None
+
+    def _get_domain_inputs(self) -> dict[str, Any]:
+        """检查通用任务域输入，不默认绑定单一项目。"""
+        intel_dir = self.workspace_dir / "shared-context" / "intel"
+        expected = {"daily-check", "system-focus"}
+        present = set()
+        if intel_dir.exists():
+            for path in intel_dir.glob("*.json"):
+                present.add(path.stem)
+        missing = sorted(expected - present)
+        return {
+            "status": "ready" if not missing else "partial",
+            "missing_domains": missing,
+            "present_domains": sorted(present),
+        }
+
+    def _refresh_domain_inputs(self, missing_domains: list[str]) -> bool:
+        """补齐最基础的通用任务域输入骨架。"""
+        intel_dir = self.workspace_dir / "shared-context" / "intel"
+        intel_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now().isoformat()
+        changed = False
+        templates = {
+            "daily-check": {
+                "updated_at": now,
+                "source": "main",
+                "summary": "待补今日主脑检查结果",
+                "consumers": ["all"],
+            },
+            "system-focus": {
+                "updated_at": now,
+                "source": "main",
+                "summary": "待补当前系统主线与优先级",
+                "consumers": ["all"],
+            },
+        }
+        for domain in missing_domains:
+            if domain not in templates:
+                continue
+            path = intel_dir / f"{domain}.json"
+            if not path.exists():
+                path.write_text(json.dumps(templates[domain], ensure_ascii=False, indent=2), encoding="utf-8")
+                changed = True
+        return changed
     
     def _load_a_share_data(self) -> dict[str, Any] | None:
         """加载 A 股交易数据"""

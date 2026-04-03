@@ -2,157 +2,6 @@
   "default_contract": "single_agent",
   "contracts": [
     {
-      "id": "a_share_delivery_pipeline",
-      "protocol_version": "hm.v1",
-      "description": "A-share closed-loop sampling / strategy delivery work. Must not claim dev/test progress without real downstream receipts.",
-      "keywords": [
-        "a股",
-        "A股",
-        "沪深",
-        "闭环采样",
-        "采样策略",
-        "股票策略",
-        "选股",
-        "交易日",
-        "涨停",
-        "跌停",
-        "盘口",
-        "k线",
-        "择时"
-      ],
-      "required_receipts": [
-        "pm:started",
-        "pm:completed",
-        "dev:started",
-        "dev:completed",
-        "test:started",
-        "test:completed"
-      ],
-      "terminal_receipts": [
-        "test:completed",
-        "dev:blocked",
-        "test:blocked"
-      ],
-      "duration_profiles": {
-        "short": {
-          "first_ack_sla": 30,
-          "heartbeat_interval": 45,
-          "hard_timeout": 180,
-          "soft_followup": 30,
-          "hard_followup": 75,
-          "auto_blocked_unverified": 180,
-          "blocked_user_visible": true
-        },
-        "medium": {
-          "first_ack_sla": 60,
-          "heartbeat_interval": 120,
-          "hard_timeout": 900,
-          "soft_followup": 60,
-          "hard_followup": 180,
-          "auto_blocked_unverified": 900,
-          "blocked_user_visible": true
-        },
-        "long": {
-          "first_ack_sla": 120,
-          "heartbeat_interval": 300,
-          "hard_timeout": 2700,
-          "soft_followup": 120,
-          "hard_followup": 420,
-          "auto_blocked_unverified": 2700,
-          "blocked_user_visible": true
-        }
-      },
-      "phase_policies": {
-        "planning": "short",
-        "implementation": "long",
-        "testing": "medium",
-        "calculation": "short",
-        "verification": "short",
-        "risk_assessment": "short"
-      },
-      "user_progress_rules": {
-        "planning_only": "A股闭环方案已完成，但开发尚未启动。",
-        "dev_running": "A股闭环实现已启动，当前存在真实开发回执。",
-        "awaiting_test": "A股闭环开发已完成，但测试尚未启动。",
-        "test_running": "A股闭环测试已启动，等待最终测试回执。",
-        "blocked_unverified": "A股闭环任务缺少结构化流水线回执，守护系统已判定为阻塞。"
-      }
-    },
-    {
-      "id": "quant_guarded",
-      "protocol_version": "hm.v1",
-      "description": "Quant, financial, pricing, risk, and backtest work that should be backed by calculator and verifier receipts.",
-      "keywords": [
-        "量化",
-        "回测",
-        "收益率",
-        "年化",
-        "夏普",
-        "回撤",
-        "仓位",
-        "持仓",
-        "市值",
-        "估值",
-        "资金",
-        "盈亏",
-        "风控",
-        "因子",
-        "交易策略",
-        "净值",
-        "收益",
-        "比例",
-        "股票行情"
-      ],
-      "required_receipts": [
-        "calculator:started",
-        "calculator:completed",
-        "verifier:completed"
-      ],
-      "terminal_receipts": [
-        "verifier:completed",
-        "calculator:blocked",
-        "verifier:blocked",
-        "risk:blocked"
-      ],
-      "duration_profiles": {
-        "short": {
-          "first_ack_sla": 30,
-          "heartbeat_interval": 45,
-          "hard_timeout": 180,
-          "soft_followup": 30,
-          "hard_followup": 75,
-          "auto_blocked_unverified": 180,
-          "blocked_user_visible": true
-        },
-        "medium": {
-          "first_ack_sla": 60,
-          "heartbeat_interval": 120,
-          "hard_timeout": 900,
-          "soft_followup": 60,
-          "hard_followup": 180,
-          "auto_blocked_unverified": 900,
-          "blocked_user_visible": true
-        },
-        "long": {
-          "first_ack_sla": 120,
-          "heartbeat_interval": 300,
-          "hard_timeout": 2700,
-          "soft_followup": 120,
-          "hard_followup": 420,
-          "auto_blocked_unverified": 2700,
-          "blocked_user_visible": true
-        }
-      },
-      "phase_policies": {
-        "planning": "short",
-        "implementation": "long",
-        "testing": "medium",
-        "calculation": "short",
-        "verification": "short",
-        "risk_assessment": "short"
-      }
-    },
-    {
       "id": "delivery_pipeline",
       "protocol_version": "hm.v1",
       "description": "Product and implementation work that should continue through pm -> dev -> test.",
@@ -237,5 +86,160 @@
         "main:blocked"
       ]
     }
-  ]
+  ],
+  "domain_contracts": {
+    "trading": [
+      {
+        "id": "a_share_delivery_pipeline",
+        "protocol_version": "hm.v1",
+        "description": "A-share closed-loop sampling / strategy delivery work. Must not claim dev/test progress without real downstream receipts.",
+        "keywords": [
+          "a股",
+          "A股",
+          "沪深",
+          "闭环采样",
+          "采样策略",
+          "股票策略",
+          "选股",
+          "交易日",
+          "涨停",
+          "跌停",
+          "盘口",
+          "k线",
+          "择时"
+        ],
+        "required_receipts": [
+          "pm:started",
+          "pm:completed",
+          "dev:started",
+          "dev:completed",
+          "test:started",
+          "test:completed"
+        ],
+        "terminal_receipts": [
+          "test:completed",
+          "dev:blocked",
+          "test:blocked"
+        ],
+        "duration_profiles": {
+          "short": {
+            "first_ack_sla": 30,
+            "heartbeat_interval": 45,
+            "hard_timeout": 180,
+            "soft_followup": 30,
+            "hard_followup": 75,
+            "auto_blocked_unverified": 180,
+            "blocked_user_visible": true
+          },
+          "medium": {
+            "first_ack_sla": 60,
+            "heartbeat_interval": 120,
+            "hard_timeout": 900,
+            "soft_followup": 60,
+            "hard_followup": 180,
+            "auto_blocked_unverified": 900,
+            "blocked_user_visible": true
+          },
+          "long": {
+            "first_ack_sla": 120,
+            "heartbeat_interval": 300,
+            "hard_timeout": 2700,
+            "soft_followup": 120,
+            "hard_followup": 420,
+            "auto_blocked_unverified": 2700,
+            "blocked_user_visible": true
+          }
+        },
+        "phase_policies": {
+          "planning": "short",
+          "implementation": "long",
+          "testing": "medium",
+          "calculation": "short",
+          "verification": "short",
+          "risk_assessment": "short"
+        },
+        "user_progress_rules": {
+          "planning_only": "A股闭环方案已完成，但开发尚未启动。",
+          "dev_running": "A股闭环实现已启动，当前存在真实开发回执。",
+          "awaiting_test": "A股闭环开发已完成，但测试尚未启动。",
+          "test_running": "A股闭环测试已启动，等待最终测试回执。",
+          "blocked_unverified": "A股闭环任务缺少结构化流水线回执，守护系统已判定为阻塞。"
+        }
+      },
+      {
+        "id": "quant_guarded",
+        "protocol_version": "hm.v1",
+        "description": "Quant, financial, pricing, risk, and backtest work that should be backed by calculator and verifier receipts.",
+        "keywords": [
+          "量化",
+          "回测",
+          "收益率",
+          "年化",
+          "夏普",
+          "回撤",
+          "仓位",
+          "持仓",
+          "市值",
+          "估值",
+          "资金",
+          "盈亏",
+          "风控",
+          "因子",
+          "交易策略",
+          "净值",
+          "收益",
+          "比例",
+          "股票行情"
+        ],
+        "required_receipts": [
+          "calculator:started",
+          "calculator:completed",
+          "verifier:completed"
+        ],
+        "terminal_receipts": [
+          "verifier:completed",
+          "calculator:blocked",
+          "verifier:blocked",
+          "risk:blocked"
+        ],
+        "duration_profiles": {
+          "short": {
+            "first_ack_sla": 30,
+            "heartbeat_interval": 45,
+            "hard_timeout": 180,
+            "soft_followup": 30,
+            "hard_followup": 75,
+            "auto_blocked_unverified": 180,
+            "blocked_user_visible": true
+          },
+          "medium": {
+            "first_ack_sla": 60,
+            "heartbeat_interval": 120,
+            "hard_timeout": 900,
+            "soft_followup": 60,
+            "hard_followup": 180,
+            "auto_blocked_unverified": 900,
+            "blocked_user_visible": true
+          },
+          "long": {
+            "first_ack_sla": 120,
+            "heartbeat_interval": 300,
+            "hard_timeout": 2700,
+            "soft_followup": 120,
+            "hard_followup": 420,
+            "auto_blocked_unverified": 2700,
+            "blocked_user_visible": true
+          }
+        },
+        "phase_policies": {
+          "planning": "short",
+          "implementation": "long",
+          "testing": "medium",
+          "calculation": "short",
+          "verification": "short",
+          "risk_assessment": "short"
+        }
+      }
+    ]
+  }
 }

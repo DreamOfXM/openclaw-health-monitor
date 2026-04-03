@@ -55,78 +55,6 @@ DEFAULT_TASK_CONTRACTS = {
     "default_contract": "single_agent",
     "contracts": [
         {
-            "id": "a_share_delivery_pipeline",
-            "protocol_version": "hm.v1",
-            "description": "A-share closed-loop sampling / strategy delivery work. Must not claim dev/test progress without real downstream receipts.",
-            "keywords": [
-                "a股",
-                "A股",
-                "沪深",
-                "闭环采样",
-                "采样策略",
-                "股票策略",
-                "选股",
-                "交易日",
-                "涨停",
-                "跌停",
-                "盘口",
-                "k线",
-                "择时",
-            ],
-            "required_receipts": [
-                "pm:started",
-                "pm:completed",
-                "dev:started",
-                "dev:completed",
-                "test:started",
-                "test:completed",
-            ],
-            "terminal_receipts": ["test:completed", "dev:blocked", "test:blocked"],
-            "duration_profiles": DEFAULT_DURATION_PROFILES,
-            "phase_policies": DEFAULT_PHASE_POLICIES,
-            "user_progress_rules": {
-                "planning_only": "A股闭环方案已完成，但开发尚未启动。",
-                "dev_running": "A股闭环实现已启动，当前存在真实开发回执。",
-                "awaiting_test": "A股闭环开发已完成，但测试尚未启动。",
-                "test_running": "A股闭环测试已启动，等待最终测试回执。",
-                "blocked_unverified": "A股闭环任务缺少结构化流水线回执，守护系统已判定为阻塞。"
-            }
-        },
-        {
-            "id": "quant_guarded",
-            "protocol_version": "hm.v1",
-            "description": "Quant / financial / numerical work that should be backed by calculator and verifier receipts.",
-            "keywords": [
-                "量化",
-                "回测",
-                "收益率",
-                "年化",
-                "夏普",
-                "回撤",
-                "仓位",
-                "持仓",
-                "市值",
-                "估值",
-                "资金",
-                "盈亏",
-                "风控",
-                "因子",
-                "交易策略",
-                "净值",
-                "收益",
-                "比例",
-                "股票行情",
-            ],
-            "required_receipts": [
-                "calculator:started",
-                "calculator:completed",
-                "verifier:completed",
-            ],
-            "terminal_receipts": ["verifier:completed", "calculator:blocked", "verifier:blocked", "risk:blocked"],
-            "duration_profiles": DEFAULT_DURATION_PROFILES,
-            "phase_policies": DEFAULT_PHASE_POLICIES,
-        },
-        {
             "id": "delivery_pipeline",
             "protocol_version": "hm.v1",
             "description": "Product / implementation work that should continue through pm -> dev -> test.",
@@ -170,6 +98,82 @@ DEFAULT_TASK_CONTRACTS = {
             "terminal_receipts": ["main:completed", "main:blocked"],
         },
     ],
+    "domain_contracts": {
+        "trading": [
+            {
+                "id": "a_share_delivery_pipeline",
+                "protocol_version": "hm.v1",
+                "description": "A-share closed-loop sampling / strategy delivery work. Must not claim dev/test progress without real downstream receipts.",
+                "keywords": [
+                    "a股",
+                    "A股",
+                    "沪深",
+                    "闭环采样",
+                    "采样策略",
+                    "股票策略",
+                    "选股",
+                    "交易日",
+                    "涨停",
+                    "跌停",
+                    "盘口",
+                    "k线",
+                    "择时",
+                ],
+                "required_receipts": [
+                    "pm:started",
+                    "pm:completed",
+                    "dev:started",
+                    "dev:completed",
+                    "test:started",
+                    "test:completed",
+                ],
+                "terminal_receipts": ["test:completed", "dev:blocked", "test:blocked"],
+                "duration_profiles": DEFAULT_DURATION_PROFILES,
+                "phase_policies": DEFAULT_PHASE_POLICIES,
+                "user_progress_rules": {
+                    "planning_only": "A股闭环方案已完成，但开发尚未启动。",
+                    "dev_running": "A股闭环实现已启动，当前存在真实开发回执。",
+                    "awaiting_test": "A股闭环开发已完成，但测试尚未启动。",
+                    "test_running": "A股闭环测试已启动，等待最终测试回执。",
+                    "blocked_unverified": "A股闭环任务缺少结构化流水线回执，守护系统已判定为阻塞。"
+                }
+            },
+            {
+                "id": "quant_guarded",
+                "protocol_version": "hm.v1",
+                "description": "Quant / financial / numerical work that should be backed by calculator and verifier receipts.",
+                "keywords": [
+                    "量化",
+                    "回测",
+                    "收益率",
+                    "年化",
+                    "夏普",
+                    "回撤",
+                    "仓位",
+                    "持仓",
+                    "市值",
+                    "估值",
+                    "资金",
+                    "盈亏",
+                    "风控",
+                    "因子",
+                    "交易策略",
+                    "净值",
+                    "收益",
+                    "比例",
+                    "股票行情",
+                ],
+                "required_receipts": [
+                    "calculator:started",
+                    "calculator:completed",
+                    "verifier:completed",
+                ],
+                "terminal_receipts": ["verifier:completed", "calculator:blocked", "verifier:blocked", "risk:blocked"],
+                "duration_profiles": DEFAULT_DURATION_PROFILES,
+                "phase_policies": DEFAULT_PHASE_POLICIES,
+            },
+        ],
+    },
 }
 
 
@@ -201,15 +205,23 @@ def load_task_contract_catalog(base_dir: Path, configured_path: str | None = Non
         return DEFAULT_TASK_CONTRACTS
 
 
+def all_contracts(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    items = list(catalog.get("contracts", []))
+    for contracts in (catalog.get("domain_contracts") or {}).values():
+        if isinstance(contracts, list):
+            items.extend(contracts)
+    return items
+
+
 def get_contract_by_id(
     catalog: dict[str, Any], contract_id: str | None
 ) -> dict[str, Any]:
     contract_key = contract_id or catalog.get("default_contract") or "single_agent"
-    for item in catalog.get("contracts", []):
+    for item in all_contracts(catalog):
         if item.get("id") == contract_key:
             return item
-    for item in DEFAULT_TASK_CONTRACTS["contracts"]:
-        if item["id"] == contract_key:
+    for item in all_contracts(DEFAULT_TASK_CONTRACTS):
+        if item.get("id") == contract_key:
             return item
     return DEFAULT_TASK_CONTRACTS["contracts"][-1]
 
@@ -228,7 +240,7 @@ def infer_task_contract(
 
     lowered = text.lower()
     best: tuple[int, int, dict[str, Any]] | None = None
-    for item in catalog.get("contracts", []):
+    for item in all_contracts(catalog):
         keywords = item.get("keywords") or []
         score = sum(1 for keyword in keywords if keyword and keyword.lower() in lowered)
         if score <= 0:

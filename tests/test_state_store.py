@@ -760,6 +760,123 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(len(finalizers), 0)
             self.assertEqual(binding["foreground_root_task_id"], "legacy-root:task-legacy")
 
+    def test_record_task_event_dispatch_started_registers_watcher_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-dispatch-watch",
+                    "session_key": "session-dispatch-watch",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "继续做实 task watcher",
+                    "last_user_message": "继续做实 task watcher",
+                    "started_at": 10,
+                    "created_at": 10,
+                    "updated_at": 25,
+                }
+            )
+
+            inserted = store.record_task_event(
+                "task-dispatch-watch",
+                "dispatch_started",
+                {"question": "继续做实 task watcher", "session_key": "session-dispatch-watch"},
+            )
+
+            self.assertTrue(inserted)
+            watcher = store.list_watcher_tasks(env_id="primary", limit=10)[0]
+            self.assertEqual(watcher["watcher_task_id"], "legacy-watcher:task-dispatch-watch")
+            self.assertEqual(watcher["intent"], "legacy_task_closure")
+            self.assertEqual(watcher["current_state"], "checking")
+            self.assertEqual(watcher["completed_at"], 0)
+            self.assertEqual(watcher["delivered_at"], 0)
+            self.assertEqual(watcher["payload"]["question"], "继续做实 task watcher")
+            self.assertEqual(watcher["payload"]["root_task_id"], "legacy-root:task-dispatch-watch")
+
+    def test_sync_legacy_task_projection_creates_watcher_task_for_active_and_completed_closure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-watcher",
+                    "session_key": "session-watcher",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "running",
+                    "current_stage": "处理中",
+                    "question": "继续做实 task watcher",
+                    "last_user_message": "继续做实 task watcher",
+                    "started_at": 10,
+                    "created_at": 10,
+                    "updated_at": 25,
+                }
+            )
+
+            store.sync_legacy_task_projection("task-watcher")
+
+            watcher = store.list_watcher_tasks(env_id="primary", limit=10)[0]
+            self.assertEqual(watcher["watcher_task_id"], "legacy-watcher:task-watcher")
+            self.assertEqual(watcher["intent"], "legacy_task_closure")
+            self.assertEqual(watcher["current_state"], "checking")
+            self.assertEqual(watcher["completed_at"], 0)
+            self.assertEqual(watcher["delivered_at"], 0)
+            self.assertEqual(watcher["payload"]["root_task_id"], "legacy-root:task-watcher")
+            self.assertEqual(watcher["payload"]["workflow_run_id"], "legacy-run:task-watcher")
+
+            store.update_task_fields("task-watcher", status="completed", completed_at=88, updated_at=90)
+            store.sync_legacy_task_projection("task-watcher")
+
+            updated = store.list_watcher_tasks(env_id="primary", limit=10)[0]
+            self.assertEqual(updated["current_state"], "completed")
+            self.assertEqual(updated["completed_at"], 88)
+            self.assertEqual(updated["delivered_at"], 0)
+
+    def test_record_core_event_delivery_confirmed_updates_legacy_watcher_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = MonitorStateStore(base)
+            store.upsert_task(
+                {
+                    "task_id": "task-delivery-watch",
+                    "session_key": "session-delivery-watch",
+                    "env_id": "primary",
+                    "channel": "feishu_dm",
+                    "status": "completed",
+                    "current_stage": "已完成",
+                    "question": "把 watcher 送达也做实",
+                    "last_user_message": "把 watcher 送达也做实",
+                    "started_at": 10,
+                    "created_at": 10,
+                    "updated_at": 20,
+                    "completed_at": 20,
+                }
+            )
+            store.sync_legacy_task_projection("task-delivery-watch")
+
+            store.record_core_event(
+                {
+                    "event_id": "ev-delivery-watch-1",
+                    "root_task_id": "legacy-root:task-delivery-watch",
+                    "workflow_run_id": "legacy-run:task-delivery-watch",
+                    "delivery_attempt_id": "da-delivery-watch-1",
+                    "event_type": "delivery_confirmed",
+                    "event_ts": 66,
+                    "event_seq": 1,
+                    "payload": {"reason": "channel_ack", "delivery_attempt_id": "da-delivery-watch-1"},
+                }
+            )
+
+            watcher = store.get_watcher_task("legacy-watcher:task-delivery-watch")
+            self.assertIsNotNone(watcher)
+            self.assertEqual(watcher["current_state"], "delivered")
+            self.assertEqual(watcher["completed_at"], 66)
+            self.assertEqual(watcher["delivered_at"], 66)
+            self.assertEqual(watcher["payload"]["last_core_event_type"], "delivery_confirmed")
+
     def test_sync_legacy_task_projection_bridges_open_control_actions_to_followups(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
